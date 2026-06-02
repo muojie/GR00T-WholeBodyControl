@@ -2015,7 +2015,16 @@ def run_pico_manager(
     #   Emergency stop from any mode: A+B+X+Y (start_combo) --> OFF
     #   POSE_PAUSE: left_menu_button held --> POSE_PAUSE, released --> POSE
     #
-    print("Manager controls: A+X=toggle mode, A+B+X+Y=start/stop policy")
+    print(
+        "Manager controls: A+B+X+Y=start/stop policy, "
+        "A+X=POSE<->PLANNER, B+Y=POSE<->PLANNER_FROZEN_UPPER_BODY, "
+        "Left Stick Click=enter/exit PLANNER_VR_3PT"
+    )
+    if no_body:
+        print(
+            "[Manager] no_body: use Left Stick Click from PLANNER to drive arms with "
+            "controller/headset VR 3-point targets. POSE is for body-tracking replay."
+        )
     current_mode = StreamMode.OFF
     # Track which mode VR_3PT was entered from, so left_axis_click returns to it.
     # Will be either PLANNER or PLANNER_FROZEN_UPPER_BODY.
