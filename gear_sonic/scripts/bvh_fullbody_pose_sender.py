@@ -439,6 +439,24 @@ def main() -> None:
         )
         return
 
+    estimated_speed, frame_start, frame_end, _ = _estimate_root_speed(
+        args.bvh,
+        args.axis_map,
+        args.start_frame,
+        args.end_frame,
+        args.stride,
+        args.speed_scale,
+        args.planner_speed,
+    )
+    if estimated_speed > 0.03:
+        print(
+            "WARNING: streamed mode does not command BVH root X/Y locomotion; "
+            f"this clip has estimated root speed {estimated_speed:.3f} m/s "
+            f"over frames [{frame_start}, {frame_end}). "
+            "Walking clips may look like the robot is being dragged. "
+            "Use --control-mode planner for locomotion."
+        )
+
     if args.input_npz:
         cached = np.load(args.input_npz)
         q_mujoco = cached["q_mujoco"].astype(np.float32)
