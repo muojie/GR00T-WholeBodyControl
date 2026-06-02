@@ -451,7 +451,7 @@ class G1RobotVisualizer:
             transform[:3, :3] = rotation
             transform[:3, 3] = position
 
-            mesh.transform(transform)
+            mesh.transform(transform, inplace=True)
 
             # Add to plotter
             actor = plotter.add_mesh(
