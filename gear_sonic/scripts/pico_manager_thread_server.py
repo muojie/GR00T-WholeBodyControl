@@ -382,7 +382,7 @@ def run_vr3pt_visualizer_test():
     visualizer.show_static()
 
 
-def run_vr3pt_live_visualizer():
+def run_vr3pt_live_visualizer(no_body: bool = False):
     """
     Live visualizer for real VR 3-point pose data from Pico.
     Captures one frame from Pico and displays it alongside reference frames.
@@ -402,19 +402,24 @@ def run_vr3pt_live_visualizer():
     # Initialize XRT
     subprocess.Popen(["bash", "/opt/apps/roboticsservice/runService.sh"])
     xrt.init()
-    print("Waiting for body tracking data...")
-    while not xrt.is_body_data_available():
-        print("waiting for body data...")
-        time.sleep(1)
+    if no_body:
+        print("No-body mode: capturing controller + headset 3-point pose...")
+        time.sleep(1.0)
+        vr_3pt_pose = _process_3pt_pose_from_controllers()
+    else:
+        print("Waiting for body tracking data...")
+        while not xrt.is_body_data_available():
+            print("waiting for body data...")
+            time.sleep(1)
 
-    print("Body data available! Capturing VR 3-point pose...")
+        print("Body data available! Capturing VR 3-point pose...")
 
-    # Capture body poses and compute vr_3pt_pose
-    body_poses = xrt.get_body_joints_pose()
-    body_poses_np = np.array(body_poses)
+        # Capture body poses and compute vr_3pt_pose
+        body_poses = xrt.get_body_joints_pose()
+        body_poses_np = np.array(body_poses)
 
-    # Process to get 3-point pose (L-Wrist, R-Wrist, Neck)
-    vr_3pt_pose = _process_3pt_pose(body_poses_np)
+        # Process to get 3-point pose (L-Wrist, R-Wrist, Neck)
+        vr_3pt_pose = _process_3pt_pose(body_poses_np)
 
     print(f"\nCaptured vr_3pt_pose shape: {vr_3pt_pose.shape}")
     print(f"  L-Wrist: pos={vr_3pt_pose[0, :3]}, quat_wxyz={vr_3pt_pose[0, 3:]}")
@@ -429,7 +434,7 @@ def run_vr3pt_live_visualizer():
     visualizer.show_with_vr_pose(vr_3pt_pose)
 
 
-def run_vr3pt_realtime_visualizer(update_hz: int = 10):
+def run_vr3pt_realtime_visualizer(update_hz: int = 10, no_body: bool = False):
     """
     Real-time visualizer for VR 3-point pose data from Pico.
     Continuously updates the visualization with live data.
@@ -452,12 +457,16 @@ def run_vr3pt_realtime_visualizer(update_hz: int = 10):
     # Initialize XRT
     subprocess.Popen(["bash", "/opt/apps/roboticsservice/runService.sh"])
     xrt.init()
-    print("Waiting for body tracking data...")
-    while not xrt.is_body_data_available():
-        print("waiting for body data...")
-        time.sleep(1)
+    if no_body:
+        print("No-body mode: using controller + headset 3-point pose.")
+        time.sleep(1.0)
+    else:
+        print("Waiting for body tracking data...")
+        while not xrt.is_body_data_available():
+            print("waiting for body data...")
+            time.sleep(1)
 
-    print("Body data available! Starting real-time visualization...")
+        print("Body data available! Starting real-time visualization...")
     print(f"Update rate: {update_hz} Hz")
     print("Close the window or press 'q' to exit.")
     print("=" * 60)
@@ -469,9 +478,12 @@ def run_vr3pt_realtime_visualizer(update_hz: int = 10):
     try:
         while visualizer.is_open:
             # Get new data from Pico
-            body_poses = xrt.get_body_joints_pose()
-            body_poses_np = np.array(body_poses)
-            vr_3pt_pose = _process_3pt_pose(body_poses_np)
+            if no_body:
+                vr_3pt_pose = _process_3pt_pose_from_controllers()
+            else:
+                body_poses = xrt.get_body_joints_pose()
+                body_poses_np = np.array(body_poses)
+                vr_3pt_pose = _process_3pt_pose(body_poses_np)
 
             # Update visualization
             visualizer.update_vr_poses(vr_3pt_pose)
@@ -2284,13 +2296,13 @@ if __name__ == "__main__":
 
     if args.vr3pt_live:
         print("Running VR 3-point pose live capture...")
-        run_vr3pt_live_visualizer()
+        run_vr3pt_live_visualizer(no_body=args.no_body)
         print("VR 3-point pose live visualizer completed")
         exit(0)
 
     if args.vr3pt_realtime:
         print("Running VR 3-point pose real-time visualizer...")
-        run_vr3pt_realtime_visualizer(update_hz=args.vr3pt_hz)
+        run_vr3pt_realtime_visualizer(update_hz=args.vr3pt_hz, no_body=args.no_body)
         print("VR 3-point pose real-time visualizer completed")
         exit(0)
 
