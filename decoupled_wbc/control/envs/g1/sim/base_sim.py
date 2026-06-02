@@ -56,6 +56,8 @@ class DefaultEnv:
 
         # Store display mode
         self.onscreen = onscreen
+        self.elastic_band = None
+        self.band_attached_link = None
 
         # Initialize scene (defined in subclasses)
         self.init_scene()
