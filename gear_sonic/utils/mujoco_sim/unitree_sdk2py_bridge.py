@@ -376,6 +376,7 @@ class ElasticBand:
         self.kp_ang = 1000
         self.kd_ang = 10
         self.point = np.array([0, 0, 1])
+        self.force_axis_mask = np.ones(3)
         self.length = 0
         self.enable = True
 
@@ -385,8 +386,9 @@ class ElasticBand:
         lin_vel = pose[7:10]
         ang_vel = pose[10:13]
 
-        δx = self.point - pos
-        f = self.kp_pos * (δx + np.array([0, 0, self.length])) + self.kd_pos * (0 - lin_vel)
+        δx = (self.point - pos) * self.force_axis_mask
+        length_offset = np.array([0, 0, self.length]) * self.force_axis_mask
+        f = self.kp_pos * (δx + length_offset) + self.kd_pos * (-lin_vel * self.force_axis_mask)
 
         # Convert quaternion from MuJoCo [w,x,y,z] to scipy [x,y,z,w]
         quat = np.array([quat[1], quat[2], quat[3], quat[0]])

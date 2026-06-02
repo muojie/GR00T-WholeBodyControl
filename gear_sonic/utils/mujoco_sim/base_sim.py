@@ -192,6 +192,8 @@ class DefaultEnv:
                     self.band_attached_link = self.mj_model.body("pelvis").id
                 else:
                     self.band_attached_link = self.mj_model.body("torso_link").id
+                self.elastic_band.point = self.mj_data.xpos[self.band_attached_link].copy()
+                self.elastic_band.force_axis_mask = np.array([0.0, 0.0, 1.0])
             elif "h1" in self.config["ROBOT_TYPE"]:
                 self.band_attached_link = self.mj_model.body("torso_link").id
             else:
@@ -257,6 +259,8 @@ class DefaultEnv:
             self.mj_data.qpos[self.body_joint_index + self.qpos_offset - 1] = default_q
         self.mj_data.qvel[:] = 0.0
         mujoco.mj_forward(self.mj_model, self.mj_data)
+        if self.elastic_band is not None and self.band_attached_link is not None:
+            self.elastic_band.point = self.mj_data.xpos[self.band_attached_link].copy()
 
     def init_renderers(self):
         self.renderers = {}
