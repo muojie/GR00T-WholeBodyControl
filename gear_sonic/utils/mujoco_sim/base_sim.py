@@ -62,6 +62,7 @@ class DefaultEnv:
         self.onscreen = onscreen
         self.elastic_band = None
         self.band_attached_link = None
+        self.waiting_for_first_cmd = True
 
         self.init_scene()
         self.last_reward = 0
@@ -248,6 +249,14 @@ class DefaultEnv:
         self.body_joint_index = np.array(self.body_joint_index)
         self.left_hand_index = np.array(self.left_hand_index)
         self.right_hand_index = np.array(self.right_hand_index)
+        self.apply_default_pose()
+
+    def apply_default_pose(self):
+        default_q = np.asarray(self.robot.DEFAULT_DOF_ANGLES, dtype=np.float64)
+        if default_q.shape[0] == self.body_joint_index.shape[0]:
+            self.mj_data.qpos[self.body_joint_index + self.qpos_offset - 1] = default_q
+        self.mj_data.qvel[:] = 0.0
+        mujoco.mj_forward(self.mj_model, self.mj_data)
 
     def init_renderers(self):
         self.renderers = {}
@@ -393,6 +402,11 @@ class DefaultEnv:
         self.unitree_bridge.PublishLowState(self.obs)
         if self.unitree_bridge.joystick:
             self.unitree_bridge.PublishWirelessController()
+        if not self.unitree_bridge.cmd_received():
+            if self.waiting_for_first_cmd:
+                print("Waiting for first lowcmd before stepping physics.")
+                self.waiting_for_first_cmd = False
+            return
         if self.elastic_band:
             if self.elastic_band.enable and self.use_floating_root_link:
                 pose = np.concatenate(
@@ -527,6 +541,8 @@ class DefaultEnv:
 
     def reset(self):
         mujoco.mj_resetData(self.mj_model, self.mj_data)
+        self.apply_default_pose()
+        self.waiting_for_first_cmd = True
 
 
 class BaseSimulator:
