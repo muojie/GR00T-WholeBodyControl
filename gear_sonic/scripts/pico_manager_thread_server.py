@@ -316,6 +316,44 @@ def _process_3pt_pose(smpl_pose_np):
     return kp_poses[1:]
 
 
+def _process_3pt_pose_from_controllers() -> np.ndarray:
+    """
+    Build 3-point VR pose (L-Wrist, R-Wrist, Neck) directly from controller + headset poses.
+    Used when --no_body is set and body tracking is not available.
+
+    Returns:
+        vr_3pt_pose: np.ndarray shape (3, 7) in robot frame (absolute, not pelvis-relative).
+                     Row 0: L-Wrist, Row 1: R-Wrist, Row 2: Neck (headset).
+                     Each [x, y, z, qw, qx, qy, qz], scalar-first quaternion.
+
+    Note: Positions are absolute robot-frame coords (not pelvis-relative as in SMPL mode).
+    ThreePointPose.apply_calibration() absorbs the static offset via its wrist offset terms.
+    Neck orientation uses headset pose; position is overwritten by the kinematic chain anyway.
+    """
+    identity_world = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]  # scalar-last identity quaternion
+    lctrl = np.array(xrt.get_left_controller_pose(), dtype=np.float32)
+    rctrl = np.array(xrt.get_right_controller_pose(), dtype=np.float32)
+    head = np.array(xrt.get_headset_pose(), dtype=np.float32)
+
+    lctrl_pos, lctrl_orn = _compute_rel_transform(lctrl.copy(), identity_world, scalar_first=False)
+    rctrl_pos, rctrl_orn = _compute_rel_transform(rctrl.copy(), identity_world, scalar_first=False)
+    head_pos, head_orn = _compute_rel_transform(head.copy(), identity_world, scalar_first=False)
+
+    # Apply same SMPL-style rotation offsets; calibration absorbs residual axis mismatch
+    lctrl_rot = (sRot.from_quat(lctrl_orn, scalar_first=True) * OFFSETS[1]).as_quat(scalar_first=True)
+    rctrl_rot = (sRot.from_quat(rctrl_orn, scalar_first=True) * OFFSETS[2]).as_quat(scalar_first=True)
+    head_rot = (sRot.from_quat(head_orn, scalar_first=True) * OFFSETS[3]).as_quat(scalar_first=True)
+
+    kp_poses = np.zeros((3, 7), dtype=np.float32)
+    kp_poses[0, :3] = lctrl_pos
+    kp_poses[0, 3:] = lctrl_rot
+    kp_poses[1, :3] = rctrl_pos
+    kp_poses[1, 3:] = rctrl_rot
+    kp_poses[2, :3] = np.zeros(3, dtype=np.float32)  # overwritten by kinematic chain
+    kp_poses[2, 3:] = head_rot
+    return kp_poses
+
+
 # =============================================================================
 # VR 3-Point Pose Visualization Functions
 # =============================================================================
@@ -742,10 +780,12 @@ def _interp_pose_axis_angle(
 class PicoReader:
     """
     Background reader that pulls Pico/XRT data as fast as possible and computes dt/FPS.
+    Set no_body=True to read controller + headset poses instead of body tracking joints.
     """
 
-    def __init__(self, max_queue_size: int = 15):
+    def __init__(self, max_queue_size: int = 15, no_body: bool = False):
         self._stop = threading.Event()
+        self._no_body = no_body
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._last_t = None
         self._fps_ema = 0.0
@@ -767,6 +807,37 @@ class PicoReader:
     def _run(self):
         last_report = time.time()
         while not self._stop.is_set():
+            if self._no_body:
+                # Controller-only mode: use wall clock timestamps, no body tracking required
+                stamp_ns = time.monotonic_ns()
+                prev_stamp_ns = self._last_stamp_ns
+                if prev_stamp_ns is not None and stamp_ns == prev_stamp_ns:
+                    time.sleep(0.000001)
+                    continue
+                device_dt = ((stamp_ns - prev_stamp_ns) * 1e-9) if prev_stamp_ns is not None else 0.0
+                if device_dt > 0.0:
+                    inst = 1.0 / device_dt
+                    self._fps_ema = inst if self._fps_ema == 0.0 else (0.9 * self._fps_ema + 0.1 * inst)
+                self._last_stamp_ns = stamp_ns
+                t_realtime = time.time()
+                t_monotonic = time.monotonic()
+                try:
+                    sample = {
+                        "body_poses_np": None,  # signals controller mode to downstream consumers
+                        "timestamp_realtime": t_realtime,
+                        "timestamp_monotonic": t_monotonic,
+                        "timestamp_ns": stamp_ns,
+                        "dt": device_dt,
+                        "fps": self._fps_ema,
+                    }
+                    with self._lock:
+                        self._latest = sample
+                    now = time.time()
+                except Exception as e:
+                    print(f"[PicoReader] controller read error: {e}")
+                time.sleep(0.01)  # ~100 Hz ceiling in controller mode
+                continue
+
             if not xrt.is_body_data_available():
                 time.sleep(0.001)
                 continue
@@ -820,6 +891,7 @@ def _pose_stream_common(
     with_g1_robot: bool = True,
     enable_waist_tracking: bool = False,
     enable_smpl_vis: bool = False,
+    no_body: bool = False,
 ):
     """Shared pose streaming loop used by run_pico."""
     if xrt is None:
@@ -828,7 +900,7 @@ def _pose_stream_common(
         )
 
     # Create reader and start it
-    reader = PicoReader(max_queue_size=buffer_size)
+    reader = PicoReader(max_queue_size=buffer_size, no_body=no_body)
     reader.start()
 
     # Create 3-point pose processor with visualization settings
@@ -1006,14 +1078,36 @@ class ThreePointPose:
             except Exception as e:
                 print(f"[{self.log_prefix}] Warning: Error closing VR3pt visualizer: {e}")
 
-    def calibrate_now(self, body_poses_np: np.ndarray) -> bool:
-        """Calibrate using current SMPL frame against FK of all-zero body joints.
+    def process_controller_pose(self) -> np.ndarray:
+        """
+        Process controller + headset poses to extract and calibrate 3-point VR pose.
+        Used when --no_body is active (no PICO body tracking).
+
+        Returns:
+            vr_3pt_pose: np.ndarray shape (3, 7) - Calibrated 3-point pose
+        """
+        vr_3pt_pose_raw = _process_3pt_pose_from_controllers()
+        if self._calibration_pending:
+            self._capture_calibration(vr_3pt_pose_raw)
+        vr_3pt_pose = self._apply_calibration(vr_3pt_pose_raw)
+        if self.vr3pt_visualizer is not None:
+            self.vr3pt_visualizer.update_from_vr_pose(vr_3pt_pose, waist_scale=1.0)
+            self.vr3pt_visualizer.render()
+        return vr_3pt_pose
+
+    def calibrate_now(self, body_poses_np: np.ndarray | None) -> bool:
+        """Calibrate using current frame against FK of all-zero body joints.
+        Pass body_poses_np=None to calibrate from controller + headset poses (--no_body mode).
         Operator should be in zero-reference pose when calling this."""
         try:
-            vr_3pt_pose_raw = _process_3pt_pose(body_poses_np)
+            if body_poses_np is not None:
+                vr_3pt_pose_raw = _process_3pt_pose(body_poses_np)
+            else:
+                vr_3pt_pose_raw = _process_3pt_pose_from_controllers()
             self._override_robot_q = np.zeros(29, dtype=np.float64)
             self._capture_calibration(vr_3pt_pose_raw)
-            print(f"[{self.log_prefix}] Calibration completed (zero-pose reference)")
+            mode_str = "zero-pose reference" if body_poses_np is not None else "controller mode, zero-pose reference"
+            print(f"[{self.log_prefix}] Calibration completed ({mode_str})")
             return True
         except Exception as e:
             print(f"[{self.log_prefix}] Calibration failed: {e}")
@@ -1272,9 +1366,12 @@ class PoseStreamer:
             time.sleep(0.005)
             return
 
-        latest_data = compute_from_body_poses(
-            self.parent_indices, self.device, sample["body_poses_np"]
-        )
+        no_body_mode = sample["body_poses_np"] is None
+
+        if not no_body_mode:
+            latest_data = compute_from_body_poses(
+                self.parent_indices, self.device, sample["body_poses_np"]
+            )
         (left_menu_button, left_trigger, right_trigger, left_grip, right_grip) = (
             get_controller_inputs()
         )
@@ -1301,15 +1398,20 @@ class PoseStreamer:
             right_trigger,
             right_grip,
         )
-        smpl_pose_np = (
-            latest_data["smpl_pose"].detach().cpu().numpy()[:, :63].reshape(-1, 21, 3)[0]
-        ).astype(np.float32)
-        smpl_joints_np = (
-            latest_data["smpl_joints_local"].detach().cpu().numpy()[0].astype(np.float32)
-        )
-        body_quat_np = (
-            latest_data["global_orient_quat"].detach().cpu().numpy()[0].astype(np.float32)
-        )
+        if no_body_mode:
+            smpl_pose_np = np.zeros((21, 3), dtype=np.float32)
+            smpl_joints_np = np.zeros((24, 3), dtype=np.float32)
+            body_quat_np = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        else:
+            smpl_pose_np = (
+                latest_data["smpl_pose"].detach().cpu().numpy()[:, :63].reshape(-1, 21, 3)[0]
+            ).astype(np.float32)
+            smpl_joints_np = (
+                latest_data["smpl_joints_local"].detach().cpu().numpy()[0].astype(np.float32)
+            )
+            body_quat_np = (
+                latest_data["global_orient_quat"].detach().cpu().numpy()[0].astype(np.float32)
+            )
         curr_stamp_ns = int(sample.get("timestamp_ns", 0))
         step_ns = int(1e9 / max(1, self.target_fps))
         if self.prev_stamp_ns is None:
@@ -1333,85 +1435,85 @@ class PoseStreamer:
             alpha = 0.0
         elif alpha > 1.0:
             alpha = 1.0
-        use_joints = (1.0 - alpha) * self.prev_smpl_joints_np + alpha * smpl_joints_np
-        use_pose = _interp_pose_axis_angle(self.prev_smpl_pose_np, smpl_pose_np, alpha).astype(
-            np.float32
-        )
-        use_body_quat = _quat_lerp_normalized(self.prev_body_quat_np, body_quat_np, alpha).astype(
-            np.float32
-        )
+        if no_body_mode:
+            use_joints = smpl_joints_np
+            use_pose = smpl_pose_np
+            use_body_quat = body_quat_np
+        else:
+            use_joints = (1.0 - alpha) * self.prev_smpl_joints_np + alpha * smpl_joints_np
+            use_pose = _interp_pose_axis_angle(self.prev_smpl_pose_np, smpl_pose_np, alpha).astype(
+                np.float32
+            )
+            use_body_quat = _quat_lerp_normalized(self.prev_body_quat_np, body_quat_np, alpha).astype(
+                np.float32
+            )
         N = len(self.frame_buffer["frame_index"])
 
         ##### From @Jiefeng for directly setting the joint position ######
         joint_pos = np.zeros(29)
-        body_pose = use_pose.reshape(-1, 21, 3)
+        if not no_body_mode:
+            body_pose = use_pose.reshape(-1, 21, 3)
 
-        SMPL_L_ELBOW_IDX = 17
-        SMPL_L_WRIST_IDX = 19
-        SMPL_R_ELBOW_IDX = 18
-        SMPL_R_WRIST_IDX = 20
+            SMPL_L_ELBOW_IDX = 17
+            SMPL_L_WRIST_IDX = 19
+            SMPL_R_ELBOW_IDX = 18
+            SMPL_R_WRIST_IDX = 20
 
-        # G1_L_ELBOW_IDX = 0
-        G1_L_WRIST_ROLL_IDX = 23
-        G1_L_WRIST_PITCH_IDX = 25
-        G1_L_WRIST_YAW_IDX = 27
+            G1_L_WRIST_ROLL_IDX = 23
+            G1_L_WRIST_PITCH_IDX = 25
+            G1_L_WRIST_YAW_IDX = 27
+            G1_R_WRIST_ROLL_IDX = 24
+            G1_R_WRIST_PITCH_IDX = 26
+            G1_R_WRIST_YAW_IDX = 28
+            smpl_l_elbow_aa = body_pose[:, SMPL_L_ELBOW_IDX]
+            smpl_l_wrist_aa = body_pose[:, SMPL_L_WRIST_IDX]
+            smpl_r_elbow_aa = body_pose[:, SMPL_R_ELBOW_IDX]
+            smpl_r_wrist_aa = body_pose[:, SMPL_R_WRIST_IDX]
 
-        # G1_R_ELBOW_IDX = 0
-        G1_R_WRIST_ROLL_IDX = 24  # Done
-        G1_R_WRIST_PITCH_IDX = 26
-        G1_R_WRIST_YAW_IDX = 28
-        smpl_l_elbow_aa = body_pose[:, SMPL_L_ELBOW_IDX]
-        smpl_l_wrist_aa = body_pose[:, SMPL_L_WRIST_IDX]
-        smpl_r_elbow_aa = body_pose[:, SMPL_R_ELBOW_IDX]
-        smpl_r_wrist_aa = body_pose[:, SMPL_R_WRIST_IDX]
+            g1_l_elbow_axis = np.array([0, 1, 0])
+            g1_l_elbow_q_twist, g1_l_elbow_q_swing = decompose_rotation_aa(
+                smpl_l_elbow_aa, g1_l_elbow_axis
+            )
+            g1_r_elbow_axis = np.array([0, 1, 0])
+            g1_r_elbow_q_twist, g1_r_elbow_q_swing = decompose_rotation_aa(
+                smpl_r_elbow_aa, g1_r_elbow_axis
+            )
 
-        g1_l_elbow_axis = np.array([0, 1, 0])
-        g1_l_elbow_q_twist, g1_l_elbow_q_swing = decompose_rotation_aa(
-            smpl_l_elbow_aa, g1_l_elbow_axis
-        )
+            l_elbow_swing_euler = R.from_quat(g1_l_elbow_q_swing[:, [1, 2, 3, 0]]).as_euler(
+                "XYZ", degrees=False
+            )
+            r_elbow_swing_euler = R.from_quat(g1_r_elbow_q_swing[:, [1, 2, 3, 0]]).as_euler(
+                "XYZ", degrees=False
+            )
+            l_wrist_euler = R.from_rotvec(smpl_l_wrist_aa).as_euler("XYZ", degrees=False)
+            r_wrist_euler = R.from_rotvec(smpl_r_wrist_aa).as_euler("XYZ", degrees=False)
 
-        g1_r_elbow_axis = np.array([0, 1, 0])
-        g1_r_elbow_q_twist, g1_r_elbow_q_swing = decompose_rotation_aa(
-            smpl_r_elbow_aa, g1_r_elbow_axis
-        )
+            g1_l_wrist_roll = l_elbow_swing_euler[:, 0] + l_wrist_euler[:, 0]
+            g1_l_wrist_pitch = -l_wrist_euler[:, 1]
+            g1_l_wrist_yaw = l_elbow_swing_euler[:, 2] + l_wrist_euler[:, 2]
+            g1_r_wrist_roll = -(r_elbow_swing_euler[:, 0] + r_wrist_euler[:, 0])
+            g1_r_wrist_pitch = -r_wrist_euler[:, 1]
+            g1_r_wrist_yaw = r_elbow_swing_euler[:, 2] + r_wrist_euler[:, 2]
 
-        # Move elbow roll/yaw into wrist while preserving wrist pitch from SMPL
-        l_elbow_swing_euler = R.from_quat(g1_l_elbow_q_swing[:, [1, 2, 3, 0]]).as_euler(
-            "XYZ", degrees=False
-        )
-        r_elbow_swing_euler = R.from_quat(g1_r_elbow_q_swing[:, [1, 2, 3, 0]]).as_euler(
-            "XYZ", degrees=False
-        )
+            joint_pos[G1_L_WRIST_ROLL_IDX] = g1_l_wrist_roll[0]
+            joint_pos[G1_L_WRIST_PITCH_IDX] = -g1_l_wrist_pitch[0]
+            joint_pos[G1_L_WRIST_YAW_IDX] = g1_l_wrist_yaw[0]
+            joint_pos[G1_R_WRIST_ROLL_IDX] = g1_r_wrist_roll[0]
+            joint_pos[G1_R_WRIST_PITCH_IDX] = g1_r_wrist_pitch[0]
+            joint_pos[G1_R_WRIST_YAW_IDX] = g1_r_wrist_yaw[0]
 
-        l_wrist_euler = R.from_rotvec(smpl_l_wrist_aa).as_euler("XYZ", degrees=False)
-        r_wrist_euler = R.from_rotvec(smpl_r_wrist_aa).as_euler("XYZ", degrees=False)
-
-        g1_l_wrist_roll = l_elbow_swing_euler[:, 0] + l_wrist_euler[:, 0]
-        g1_l_wrist_pitch = -l_wrist_euler[:, 1]
-        g1_l_wrist_yaw = l_elbow_swing_euler[:, 2] + l_wrist_euler[:, 2]
-
-        g1_r_wrist_roll = -(r_elbow_swing_euler[:, 0] + r_wrist_euler[:, 0])
-        g1_r_wrist_pitch = -r_wrist_euler[:, 1]
-        g1_r_wrist_yaw = r_elbow_swing_euler[:, 2] + r_wrist_euler[:, 2]
-
-        joint_pos[G1_L_WRIST_ROLL_IDX] = g1_l_wrist_roll[0]
-        joint_pos[G1_L_WRIST_PITCH_IDX] = -g1_l_wrist_pitch[0]
-        joint_pos[G1_L_WRIST_YAW_IDX] = g1_l_wrist_yaw[0]
-
-        joint_pos[G1_R_WRIST_ROLL_IDX] = g1_r_wrist_roll[0]
-        joint_pos[G1_R_WRIST_PITCH_IDX] = g1_r_wrist_pitch[0]
-        joint_pos[G1_R_WRIST_YAW_IDX] = g1_r_wrist_yaw[0]
-
-        # Process SMPL pose to get calibrated 3-point VR pose and update visualization
-        # Pass SMPL local joints for optional body visualization in the VR3Pt viewer
-        smpl_joints_for_vis = (
-            latest_data["smpl_joints_local"].detach().cpu().numpy()[0]
-            if self.three_point.enable_smpl_vis
-            else None
-        )
-        vr_3pt_pose = self.three_point.process_smpl_pose(
-            sample["body_poses_np"], smpl_joints_local=smpl_joints_for_vis
-        )
+        # Get calibrated 3-point VR pose (controller mode or SMPL mode)
+        if no_body_mode:
+            vr_3pt_pose = self.three_point.process_controller_pose()
+        else:
+            smpl_joints_for_vis = (
+                latest_data["smpl_joints_local"].detach().cpu().numpy()[0]
+                if self.three_point.enable_smpl_vis
+                else None
+            )
+            vr_3pt_pose = self.three_point.process_smpl_pose(
+                sample["body_poses_np"], smpl_joints_local=smpl_joints_for_vis
+            )
         ##### From @Jiefeng for directly setting the joint position ######
 
         self.frame_buffer["smpl_pose"].append(use_pose)
@@ -1504,6 +1606,7 @@ def run_pico(
     with_g1_robot: bool = True,
     enable_waist_tracking: bool = False,
     enable_smpl_vis: bool = False,
+    no_body: bool = False,
 ):
     """Run Pico body tracking with real-time visualization and ZMQ streaming."""
     if xrt is None:
@@ -1512,10 +1615,11 @@ def run_pico(
         )
     subprocess.Popen(["bash", "/opt/apps/roboticsservice/runService.sh"])
     xrt.init()
-    print("Waiting for body tracking data...")
-    while not xrt.is_body_data_available():
-        print("waiting for body data...")
-        time.sleep(1)
+    if not no_body:
+        print("Waiting for body tracking data...")
+        while not xrt.is_body_data_available():
+            print("waiting for body data...")
+            time.sleep(1)
     context = zmq.Context()
     socket = context.socket(zmq.PUB)
     socket.bind(f"tcp://*:{port}")
@@ -1542,6 +1646,7 @@ def run_pico(
             with_g1_robot=with_g1_robot,
             enable_waist_tracking=enable_waist_tracking,
             enable_smpl_vis=enable_smpl_vis,
+            no_body=no_body,
         )
     finally:
         socket.close()
@@ -1747,7 +1852,10 @@ class PlannerStreamer:
                 sample = self.reader.get_latest()
                 if sample is not None:
                     print("[PlannerLoop] Sending VR 3-point pose as target")
-                    vr_3pt_pose = self.three_point.process_smpl_pose(sample["body_poses_np"])
+                    if sample["body_poses_np"] is None:
+                        vr_3pt_pose = self.three_point.process_controller_pose()
+                    else:
+                        vr_3pt_pose = self.three_point.process_smpl_pose(sample["body_poses_np"])
                     vr_3pt_position = (vr_3pt_pose[:, :3].flatten()).tolist()
                     vr_3pt_orientation = vr_3pt_pose[:, 3:].flatten().tolist()
 
@@ -1814,6 +1922,7 @@ def run_pico_manager(
     with_g1_robot: bool = True,
     enable_waist_tracking: bool = False,
     enable_smpl_vis: bool = False,
+    no_body: bool = False,
 ):
     """
     Manager: creates shared PUB socket and runs pose/planner streamers based on current mode.
@@ -1827,10 +1936,11 @@ def run_pico_manager(
         )
     subprocess.Popen(["bash", "/opt/apps/roboticsservice/runService.sh"])
     xrt.init()
-    print("Waiting for body tracking data...")
-    while not xrt.is_body_data_available():
-        print("waiting for body data...")
-        time.sleep(1)
+    if not no_body:
+        print("Waiting for body tracking data...")
+        while not xrt.is_body_data_available():
+            print("waiting for body data...")
+            time.sleep(1)
 
     context = zmq.Context()
     socket = context.socket(zmq.PUB)
@@ -1847,7 +1957,7 @@ def run_pico_manager(
         pass
 
     # Create shared reader and 3-point pose processor
-    reader = PicoReader(max_queue_size=buffer_size)
+    reader = PicoReader(max_queue_size=buffer_size, no_body=no_body)
     reader.start()
 
     three_point = ThreePointPose(
@@ -1931,6 +2041,8 @@ def run_pico_manager(
                     sample = reader.get_latest()
                     if sample is not None:
                         three_point.calibrate_now(sample["body_poses_np"])
+                    elif no_body:
+                        three_point.calibrate_now(None)
                     else:
                         print("[Manager] WARNING: No SMPL data available for calibration")
 
@@ -2156,6 +2268,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable SMPL body joint visualization (24 joint spheres) in the VR3pt viewer",
     )
+    parser.add_argument(
+        "--no_body",
+        action="store_true",
+        help="Use controller + headset poses instead of body tracking (no foot trackers required)",
+    )
     args = parser.parse_args()
 
     # Standalone VR3Pt test modes (exit after finishing)
@@ -2196,6 +2313,7 @@ if __name__ == "__main__":
             with_g1_robot=with_g1_robot,
             enable_waist_tracking=args.waist_tracking,
             enable_smpl_vis=args.vis_smpl,
+            no_body=args.no_body,
         )
     else:
         # Run legacy single-thread pose streaming
@@ -2211,4 +2329,5 @@ if __name__ == "__main__":
             with_g1_robot=with_g1_robot,
             enable_waist_tracking=args.waist_tracking,
             enable_smpl_vis=args.vis_smpl,
+            no_body=args.no_body,
         )
