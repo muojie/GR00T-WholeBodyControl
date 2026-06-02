@@ -81,6 +81,8 @@ Documentation
    getting_started/download_models
    getting_started/quickstart
    getting_started/vr_teleop_setup
+   getting_started/no_tracker_setup
+   getting_started/bvh_trajectory_follow
 
 .. toctree::
    :maxdepth: 2

@@ -289,6 +289,90 @@ def _estimate_root_speed(
     return float(max(0.0, forward_speed * speed_scale)), frame_start, frame_end, fps
 
 
+def _compute_root_trajectory(
+    bvh_path: str,
+    axis_map: str,
+    start: int,
+    end: int | None,
+    stride: int,
+    speed_scale: float,
+    speed_override: float | None,
+    smooth_window: int = 5,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[int], float]:
+    """Per-frame WORLD-frame locomotion commands derived from the BVH root.
+
+    Unlike `_estimate_root_speed` (a single scalar forward speed for the whole
+    clip), this follows the actual root path: it returns per-frame `movement`
+    and `facing` unit vectors plus a per-frame `speed` so the planner reproduces
+    the BVH turns, curves and speed changes. The robot's feet/balance are still
+    handled by the RL lower-body policy; only the navigation command follows BVH.
+
+    Frame convention (after `_axis_basis`): robot X=forward, Y=left, Z=up, so the
+    ground plane is XY. `movement`/`facing` are world-frame direction vectors
+    heading-aligned so the first moving frame points along robot +X (the robot
+    starts facing +X). `facing` tracks the direction of travel, so this version
+    does not represent strafing/backpedaling.
+    """
+    data = _parse_bvh(bvh_path)
+    world_pos, _ = _compute_fk(data)
+    root_idx = _first_existing(data.names, ["root", "hips", "pelvis"])
+    basis = _axis_basis(axis_map)
+    root_robot = np.einsum("ij,fj->fi", basis, world_pos[:, root_idx] / 100.0)
+
+    frame_start = max(0, start)
+    frame_end = min(root_robot.shape[0], end if end is not None else root_robot.shape[0])
+    frame_indices = list(range(frame_start, frame_end, max(1, stride)))
+    fps = (1.0 / data.frame_time) / max(1, stride)
+
+    n = len(frame_indices)
+    movement = np.zeros((max(n, 1), 3), dtype=np.float32)
+    facing = np.zeros((max(n, 1), 3), dtype=np.float32)
+    facing[:, 0] = 1.0
+    speed = np.zeros((max(n, 1),), dtype=np.float32)
+    if n < 2:
+        return movement[:n], facing[:n], speed[:n], frame_indices, fps
+
+    path = root_robot[frame_indices][:, :2].astype(np.float64)  # ground-plane XY
+    dt = 1.0 / fps
+    vel = np.empty_like(path)
+    vel[:-1] = (path[1:] - path[:-1]) / dt
+    vel[-1] = vel[-2]
+
+    if smooth_window > 1:
+        kernel = np.ones(smooth_window) / smooth_window
+        vel[:, 0] = np.convolve(vel[:, 0], kernel, mode="same")
+        vel[:, 1] = np.convolve(vel[:, 1], kernel, mode="same")
+
+    raw_speed = np.linalg.norm(vel, axis=1)
+
+    # Heading alignment: rotate the path so the first meaningfully-moving frame
+    # points along robot +X. Without this the robot would veer off in the BVH's
+    # arbitrary initial world heading.
+    moving = np.where(raw_speed > 0.05)[0]
+    yaw0 = float(np.arctan2(vel[moving[0], 1], vel[moving[0], 0])) if moving.size else 0.0
+    c, s = np.cos(-yaw0), np.sin(-yaw0)
+    rot = np.array([[c, -s], [s, c]])
+    vel = vel @ rot.T
+
+    direction = np.tile(np.array([1.0, 0.0]), (n, 1))
+    last = np.array([1.0, 0.0])
+    for i in range(n):
+        if raw_speed[i] > 1e-6:
+            last = vel[i] / raw_speed[i]
+        direction[i] = last
+
+    movement = np.zeros((n, 3), dtype=np.float32)
+    movement[:, :2] = direction
+    facing = movement.copy()
+
+    if speed_override is not None:
+        speed = np.full((n,), float(speed_override), dtype=np.float32)
+    else:
+        speed = (raw_speed * speed_scale).astype(np.float32)
+
+    return movement, facing, speed, frame_indices, fps
+
+
 def _stream_planner_locomotion(
     bvh_path: str,
     axis_map: str,
@@ -303,6 +387,7 @@ def _stream_planner_locomotion(
     speed_scale: float,
     speed_override: float | None,
     send_orientation: bool,
+    follow_trajectory: bool = False,
 ) -> None:
     data = _parse_bvh(bvh_path)
     positions, orientations = _retarget_vr3pt(data, scale, send_orientation, None, axis_map)
@@ -313,15 +398,30 @@ def _stream_planner_locomotion(
     if not frame_indices:
         raise ValueError(f"No frames selected from start={start}, end={frame_end}, stride={stride}")
 
+    traj_move = traj_face = traj_speed = None
+    if follow_trajectory:
+        traj_move, traj_face, traj_speed, frame_indices, fps = _compute_root_trajectory(
+            bvh_path, axis_map, start, end, stride, speed_scale, speed_override
+        )
+        if not frame_indices:
+            raise ValueError(f"No frames selected from start={start}, end={frame_end}, stride={stride}")
+
     context = zmq.Context()
     socket = context.socket(zmq.PUB)
     endpoint = f"tcp://{bind_host}:{port}"
     socket.bind(endpoint)
     print(f"ZMQ PUB bound to {endpoint}")
-    print(
-        f"Planner locomotion: mode={locomotion_mode}, speed={speed:.3f} m/s, "
-        f"{len(frame_indices)} frames @ {fps:.2f} Hz"
-    )
+    if follow_trajectory:
+        print(
+            f"Planner trajectory-follow: mode={locomotion_mode}, "
+            f"speed range [{traj_speed.min():.3f}, {traj_speed.max():.3f}] m/s, "
+            f"{len(frame_indices)} frames @ {fps:.2f} Hz (root path from BVH)"
+        )
+    else:
+        print(
+            f"Planner locomotion: mode={locomotion_mode}, speed={speed:.3f} m/s, "
+            f"{len(frame_indices)} frames @ {fps:.2f} Hz"
+        )
 
     try:
         time.sleep(0.5)
@@ -332,19 +432,32 @@ def _stream_planner_locomotion(
         frame_dt = 1.0 / fps
         while True:
             socket.send(build_command_message(start=True, stop=False, planner=True))
-            for frame in frame_indices:
+            for i, frame in enumerate(frame_indices):
                 socket.send(build_command_message(start=True, stop=False, planner=True))
                 vr_orientation = (
                     orientations[frame].reshape(-1).tolist()
                     if orientations is not None
                     else DEFAULT_ORIENTATION_WXYZ
                 )
+                if follow_trajectory:
+                    frame_speed = float(traj_speed[i])
+                    moving = frame_speed > 0.03
+                    cmd_mode = locomotion_mode if moving else 0
+                    cmd_move = traj_move[i].tolist() if moving else [0.0, 0.0, 0.0]
+                    cmd_face = traj_face[i].tolist()
+                    cmd_speed = frame_speed if moving else -1.0
+                else:
+                    moving = speed > 0.03
+                    cmd_mode = locomotion_mode if moving else 0
+                    cmd_move = [1.0, 0.0, 0.0] if moving else [0.0, 0.0, 0.0]
+                    cmd_face = [1.0, 0.0, 0.0]
+                    cmd_speed = speed if moving else -1.0
                 socket.send(
                     build_planner_message(
-                        mode=locomotion_mode if speed > 0.03 else 0,
-                        movement=[1.0, 0.0, 0.0] if speed > 0.03 else [0.0, 0.0, 0.0],
-                        facing=[1.0, 0.0, 0.0],
-                        speed=speed if speed > 0.03 else -1.0,
+                        mode=cmd_mode,
+                        movement=cmd_move,
+                        facing=cmd_face,
+                        speed=cmd_speed,
                         height=-1.0,
                         vr_3pt_position=positions[frame].reshape(-1).tolist(),
                         vr_3pt_orientation=vr_orientation,
@@ -400,6 +513,12 @@ def main() -> None:
     parser.add_argument("--planner-speed", type=float, default=None, help="Override planner walking speed")
     parser.add_argument("--send-orientation", action="store_true", help="Send BVH wrist/head orientations")
     parser.add_argument(
+        "--follow-trajectory",
+        action="store_true",
+        help="Planner mode: follow the BVH root path per-frame (turns/curves/speed) "
+        "instead of walking straight forward at the clip's average speed.",
+    )
+    parser.add_argument(
         "--no-start-control",
         action="store_true",
         help="Do not send the start-control command, only switch to streamed-motion mode.",
@@ -416,10 +535,25 @@ def main() -> None:
             args.speed_scale,
             args.planner_speed,
         )
-        print(
-            f"Planner mode preview: frames [{frame_start}, {frame_end}), "
-            f"{fps:.2f} Hz, speed={speed:.3f} m/s"
-        )
+        if args.follow_trajectory:
+            traj_move, _, traj_speed, frame_indices, fps = _compute_root_trajectory(
+                args.bvh,
+                args.axis_map,
+                args.start_frame,
+                args.end_frame,
+                args.stride,
+                args.speed_scale,
+                args.planner_speed,
+            )
+            print(
+                f"Planner trajectory-follow preview: {len(frame_indices)} frames @ "
+                f"{fps:.2f} Hz, speed range [{traj_speed.min():.3f}, {traj_speed.max():.3f}] m/s"
+            )
+        else:
+            print(
+                f"Planner mode preview: frames [{frame_start}, {frame_end}), "
+                f"{fps:.2f} Hz, speed={speed:.3f} m/s"
+            )
         if args.dry_run:
             return
         _stream_planner_locomotion(
@@ -436,6 +570,7 @@ def main() -> None:
             args.speed_scale,
             args.planner_speed,
             args.send_orientation,
+            args.follow_trajectory,
         )
         return
 
