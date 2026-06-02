@@ -348,21 +348,31 @@ def _compute_root_trajectory(
     # Heading alignment: rotate the path so the first meaningfully-moving frame
     # points along robot +X. Without this the robot would veer off in the BVH's
     # arbitrary initial world heading.
-    moving = np.where(raw_speed > 0.05)[0]
+    move_thresh = 0.08  # m/s; below this the velocity direction is noise-dominated
+    moving = np.where(raw_speed > move_thresh)[0]
     yaw0 = float(np.arctan2(vel[moving[0], 1], vel[moving[0], 0])) if moving.size else 0.0
     c, s = np.cos(-yaw0), np.sin(-yaw0)
     rot = np.array([[c, -s], [s, c]])
     vel = vel @ rot.T
 
-    direction = np.tile(np.array([1.0, 0.0]), (n, 1))
-    last = np.array([1.0, 0.0])
+    # Build a STABLE heading: only steer toward the velocity direction when
+    # actually moving, and rate-limit how fast the heading may turn. Holding the
+    # heading through slow/stationary frames is essential -- otherwise tiny root
+    # jitter flips `facing` every frame and the robot spins in place chasing it.
+    max_yaw_rate = 1.5  # rad/s
+    max_dyaw = max_yaw_rate / fps
+    heading = 0.0  # aligned so the first moving frame faces +X
+    headings = np.empty(n, dtype=np.float64)
     for i in range(n):
-        if raw_speed[i] > 1e-6:
-            last = vel[i] / raw_speed[i]
-        direction[i] = last
+        if raw_speed[i] > move_thresh:
+            target = np.arctan2(vel[i, 1], vel[i, 0])
+            delta = (target - heading + np.pi) % (2 * np.pi) - np.pi
+            heading += float(np.clip(delta, -max_dyaw, max_dyaw))
+        headings[i] = heading
 
     movement = np.zeros((n, 3), dtype=np.float32)
-    movement[:, :2] = direction
+    movement[:, 0] = np.cos(headings)
+    movement[:, 1] = np.sin(headings)
     facing = movement.copy()
 
     if speed_override is not None:

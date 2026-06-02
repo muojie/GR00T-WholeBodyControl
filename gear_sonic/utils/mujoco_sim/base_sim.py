@@ -194,6 +194,9 @@ class DefaultEnv:
                     self.band_attached_link = self.mj_model.body("torso_link").id
                 self.elastic_band.point = self.mj_data.xpos[self.band_attached_link].copy()
                 self.elastic_band.force_axis_mask = np.array([0.0, 0.0, 1.0])
+                # Keep upright (roll/pitch) but allow yaw so the robot can turn
+                # to follow locomotion/trajectory commands.
+                self.elastic_band.angular_axis_mask = np.array([1.0, 1.0, 0.0])
             elif "h1" in self.config["ROBOT_TYPE"]:
                 self.band_attached_link = self.mj_model.body("torso_link").id
             else:

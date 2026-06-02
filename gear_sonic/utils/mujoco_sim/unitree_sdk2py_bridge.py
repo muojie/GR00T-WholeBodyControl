@@ -377,6 +377,12 @@ class ElasticBand:
         self.kd_ang = 10
         self.point = np.array([0, 0, 1])
         self.force_axis_mask = np.ones(3)
+        # Mask for the angular RESTORING SPRING only, in body rotvec axes
+        # [roll, pitch, yaw]. Default keeps the robot fully upright. Set yaw
+        # (index 2) to 0 for a support gantry that holds the robot upright but
+        # lets it turn freely. Angular DAMPING (kd_ang) stays on all axes so a
+        # freed yaw is still damped and won't spin up.
+        self.angular_axis_mask = np.ones(3)
         self.length = 0
         self.enable = True
 
@@ -394,7 +400,7 @@ class ElasticBand:
         quat = np.array([quat[1], quat[2], quat[3], quat[0]])
         rot = scipy.spatial.transform.Rotation.from_quat(quat)
         rotvec = rot.as_rotvec()
-        torque = -self.kp_ang * rotvec - self.kd_ang * ang_vel
+        torque = -self.kp_ang * rotvec * self.angular_axis_mask - self.kd_ang * ang_vel
 
         return np.concatenate([f, torque])
 
