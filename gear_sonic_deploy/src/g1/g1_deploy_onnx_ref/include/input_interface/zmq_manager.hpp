@@ -529,8 +529,17 @@ class ZMQManager : public InputInterface {
         return;
       }
 
-      // Handle start control
-      if (start_control_ && !operator_state.start) {
+      // Handle start control and planner reactivation.
+      //
+      // External ZMQ senders may switch from streamed-motion mode to planner
+      // mode while control is already started. In that case operator_state.start
+      // is true, but the planner can still be disabled/initializing, so we need
+      // to run the planner enable path again.
+      const bool need_start_control = start_control_ && !operator_state.start;
+      const bool need_planner_reactivation =
+          start_control_ && operator_state.start &&
+          (!planner_state.enabled || !planner_state.initialized);
+      if (need_start_control || need_planner_reactivation) {
         operator_state.start = true;
         {
           std::lock_guard<std::mutex> lock(current_motion_mutex);

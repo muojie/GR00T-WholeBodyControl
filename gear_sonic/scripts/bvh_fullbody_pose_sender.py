@@ -333,6 +333,7 @@ def _stream_planner_locomotion(
         while True:
             socket.send(build_command_message(start=True, stop=False, planner=True))
             for frame in frame_indices:
+                socket.send(build_command_message(start=True, stop=False, planner=True))
                 vr_orientation = (
                     orientations[frame].reshape(-1).tolist()
                     if orientations is not None
