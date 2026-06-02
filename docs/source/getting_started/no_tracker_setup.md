@@ -70,7 +70,8 @@ python gear_sonic/scripts/pico_manager_thread_server.py --manager --no_body
 ```
 device found PA9410MGKA220055G
 [PoseLoop] Robot model loaded for FK calibration
-Manager controls: A+X=toggle mode, A+B+X+Y=start/stop policy
+Manager controls: A+B+X+Y=start/stop policy, A+X=POSE<->PLANNER, B+Y=POSE<->PLANNER_FROZEN_UPPER_BODY, Left Stick Click=enter/exit PLANNER_VR_3PT
+[Manager] no_body: use Left Stick Click from PLANNER to drive arms with controller/headset VR 3-point targets. POSE is for body-tracking replay.
 ```
 
 ---
@@ -80,10 +81,13 @@ Manager controls: A+X=toggle mode, A+B+X+Y=start/stop policy
 | 操作 | 按键 |
 |------|------|
 | 启动 policy + 校准 | A + B + X + Y（同时按，保持校准姿势） |
-| 切换到全身遥操（Pose 模式） | A + X |
+| 进入/退出手柄 3 点手臂跟随 | 左摇杆下压（从 Planner 进入 `PLANNER_VR_3PT`） |
+| 切换到 Pose 模式 | A + X |
 | 切换回 Planner 模式 | A + X |
 | 紧急停止（手柄） | A + B + X + Y |
 | 紧急停止（键盘） | `O`（在 Terminal 2 聚焦时按） |
+
+> 无追踪器验证手臂跟随时，不要用 A+X 进入 Pose 模式。正确流程是：A+B+X+Y 启动到 Planner，然后左摇杆下压进入 `PLANNER_VR_3PT`。日志应出现 `StreamMode switch: PLANNER -> PLANNER_VR_3PT` 和 `Sending VR 3-point pose as target`。
 
 ### 校准姿势
 1. 站直，直视前方
@@ -100,6 +104,8 @@ Manager controls: A+X=toggle mode, A+B+X+Y=start/stop policy
 - `get_headset_pose()` → 颈部（方向用于校准，位置由运动学链重新计算）
 
 C++ deploy 只消费 `vr_position`（9 floats）和 `vr_orientation`（12 floats），`smpl_pose` 等字段在此模式下填零，不影响推理。
+
+注意：Dex3 手指抓握和 G1 手臂跟随走不同字段。trigger/grip 生成的 `left_hand_joints` / `right_hand_joints` 可以让手指开合；手臂跟随左右手柄则需要 `planner` topic 中的 `vr_position` / `vr_orientation`，并且必须处于 `PLANNER_VR_3PT`。
 
 代码修改位于 `gear_sonic/scripts/pico_manager_thread_server.py`，关键新增：
 - `_process_3pt_pose_from_controllers()` — 从控制器构建 3-point pose
