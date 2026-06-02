@@ -215,12 +215,14 @@ def _stream_pose(
 
     try:
         time.sleep(0.5)
-        socket.send(build_command_message(start=start_control, stop=False, planner=False))
-        time.sleep(0.1)
+        for _ in range(10):
+            socket.send(build_command_message(start=start_control, stop=False, planner=False))
+            time.sleep(0.05)
 
         frame_dt = 1.0 / fps
         global_frame = 0
         while True:
+            socket.send(build_command_message(start=start_control, stop=False, planner=False))
             for start in range(0, q_isaaclab.shape[0], chunk_size):
                 end = min(q_isaaclab.shape[0], start + chunk_size)
                 indices = np.arange(global_frame, global_frame + (end - start), dtype=np.int64)

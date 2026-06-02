@@ -371,6 +371,12 @@ class ZMQManager : public InputInterface {
       } else {
         // Streamed motion mode: delegate to pose interface
         if (pose_interface_) {
+          if (start_control_) {
+            pose_interface_->PushStdinChar(']');
+          }
+          if (stop_control_) {
+            pose_interface_->PushStdinChar('o');
+          }
           pose_interface_->handle_input(motion_reader, current_motion, current_frame,
                                        operator_state, reinitialize_heading,
                                        heading_state_buffer,
