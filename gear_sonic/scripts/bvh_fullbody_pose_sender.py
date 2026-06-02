@@ -21,13 +21,16 @@ import zmq
 
 from decoupled_wbc.control.robot_model.instantiation.g1 import instantiate_g1_robot_model
 from gear_sonic.scripts.bvh_vr3pt_planner_sender import (
+    DEFAULT_ORIENTATION_WXYZ,
     _axis_basis,
     _compute_fk,
     _first_existing,
     _parse_bvh,
+    _retarget_vr3pt,
 )
 from gear_sonic.utils.teleop.zmq.zmq_planner_sender import (
     build_command_message,
+    build_planner_message,
     pack_pose_message,
 )
 
@@ -254,6 +257,113 @@ def _stream_pose(
             context.term()
 
 
+def _estimate_root_speed(
+    bvh_path: str,
+    axis_map: str,
+    start: int,
+    end: int | None,
+    stride: int,
+    speed_scale: float,
+    speed_override: float | None,
+) -> tuple[float, int, int, float]:
+    data = _parse_bvh(bvh_path)
+    world_pos, _ = _compute_fk(data)
+    root_idx = _first_existing(data.names, ["root", "hips", "pelvis"])
+    basis = _axis_basis(axis_map)
+    root_robot = np.einsum("ij,fj->fi", basis, world_pos[:, root_idx] / 100.0)
+
+    frame_start = max(0, start)
+    frame_end = min(root_robot.shape[0], end if end is not None else root_robot.shape[0])
+    selected = root_robot[frame_start:frame_end:max(1, stride)]
+    if selected.shape[0] < 2:
+        return 0.0 if speed_override is None else speed_override, frame_start, frame_end, 1.0 / data.frame_time
+
+    fps = (1.0 / data.frame_time) / max(1, stride)
+    if speed_override is not None:
+        return speed_override, frame_start, frame_end, fps
+
+    # Use net forward displacement in robot +X. This keeps the command stable
+    # even if the BVH root has small tracking jitter.
+    duration = (selected.shape[0] - 1) / fps
+    forward_speed = (selected[-1, 0] - selected[0, 0]) / max(duration, 1e-6)
+    return float(max(0.0, forward_speed * speed_scale)), frame_start, frame_end, fps
+
+
+def _stream_planner_locomotion(
+    bvh_path: str,
+    axis_map: str,
+    scale: float,
+    start: int,
+    end: int | None,
+    stride: int,
+    port: int,
+    bind_host: str,
+    loop: bool,
+    locomotion_mode: int,
+    speed_scale: float,
+    speed_override: float | None,
+    send_orientation: bool,
+) -> None:
+    data = _parse_bvh(bvh_path)
+    positions, orientations = _retarget_vr3pt(data, scale, send_orientation, None, axis_map)
+    speed, frame_start, frame_end, fps = _estimate_root_speed(
+        bvh_path, axis_map, start, end, stride, speed_scale, speed_override
+    )
+    frame_indices = list(range(frame_start, frame_end, max(1, stride)))
+    if not frame_indices:
+        raise ValueError(f"No frames selected from start={start}, end={frame_end}, stride={stride}")
+
+    context = zmq.Context()
+    socket = context.socket(zmq.PUB)
+    endpoint = f"tcp://{bind_host}:{port}"
+    socket.bind(endpoint)
+    print(f"ZMQ PUB bound to {endpoint}")
+    print(
+        f"Planner locomotion: mode={locomotion_mode}, speed={speed:.3f} m/s, "
+        f"{len(frame_indices)} frames @ {fps:.2f} Hz"
+    )
+
+    try:
+        time.sleep(0.5)
+        for _ in range(10):
+            socket.send(build_command_message(start=True, stop=False, planner=True))
+            time.sleep(0.05)
+
+        frame_dt = 1.0 / fps
+        while True:
+            socket.send(build_command_message(start=True, stop=False, planner=True))
+            for frame in frame_indices:
+                vr_orientation = (
+                    orientations[frame].reshape(-1).tolist()
+                    if orientations is not None
+                    else DEFAULT_ORIENTATION_WXYZ
+                )
+                socket.send(
+                    build_planner_message(
+                        mode=locomotion_mode if speed > 0.03 else 0,
+                        movement=[1.0, 0.0, 0.0] if speed > 0.03 else [0.0, 0.0, 0.0],
+                        facing=[1.0, 0.0, 0.0],
+                        speed=speed if speed > 0.03 else -1.0,
+                        height=-1.0,
+                        vr_3pt_position=positions[frame].reshape(-1).tolist(),
+                        vr_3pt_orientation=vr_orientation,
+                    )
+                )
+                time.sleep(frame_dt)
+
+            if not loop:
+                break
+    except KeyboardInterrupt:
+        print("\nInterrupted")
+    finally:
+        try:
+            socket.send(build_command_message(start=False, stop=True, planner=True))
+            time.sleep(0.05)
+        finally:
+            socket.close()
+            context.term()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Retarget BVH to G1 29DOF and stream pose topic.")
     parser.add_argument(
@@ -265,6 +375,12 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=5556)
     parser.add_argument("--bind-host", default="*")
     parser.add_argument("--axis-map", choices=["mcp", "soma", "unity"], default="mcp")
+    parser.add_argument(
+        "--control-mode",
+        choices=["planner", "streamed"],
+        default="planner",
+        help="planner walks using SONIC locomotion planner + BVH upper-body VR3PT; streamed plays IK 29DOF in place.",
+    )
     parser.add_argument("--scale", type=float, default=0.7, help="Scale BVH relative displacements")
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--end-frame", type=int, default=None)
@@ -278,12 +394,49 @@ def main() -> None:
     parser.add_argument("--input-npz", default="", help="Load cached retargeted q_mujoco instead of IK")
     parser.add_argument("--dry-run", action="store_true", help="Retarget but do not publish")
     parser.add_argument("--loop", action="store_true")
+    parser.add_argument("--locomotion-mode", type=int, default=2, help="SONIC LocomotionMode, 2=WALK")
+    parser.add_argument("--speed-scale", type=float, default=1.0, help="Scale estimated BVH root speed")
+    parser.add_argument("--planner-speed", type=float, default=None, help="Override planner walking speed")
+    parser.add_argument("--send-orientation", action="store_true", help="Send BVH wrist/head orientations")
     parser.add_argument(
         "--no-start-control",
         action="store_true",
         help="Do not send the start-control command, only switch to streamed-motion mode.",
     )
     args = parser.parse_args()
+
+    if args.control_mode == "planner":
+        speed, frame_start, frame_end, fps = _estimate_root_speed(
+            args.bvh,
+            args.axis_map,
+            args.start_frame,
+            args.end_frame,
+            args.stride,
+            args.speed_scale,
+            args.planner_speed,
+        )
+        print(
+            f"Planner mode preview: frames [{frame_start}, {frame_end}), "
+            f"{fps:.2f} Hz, speed={speed:.3f} m/s"
+        )
+        if args.dry_run:
+            return
+        _stream_planner_locomotion(
+            args.bvh,
+            args.axis_map,
+            args.scale,
+            args.start_frame,
+            args.end_frame,
+            args.stride,
+            args.port,
+            args.bind_host,
+            args.loop,
+            args.locomotion_mode,
+            args.speed_scale,
+            args.planner_speed,
+            args.send_orientation,
+        )
+        return
 
     if args.input_npz:
         cached = np.load(args.input_npz)
