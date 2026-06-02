@@ -493,7 +493,13 @@ def main() -> None:
     parser.add_argument(
         "bvh",
         nargs="?",
-        default="/home/nolo/MCPM_20260526_190029.BVH",
+        default="/home/nolo/RAYNOS_Motion1.bvh",
+        # default="/home/nolo/RAYNOS_Motion2.bvh",
+        # default="/home/nolo/RAYNOS_Motion3.bvh",
+        # default="/home/nolo/MCPM_20260526_190029.BVH",
+        # default="/home/nolo/MCPM_20260526_190029.BVH",
+        # default="/home/nolo/MCPM_20260526_190029.BVH",
+
         help="BVH file to retarget",
     )
     parser.add_argument("--port", type=int, default=5556)
