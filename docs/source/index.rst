@@ -91,6 +91,7 @@ Documentation
    tutorials/zmq
    tutorials/manager
    tutorials/vr_wholebody_teleop
+   tutorials/mocopi_mocap_manager
    tutorials/data_collection
    tutorials/vla_workflow
    tutorials/vla_inference
