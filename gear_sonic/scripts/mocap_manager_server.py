@@ -16,7 +16,12 @@ import numpy as np
 import zmq
 
 from gear_sonic.utils.teleop.controls import LineControlSource
-from gear_sonic.utils.teleop.sources import MOCOPI_DEFAULT_PORT, MocapFrame, MocopiUdpSource, Pose7D
+from gear_sonic.utils.teleop.retarget import VR3PointRetargeter
+from gear_sonic.utils.teleop.sources import (
+    MOCOPI_DEFAULT_PORT,
+    BvhPlaybackSource,
+    MocopiUdpSource,
+)
 from gear_sonic.utils.teleop.zmq.zmq_planner_sender import (
     build_command_message,
     build_planner_message,
@@ -56,86 +61,6 @@ class StreamMode(IntEnum):
     PLANNER_VR_3PT = 5
 
 
-DEFAULT_VR_POSITION = np.array(
-    [
-        0.0903,
-        0.1615,
-        -0.2411,
-        0.1280,
-        -0.1522,
-        -0.2461,
-        0.0241,
-        -0.0081,
-        0.4028,
-    ],
-    dtype=np.float32,
-)
-DEFAULT_VR_ORIENTATION = np.array(
-    [
-        0.7295,
-        0.3145,
-        0.5533,
-        -0.2506,
-        0.7320,
-        -0.2639,
-        0.5395,
-        0.3217,
-        0.9991,
-        0.011,
-        0.0402,
-        -0.0002,
-    ],
-    dtype=np.float32,
-)
-
-
-def _find_joint(frame: MocapFrame, aliases: tuple[str, ...]) -> Pose7D | None:
-    for alias in aliases:
-        pose = frame.joints.get(alias)
-        if pose is not None:
-            return pose
-    return None
-
-
-def build_vr_3pt_from_frame(
-    frame: MocapFrame,
-    allow_bone_translation_vr: bool = False,
-) -> tuple[np.ndarray | None, np.ndarray | None]:
-    """Extract robot-ready VR 3-point arrays from a canonical mocap frame."""
-    if frame.direct_vr_position is not None:
-        orientation = (
-            frame.direct_vr_orientation
-            if frame.direct_vr_orientation is not None
-            else DEFAULT_VR_ORIENTATION.copy()
-        )
-        return frame.direct_vr_position.copy(), orientation.copy()
-
-    left = _find_joint(frame, ("left_wrist", "left_hand", "l_hand", "left_controller"))
-    right = _find_joint(frame, ("right_wrist", "right_hand", "r_hand", "right_controller"))
-    head = _find_joint(frame, ("head", "neck", "neck_2", "head_tracker"))
-
-    if allow_bone_translation_vr and (left is None or right is None):
-        left = left or frame.bones.get(14)
-        right = right or frame.bones.get(18)
-        head = head or frame.bones.get(10) or frame.bones.get(9)
-
-    if left is None or right is None:
-        return None, None
-
-    position = DEFAULT_VR_POSITION.copy()
-    orientation = DEFAULT_VR_ORIENTATION.copy()
-    position[:3] = left.position
-    position[3:6] = right.position
-    orientation[:4] = left.quat_wxyz
-    orientation[4:8] = right.quat_wxyz
-
-    if head is not None:
-        position[6:9] = head.position
-        orientation[8:12] = head.quat_wxyz
-
-    return position, orientation
-
-
 def _send_manager_state(socket: zmq.Socket, stream_mode: StreamMode, toggle_dc: bool, toggle_da: bool) -> None:
     socket.send(
         pack_pose_message(
@@ -149,11 +74,46 @@ def _send_manager_state(socket: zmq.Socket, stream_mode: StreamMode, toggle_dc: 
     )
 
 
+def _create_source(args: argparse.Namespace):
+    if args.source == "mocopi":
+        source = MocopiUdpSource(
+            bind_host=args.mocopi_host,
+            port=args.mocopi_port,
+            packet_format=args.mocopi_format,
+        )
+        description = (
+            f"listening for mocopi UDP on {args.mocopi_host}:{args.mocopi_port} "
+            f"({args.mocopi_format})"
+        )
+        return source, description
+
+    if args.source == "bvh":
+        if not args.bvh_file:
+            raise ValueError("--bvh-file is required when --source bvh")
+        source = BvhPlaybackSource(
+            bvh_file=args.bvh_file,
+            target_fps=args.bvh_fps,
+            loop=args.bvh_loop,
+            unit_scale=args.bvh_unit_scale,
+            y_up_to_z_up=not args.bvh_no_y_up_to_z_up,
+            body_local=not args.bvh_world_frame,
+        )
+        description = (
+            f"playing BVH {args.bvh_file} at {source.motion.playback_fps:.1f} Hz "
+            f"(source_fps={source.motion.source_fps:.1f}, stride={source.motion.frame_stride}, "
+            f"loop={args.bvh_loop})"
+        )
+        return source, description
+
+    raise ValueError(f"unsupported source {args.source!r}")
+
+
 def run_mocap_manager(args: argparse.Namespace) -> None:
-    source = MocopiUdpSource(
-        bind_host=args.mocopi_host,
-        port=args.mocopi_port,
-        packet_format=args.mocopi_format,
+    source, source_description = _create_source(args)
+    retargeter = VR3PointRetargeter(
+        calibrate_on_first_frame=not args.no_vr3pt_calibration,
+        position_scale=args.vr3pt_scale,
+        allow_bone_translation_vr=args.allow_bone_translation_vr,
     )
     controls = LineControlSource(auto_start=not args.start_paused)
 
@@ -168,7 +128,7 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
     socket.send(build_command_message(start=not args.start_paused, stop=False, planner=True))
     print(
         f"[MocapManager] publishing planner data on tcp://*:{args.zmq_port}; "
-        f"listening for mocopi UDP on {args.mocopi_host}:{args.mocopi_port} ({args.mocopi_format})"
+        f"{source_description}"
     )
     print("[MocapManager] stdin commands: start, pause, stop, mode N, move x y z, face x y z, dc, abort")
 
@@ -196,10 +156,10 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
             if frame is not None:
                 frame_age_s = time.time() - frame.host_time_s
                 if frame_age_s <= args.mocap_timeout_s:
-                    vr_position, vr_orientation = build_vr_3pt_from_frame(
-                        frame,
-                        allow_bone_translation_vr=args.allow_bone_translation_vr,
-                    )
+                    target = retargeter.build_target(frame)
+                    if target is not None:
+                        vr_position = target.position
+                        vr_orientation = target.orientation
 
             socket.send(
                 build_planner_message(
@@ -255,7 +215,7 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a mocap-backed teleop ZMQ manager.")
-    parser.add_argument("--source", choices=["mocopi"], default="mocopi")
+    parser.add_argument("--source", choices=["mocopi", "bvh"], default="mocopi")
     parser.add_argument("--mocopi-host", default="0.0.0.0", help="UDP bind host")
     parser.add_argument("--mocopi-port", type=int, default=MOCOPI_DEFAULT_PORT, help="UDP bind port")
     parser.add_argument(
@@ -263,6 +223,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=["auto", "binary", "json"],
         default="auto",
         help="Incoming UDP packet format. JSON is for bridge packets with vr_position/vr_orientation.",
+    )
+    parser.add_argument("--bvh-file", help="BVH file to replay when --source bvh")
+    parser.add_argument("--bvh-loop", action="store_true", help="Loop BVH playback")
+    parser.add_argument(
+        "--bvh-fps",
+        type=float,
+        default=None,
+        help="Target BVH playback FPS. Lower values stride through high-FPS BVH files.",
+    )
+    parser.add_argument(
+        "--bvh-unit-scale",
+        type=float,
+        default=0.01,
+        help="Scale BVH position units to meters. Use 0.01 for centimeter BVH files.",
+    )
+    parser.add_argument(
+        "--bvh-no-y-up-to-z-up",
+        action="store_true",
+        help="Disable BVH Y-up to SONIC Z-up coordinate conversion.",
+    )
+    parser.add_argument(
+        "--bvh-world-frame",
+        action="store_true",
+        help="Keep BVH global root translation instead of subtracting root position.",
     )
     parser.add_argument("--zmq-port", type=int, default=5556, help="ZMQ PUB port for deploy side")
     parser.add_argument("--target-fps", type=float, default=20.0)
@@ -283,15 +267,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "This is useful for bridge packets, but official binary packets usually need FK retargeting."
         ),
     )
+    parser.add_argument(
+        "--no-vr3pt-calibration",
+        action="store_true",
+        help="Disable first-frame position calibration for named-joint mocap frames.",
+    )
+    parser.add_argument(
+        "--vr3pt-scale",
+        type=float,
+        default=1.0,
+        help="Scale named-joint mocap positions before first-frame calibration.",
+    )
     return parser
 
 
 def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
-    if args.source != "mocopi":
-        parser.error(f"unsupported source {args.source!r}")
-    run_mocap_manager(args)
+    try:
+        run_mocap_manager(args)
+    except ValueError as exc:
+        parser.error(str(exc))
 
 
 if __name__ == "__main__":

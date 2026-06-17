@@ -1,12 +1,12 @@
 # Sony mocopi 动捕管理器
 
-本文档说明如何使用 Sony mocopi，或者基于 mocopi 的桥接程序，作为 SONIC 现有 ZMQ 部署链路的输入源。
+本文档说明如何使用 Sony mocopi、基于 mocopi 的桥接程序，或者 BVH 文件回放，作为 SONIC 现有 ZMQ 部署链路的输入源。
 
 当前实现刻意独立于 `pico_manager_thread_server.py`。这样可以先验证非 PICO 输入链路，而不影响已有 PICO/XR 遥操作流程。
 
 ```{admonition} 当前状态
 :class: warning
-这是第一版输入源集成层。它可以接收 mocopi UDP 数据，并发布现有 `command`、`planner`、`manager_state` ZMQ topic。真正可直接闭环控制机器人的路径目前依赖上游桥接程序提供 `vr_position` 和 `vr_orientation`；完整的 mocopi 骨架 FK 与标定层仍是后续工作。
+这是第一版输入源集成层。它可以接收 mocopi UDP 数据、回放 BVH 文件，并发布现有 `command`、`planner`、`manager_state` ZMQ topic。真正可直接闭环控制机器人的 mocopi 路径目前依赖上游桥接程序提供 `vr_position` 和 `vr_orientation`；完整的 mocopi 骨架 FK 与标定层仍是后续工作。
 ```
 
 ## 代码位置
@@ -16,10 +16,13 @@ mocopi 输入链路由以下文件实现：
 ```text
 gear_sonic/scripts/mocap_manager_server.py
 gear_sonic/utils/teleop/sources/base.py
+gear_sonic/utils/teleop/sources/bvh_source.py
 gear_sonic/utils/teleop/sources/mocopi_source.py
 gear_sonic/utils/teleop/sources/__init__.py
 gear_sonic/utils/teleop/controls/keyboard_control.py
 gear_sonic/utils/teleop/controls/__init__.py
+gear_sonic/utils/teleop/retarget/vr3pt_retargeter.py
+gear_sonic/utils/teleop/retarget/__init__.py
 ```
 
 职责划分：
@@ -27,15 +30,17 @@ gear_sonic/utils/teleop/controls/__init__.py
 - `mocap_manager_server.py`：接收标准化后的动捕帧，并发布 deploy 侧兼容的 ZMQ 消息。
 - `base.py`：定义 `Pose7D`、`MocapFrame`、`MocapSource` 等通用数据结构。
 - `mocopi_source.py`：实现 UDP 接收、官方 mocopi 二进制包解析、JSON bridge 包解析。
+- `bvh_source.py`：实现 BVH hierarchy/motion 解析、FK、循环回放，并输出 `MocapFrame`。
 - `keyboard_control.py`：提供基于 stdin 的行命令控制，用来替代 PICO 手柄按键。
+- `vr3pt_retargeter.py`：把标准化后的动捕帧转换为 deploy 侧需要的 `vr_position` / `vr_orientation`。
 
 ## 数据流
 
 ```text
-Sony mocopi app 或 mocopi bridge
-  -> UDP，默认端口 12351
-  -> MocopiUdpSource
+Sony mocopi app / mocopi bridge / BVH file
+  -> MocopiUdpSource 或 BvhPlaybackSource
   -> MocapFrame
+  -> VR3PointRetargeter
   -> mocap_manager_server.py
   -> ZMQ PUB，默认端口 5556
       - command
@@ -47,7 +52,7 @@ Sony mocopi app 或 mocopi bridge
 
 deploy 侧继续消费现有 ZMQ schema。第一版集成不需要在 deploy 侧新增 topic。
 
-## 启动方式
+## 启动 mocopi UDP 输入
 
 在仓库根目录使用 `.venv_teleop` 启动：
 
@@ -69,18 +74,42 @@ deploy 侧继续消费现有 ZMQ schema。第一版集成不需要在 deploy 侧
   --zmq-port 5556
 ```
 
+## 启动 BVH 文件回放
+
+BVH 回放适合在没有 mocopi 硬件时验证后续链路，也适合调试三点 retargeting：
+
+```bash
+.venv_teleop/bin/python gear_sonic/scripts/mocap_manager_server.py \
+  --source bvh \
+  --bvh-file /path/to/motion.bvh \
+  --bvh-loop \
+  --bvh-fps 30 \
+  --zmq-port 5556
+```
+
+BVH source 会解析 hierarchy 和 motion 数据，执行 FK，提取 `LeftHand`、`RightHand`、`Head` 等关节，再通过 `VR3PointRetargeter` 转成 deploy 侧需要的 VR 三点目标。
+
 常用参数：
 
 | 参数 | 默认值 | 作用 |
 |------|--------|------|
+| `--source` | `mocopi` | 输入源，可选 `mocopi` 或 `bvh` |
 | `--mocopi-host` | `0.0.0.0` | UDP 绑定地址 |
 | `--mocopi-port` | `12351` | UDP 绑定端口 |
 | `--mocopi-format` | `auto` | 输入包格式，可选 `auto`、`binary`、`json` |
+| `--bvh-file` | 无 | `--source bvh` 时要回放的 BVH 文件 |
+| `--bvh-loop` | 关闭 | BVH 播放到末尾后循环 |
+| `--bvh-fps` | BVH 原始 FPS | BVH 目标回放 FPS；低于原始 FPS 时按 stride 跳帧 |
+| `--bvh-unit-scale` | `0.01` | BVH 坐标单位转米，厘米制 BVH 使用 `0.01` |
+| `--bvh-no-y-up-to-z-up` | 关闭 | 禁用 BVH Y-up 到 SONIC Z-up 的坐标转换 |
+| `--bvh-world-frame` | 关闭 | 保留 BVH root 全局平移，不做 body-local 化 |
 | `--zmq-port` | `5556` | deploy 侧订阅的 ZMQ PUB 端口 |
 | `--target-fps` | `20` | planner 发布循环频率 |
 | `--mocap-timeout-s` | `0.5` | 最新动捕帧超过该时间后停止发布 VR 三点目标 |
 | `--start-paused` | 关闭 | 启动时不立即启用控制 |
 | `--allow-bone-translation-vr` | 关闭 | 调试用途：把 bone translation 当作 VR 三点位置 |
+| `--no-vr3pt-calibration` | 关闭 | 禁用命名关节输入的首帧位置标定 |
+| `--vr3pt-scale` | `1.0` | 命名关节位置进入首帧标定前的缩放系数 |
 
 ## 运行时命令
 
@@ -178,6 +207,29 @@ bridge 也可以发送 `vr_pose`，形状为 `[3, 7]`：
 第 2 行：head [x, y, z, qw, qx, qy, qz]
 ```
 
+### BVH 文件
+
+BVH source 支持常见 BVH hierarchy/motion 文件。默认约定：
+
+- BVH 是 Y-up。
+- BVH 坐标单位是厘米，因此默认 `--bvh-unit-scale 0.01`。
+- 输出前会减去 root / hips 平移，形成 body-local 位置。
+- 默认把 BVH Y-up 转成 SONIC / MuJoCo 使用的 Z-up：`(x, y, z) -> (x, -z, y)`。
+- 默认查找 `Hips`、`LeftHand`、`RightHand`、`Head`。
+
+如果 BVH 文件使用不同关节命名，需要后续扩展 `BVH_DEFAULT_JOINT_ALIASES`，或者先在上游转换成兼容命名。
+
+BVH source 输出的是标准 `MocapFrame`，其中包含：
+
+```text
+left_wrist
+right_wrist
+head
+root
+```
+
+随后 `VR3PointRetargeter` 会进行首帧位置标定，让第一帧对齐 deploy 侧默认 VR 三点姿态。这样回放 BVH 时不会因为 BVH 原始站位离机器人默认参考姿态太远而产生明显跳变。
+
 ## 与 PICO 遥操作的关系
 
 PICO 遥操作当前链路：
@@ -200,6 +252,16 @@ mocopi UDP
   -> planner topic
 ```
 
+BVH 回放链路：
+
+```text
+BVH file
+  -> BvhPlaybackSource
+  -> MocapFrame
+  -> VR3PointRetargeter
+  -> planner topic
+```
+
 两条链路最终都发布 deploy 侧已有字段：
 
 - `vr_position`
@@ -219,6 +281,8 @@ mocopi UDP
 - 惯性动捕漂移补偿。
 - 等价于 PICO trigger/grip 的手部控制。
 - 与 PICO 共用的统一 manager 抽象。
+- BVH 关节命名的外部配置文件，目前只内置了一组常见别名。
+- BVH 三点姿态仍是轻量首帧标定，不等价于完整机器人重定向。
 
 `--allow-bone-translation-vr` 只应作为调试选项使用，或者用于上游 bridge 已经写入有意义全局 translation 的情况。它不应作为最终 mocopi 重定向方案。
 
@@ -239,11 +303,28 @@ mocopi UDP
 .venv_teleop/bin/python gear_sonic/scripts/mocap_manager_server.py --help
 ```
 
-最小运行检查：
+最小 mocopi JSON 运行检查：
 
 1. 用 `--mocopi-format json` 启动 manager。
 2. 向配置的 UDP 端口发送一帧 JSON bridge 数据。
 3. 确认 manager 日志中出现 `vr_3pt=yes`。
+
+最小 BVH 运行检查：
+
+```bash
+.venv_teleop/bin/python gear_sonic/scripts/mocap_manager_server.py \
+  --source bvh \
+  --bvh-file /path/to/motion.bvh \
+  --bvh-loop \
+  --bvh-fps 30 \
+  --zmq-port 5556
+```
+
+如果 BVH 中能找到左右手和头部关节，日志应出现：
+
+```text
+vr_3pt=yes
+```
 
 ## 下一步
 
