@@ -181,11 +181,11 @@ ik=1 ik_err=0.057m ik_dq=2.955rad ik_active=17 ik_v=3.81rad/s ik_margin=0.000rad
 | `ik` | 是否发送了 17 维上肢关节目标 | `1` 表示本帧包含 `upper_body_position` |
 | `ik_err` | 左右 wrist 中较大的 IK 位置误差 | 越小表示 wrist 目标越能被 G1 上肢达到 |
 | `ik_dq` | 17 维上肢目标相对默认姿态的最大关节偏移 | 接近 `0` 表示 IK 目标几乎没改动；明显大于 `0` 表示 manager 侧已经生成不同上肢目标 |
-| `ik_active` | 相对默认姿态偏移超过 `0.02rad` 的上肢关节数量 | `0` 表示没有实际上肢变化，多个关节变化但 MuJoCo 不明显时要看 deploy 侧消费和跟踪 |
+| `ik_active` | 相对默认姿态偏移超过 `0.02rad` 的上肢关节数量 | `0` 表示 manager 侧没有实际上肢变化；多个关节变化表示 manager 侧已经生成不同目标 |
 | `ik_v` | 17 维上肢目标中的最大关节速度 | 过大时容易被下游限幅，或表现成抖动、不自然 |
 | `ik_margin` | 上肢关节离最近限位的最小余量 | 长期接近 `0` 表示目标贴近关节限位，需要调尺度或加肘部约束 |
 
-这些是 mocap manager 侧的目标量化指标，能回答“加不加 `--enable-upper-body-ik` 是否生成了不同目标”。如果 `ik_dq`、`ik_active` 已经明显变化，但 MuJoCo 里看不出来，需要继续做 deploy 闭环量化：订阅 `g1_debug`，比较实际 `body_q` 上肢关节与 manager 发布的 `upper_body_position`，或用实际关节 FK 出 wrist 再和 VR3PT wrist 目标比较。
+这些是 mocap manager 侧的目标量化指标，能回答“加不加 `--enable-upper-body-ik` 是否生成了不同目标”。deploy 侧没有 PICO 专用逻辑，只按通用 `planner` 消息字段消费 `upper_body_position` / `upper_body_velocity`，因此不把 deploy 作为 PICO / mocopi / BVH 输入源差异的量化对象。如果 `ik_dq`、`ik_active` 已经明显变化但 MuJoCo 里看不出来，优先按通用 planner 消费链路和配置排查，不把它记作输入源量化指标。
 
 ## 当前样例解释
 

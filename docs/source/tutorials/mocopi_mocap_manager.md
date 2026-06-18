@@ -387,7 +387,7 @@ ik=1 ik_err=0.057m ik_dq=2.955rad ik_active=17 ik_v=3.81rad/s ik_margin=0.000rad
 | `ik_v` | 17 维上肢目标里的最大关节速度，单位 rad/s |
 | `ik_margin` | 当前上肢关节离最近限位的最小余量 |
 
-这几个值可以用来量化“加不加 `--enable-upper-body-ik` 有没有区别”。如果 `ik_dq` 接近 `0` 或 `ik_active=0`，说明 manager 侧基本没有生成新的上肢目标；如果 `ik_dq` 明显大于 `0` 且 `ik_active` 有多个关节，但 MuJoCo 里肉眼不明显，问题通常不在 mocap manager，而在 deploy 侧是否消费、是否被策略覆盖、或目标跟踪权重太低。`ik_v` 用来判断目标是否过快，过大时容易造成抖动或被下游限幅。
+这几个值可以用来量化“加不加 `--enable-upper-body-ik` 有没有区别”。如果 `ik_dq` 接近 `0` 或 `ik_active=0`，说明 manager 侧基本没有生成新的上肢目标；如果 `ik_dq` 明显大于 `0` 且 `ik_active` 有多个关节，就说明 manager 侧已经产生了不同目标。deploy 侧没有 PICO 专用逻辑，只按通用 `planner` 消息消费字段，因此这里不把 deploy 作为 PICO / mocopi / BVH 输入源差异的量化对象。`ik_v` 用来判断目标是否过快，过大时容易造成抖动或被下游限幅。
 
 如果 `ik_margin` 长期接近 `0`，说明目标容易把 G1 上肢推到关节限位，应先降低 wrist 目标尺度、增加正则，或继续补 elbow pole vector 约束。这个功能仍是实验路径，不建议直接替代默认 VR3PT 稳定链路。
 
