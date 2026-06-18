@@ -363,6 +363,12 @@ BVH file
 - FK 依赖不可用时默认回退到旧的首帧位置平移标定。
 - 默认启用三点位置低通、四元数 slerp、最大速度和最大加速度限制。
 
+对应工程提交：
+
+```text
+5e0ea54 feat: improve mocopi vr3pt retargeting
+```
+
 因此，“能动”不等于“能完整复原 BVH / mocopi 动作”。`PLANNER_VR_3PT` 会把外部三点目标交给 planner 和 policy 做稳定控制，下游本身也会把动作改造成 G1 可执行的形式。
 
 优先级建议：
@@ -395,6 +401,7 @@ BVH file
 .venv_teleop/bin/python -m compileall \
   gear_sonic/utils/teleop/sources \
   gear_sonic/utils/teleop/controls \
+  gear_sonic/utils/teleop/retarget \
   gear_sonic/scripts/mocap_manager_server.py
 ```
 

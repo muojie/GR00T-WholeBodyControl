@@ -259,6 +259,12 @@ bash deploy.sh --input-type zmq_manager --zmq-port 5556 sim
 - 没有使用 shoulder / elbow / torso 信息做上肢 IK。
 - 手部关节当前仍发送零值。
 
+对应工程提交：
+
+```text
+5e0ea54 feat: improve mocopi vr3pt retargeting
+```
+
 它还不是完整的人体到 G1 重定向。后续需要：
 
 - BVH 关节名配置化。
