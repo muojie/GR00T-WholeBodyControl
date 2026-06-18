@@ -130,6 +130,15 @@ abort
 
 这些命令在非 PICO 路径中替代 PICO 手柄按键。当前实现偏基础，后续生产使用应接入更明确的控制源。
 
+## 推荐调试顺序
+
+建议按下面顺序排查和验证：
+
+1. 先启动 mocopi UDP 输入，确认日志中的 `recv` 从 `0` 增长。如果一直是 `recv=0`，先排查 mocopi app 的目标 IP、端口 `12351`、手机/电脑是否在同一局域网，以及本机防火墙。
+2. 用 JSON bridge 发送一帧 `vr_position` / `vr_orientation`，确认 manager 日志出现 `vr_3pt=yes`。这一步验证 ZMQ 发布和 deploy 侧三点字段，不依赖 mocopi 骨架 FK。
+3. 用 `--source bvh` 回放 BVH 文件，确认离线动捕文件能进入同一套 `MocapFrame -> VR3PointRetargeter -> planner` 链路。
+4. 再接真实 mocopi 二进制包，做 27 bone 可视化、FK、首帧标定和坐标系校正。
+
 ## 输入格式
 
 ### 官方 mocopi 二进制 UDP
