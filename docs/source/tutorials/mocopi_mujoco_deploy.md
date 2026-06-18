@@ -171,7 +171,7 @@ vr_3pt=yes
 如果启用了 `--enable-upper-body-ik`，还会出现：
 
 ```text
-ik=1 ik_err=0.057m ik_margin=0.000rad
+ik=1 ik_err=0.057m ik_dq=2.955rad ik_active=17 ik_v=3.81rad/s ik_margin=0.000rad
 ```
 
 含义：
@@ -180,7 +180,12 @@ ik=1 ik_err=0.057m ik_margin=0.000rad
 |------|------|----------|
 | `ik` | 是否发送了 17 维上肢关节目标 | `1` 表示本帧包含 `upper_body_position` |
 | `ik_err` | 左右 wrist 中较大的 IK 位置误差 | 越小表示 wrist 目标越能被 G1 上肢达到 |
+| `ik_dq` | 17 维上肢目标相对默认姿态的最大关节偏移 | 接近 `0` 表示 IK 目标几乎没改动；明显大于 `0` 表示 manager 侧已经生成不同上肢目标 |
+| `ik_active` | 相对默认姿态偏移超过 `0.02rad` 的上肢关节数量 | `0` 表示没有实际上肢变化，多个关节变化但 MuJoCo 不明显时要看 deploy 侧消费和跟踪 |
+| `ik_v` | 17 维上肢目标中的最大关节速度 | 过大时容易被下游限幅，或表现成抖动、不自然 |
 | `ik_margin` | 上肢关节离最近限位的最小余量 | 长期接近 `0` 表示目标贴近关节限位，需要调尺度或加肘部约束 |
+
+这些是 mocap manager 侧的目标量化指标，能回答“加不加 `--enable-upper-body-ik` 是否生成了不同目标”。如果 `ik_dq`、`ik_active` 已经明显变化，但 MuJoCo 里看不出来，需要继续做 deploy 闭环量化：订阅 `g1_debug`，比较实际 `body_q` 上肢关节与 manager 发布的 `upper_body_position`，或用实际关节 FK 出 wrist 再和 VR3PT wrist 目标比较。
 
 ## 当前样例解释
 
@@ -318,7 +323,7 @@ bash deploy.sh --input-type zmq_manager --zmq-port 5556 sim
 
 它还不是完整的人体到 G1 重定向。后续需要：
 
-- 基于 shoulder-elbow-wrist 的 G1 上肢 IK。
+- 把 BVH shoulder-elbow-wrist 的 elbow pole vector 加入现有 G1 上肢 IK。
 - BVH 关节名配置化，避免不同 BVH 文件反复改代码。
 - 上肢 IK 的 elbow pole vector、关节限位余量和目标尺度调优。
 - 更精细的手腕/head 姿态坐标系配置。
@@ -329,7 +334,7 @@ bash deploy.sh --input-type zmq_manager --zmq-port 5556 sim
 
 1. `--visualize-vr3pt --visualize-g1` 中三点本身是否顺滑、方向是否合理。
 2. 日志里的 `span/head_z/max_v/lag/fk` 是否稳定、尺度是否合理。
-3. 如果启用 IK，看 `ik_err` 和 `ik_margin`。`ik_margin` 长期为 `0` 时，不要继续加大动作幅度，先调目标尺度或补 elbow pole vector。
+3. 如果启用 IK，先看 `ik_dq/ik_active/ik_v` 判断 manager 是否生成了不同上肢目标，再看 `ik_err` 和 `ik_margin`。`ik_margin` 长期为 `0` 时，不要继续加大动作幅度，先调目标尺度或补 elbow pole vector。
 4. 三点窗口合理但 MuJoCo 不自然，优先调 deploy / planner / compliance。
 5. 三点窗口本身就飘、抖或左右手方向明显不对，优先改 `VR3PointRetargeter`。
 6. 如果目标是完整复原 BVH，而不是实时稳定遥操作，需要新增 pose/reference streaming，把 BVH retarget 成 G1 `joint_pos`，不要只依赖 `PLANNER_VR_3PT`。

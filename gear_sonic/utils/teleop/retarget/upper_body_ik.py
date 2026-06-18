@@ -37,6 +37,9 @@ UPPER_BODY_JOINT_NAMES = (
     "right_wrist_yaw_joint",
 )
 
+ACTIVE_JOINT_DELTA_THRESHOLD_RAD = 0.02
+NEAR_LIMIT_MARGIN_THRESHOLD_RAD = 0.02
+
 
 @dataclass
 class UpperBodyIKTarget:
@@ -174,7 +177,7 @@ class UpperBodyIKRetargeter:
         else:
             velocity = ((output - self._last_output) / dt).astype(np.float32)
 
-        metrics = self._compute_metrics(q, vr_position)
+        metrics = self._compute_metrics(q, vr_position, velocity)
         self._last_q = q.copy()
         self._last_output = output.copy()
         self._last_time_s = float(timestamp_s)
@@ -198,7 +201,12 @@ class UpperBodyIKRetargeter:
         if self._default_q is None:
             self._default_q = self._robot_model.default_body_pose.copy()
 
-    def _compute_metrics(self, q: np.ndarray, vr_position: np.ndarray) -> dict[str, float]:
+    def _compute_metrics(
+        self,
+        q: np.ndarray,
+        vr_position: np.ndarray,
+        velocity: np.ndarray,
+    ) -> dict[str, float]:
         assert self._robot_model is not None
         self._robot_model.cache_forward_kinematics(q, auto_clip=False)
 
@@ -211,6 +219,9 @@ class UpperBodyIKRetargeter:
 
         controlled = q[self._joint_indices] if self._joint_indices is not None else np.array([])
         default = self._default_q[self._joint_indices] if self._joint_indices is not None else controlled
+        default_delta = controlled - default
+        abs_default_delta = np.abs(default_delta)
+        abs_velocity = np.abs(np.asarray(velocity, dtype=np.float64))
         limits_lower = self._robot_model.lower_joint_limits[self._joint_indices]
         limits_upper = self._robot_model.upper_joint_limits[self._joint_indices]
         limit_margin = np.minimum(controlled - limits_lower, limits_upper - controlled)
@@ -220,8 +231,19 @@ class UpperBodyIKRetargeter:
             "upper_body_ik_max_wrist_error_m": float(max(errors)),
             "upper_body_ik_mean_wrist_error_m": float(np.mean(errors)),
             "upper_body_ik_max_abs_joint_rad": float(np.max(np.abs(controlled))),
-            "upper_body_ik_max_default_delta_rad": float(np.max(np.abs(controlled - default))),
+            "upper_body_ik_max_default_delta_rad": float(np.max(abs_default_delta)),
+            "upper_body_ik_mean_default_delta_rad": float(np.mean(abs_default_delta)),
+            "upper_body_ik_active_joint_count": float(
+                np.count_nonzero(abs_default_delta > ACTIVE_JOINT_DELTA_THRESHOLD_RAD)
+            ),
+            "upper_body_ik_active_threshold_rad": float(ACTIVE_JOINT_DELTA_THRESHOLD_RAD),
+            "upper_body_ik_max_velocity_radps": float(np.max(abs_velocity)),
+            "upper_body_ik_mean_velocity_radps": float(np.mean(abs_velocity)),
             "upper_body_ik_min_limit_margin_rad": float(np.min(limit_margin)),
+            "upper_body_ik_near_limit_joint_count": float(
+                np.count_nonzero(limit_margin < NEAR_LIMIT_MARGIN_THRESHOLD_RAD)
+            ),
+            "upper_body_ik_near_limit_threshold_rad": float(NEAR_LIMIT_MARGIN_THRESHOLD_RAD),
         }
 
 

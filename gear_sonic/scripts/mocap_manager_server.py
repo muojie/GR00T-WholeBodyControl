@@ -287,6 +287,9 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
                         ik_desc = (
                             f" ik=1"
                             f" ik_err={ik_metrics.get('upper_body_ik_max_wrist_error_m', 0.0):.3f}m"
+                            f" ik_dq={ik_metrics.get('upper_body_ik_max_default_delta_rad', 0.0):.3f}rad"
+                            f" ik_active={int(ik_metrics.get('upper_body_ik_active_joint_count', 0.0))}"
+                            f" ik_v={ik_metrics.get('upper_body_ik_max_velocity_radps', 0.0):.2f}rad/s"
                             f" ik_margin={ik_metrics.get('upper_body_ik_min_limit_margin_rad', 0.0):.3f}rad"
                         )
                     else:
