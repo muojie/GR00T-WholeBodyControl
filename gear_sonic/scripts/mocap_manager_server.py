@@ -145,6 +145,14 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
         calibrate_on_first_frame=not args.no_vr3pt_calibration,
         position_scale=args.vr3pt_scale,
         allow_bone_translation_vr=args.allow_bone_translation_vr,
+        fk_calibration=not args.no_vr3pt_fk_calibration,
+        require_fk_calibration=args.require_vr3pt_fk_calibration,
+        enable_filter=not args.no_vr3pt_filter,
+        position_alpha=args.vr3pt_position_alpha,
+        orientation_alpha=args.vr3pt_orientation_alpha,
+        max_position_speed=args.vr3pt_max_speed,
+        max_position_accel=args.vr3pt_max_accel,
+        max_angular_speed=args.vr3pt_max_angular_speed,
     )
     controls = LineControlSource(auto_start=not args.start_paused)
     visualizer = _create_vr3pt_visualizer(args)
@@ -153,6 +161,7 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
     socket = context.socket(zmq.PUB)
     socket.bind(f"tcp://*:{args.zmq_port}")
 
+    retargeter.preload()
     source.start()
     time.sleep(args.publisher_warmup_s)
 
@@ -321,6 +330,51 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="Scale named-joint mocap positions before first-frame calibration.",
+    )
+    parser.add_argument(
+        "--no-vr3pt-fk-calibration",
+        action="store_true",
+        help="Disable G1 FK-based wrist/head calibration and use position-only calibration.",
+    )
+    parser.add_argument(
+        "--require-vr3pt-fk-calibration",
+        action="store_true",
+        help="Fail startup if G1 FK-based calibration cannot be loaded.",
+    )
+    parser.add_argument(
+        "--no-vr3pt-filter",
+        action="store_true",
+        help="Disable VR 3-point smoothing and velocity limiting.",
+    )
+    parser.add_argument(
+        "--vr3pt-position-alpha",
+        type=float,
+        default=0.45,
+        help="Position smoothing alpha in [0, 1]. Higher values follow mocap more closely.",
+    )
+    parser.add_argument(
+        "--vr3pt-orientation-alpha",
+        type=float,
+        default=0.45,
+        help="Quaternion slerp smoothing alpha in [0, 1]. Higher values follow mocap more closely.",
+    )
+    parser.add_argument(
+        "--vr3pt-max-speed",
+        type=float,
+        default=3.0,
+        help="Maximum VR 3-point translation speed in m/s. Use <=0 to disable.",
+    )
+    parser.add_argument(
+        "--vr3pt-max-accel",
+        type=float,
+        default=25.0,
+        help="Maximum VR 3-point translation acceleration in m/s^2. Use <=0 to disable.",
+    )
+    parser.add_argument(
+        "--vr3pt-max-angular-speed",
+        type=float,
+        default=8.0,
+        help="Maximum VR 3-point angular speed in rad/s. Use <=0 to disable.",
     )
     parser.add_argument(
         "--visualize-vr3pt",

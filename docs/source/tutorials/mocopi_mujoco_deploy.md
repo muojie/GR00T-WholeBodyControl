@@ -163,6 +163,28 @@ playing BVH /home/nolo/RAYNOS_Motion1.bvh at 25.0 Hz (source_fps=50.0, stride=2,
 
 这不是错误。如果需要更接近 30 Hz，后续要实现插值重采样，而不是整数 stride 跳帧。
 
+做动作自然度评估时，建议先让回放频率和 manager 发布频率一致：
+
+```bash
+.venv_teleop/bin/python gear_sonic/scripts/mocap_manager_server.py \
+  --source bvh \
+  --bvh-file /home/nolo/RAYNOS_Motion1.bvh \
+  --bvh-loop \
+  --bvh-fps 50 \
+  --target-fps 50 \
+  --zmq-port 5556 \
+  --visualize-vr3pt \
+  --visualize-g1
+```
+
+如果 50 Hz 负载较高，可以统一降到：
+
+```bash
+--bvh-fps 25 --target-fps 25
+```
+
+不要使用 `BVH 实际 25 Hz + manager 20 Hz` 这类不一致组合来判断复原质量，因为它会叠加采样抖动。
+
 ## 成功判断
 
 基础成功：
@@ -226,18 +248,43 @@ bash deploy.sh --input-type zmq_manager --zmq-port 5556 sim
 
 ### BVH 目标姿态不自然
 
-当前 BVH 路径只是轻量三点 retarget：
+当前 BVH 路径仍是三点 retarget，但已经加入第一阶段优化：
 
 - 默认查找 `LeftHand`、`RightHand`、`Head`。
 - 默认 Y-up 转 Z-up。
-- 默认首帧位置标定到 deploy 的 VR 三点参考姿态。
+- 默认使用 head / neck 初始朝向做 body frame 归一化。
+- 默认使用 G1 FK 参考姿态计算左右腕位置和姿态 offset。
+- 默认启用三点位置滤波、四元数 slerp、速度和加速度限制。
+- 如果 G1 FK 依赖不可用，默认回退到旧的首帧位置平移标定。
+- 没有使用 shoulder / elbow / torso 信息做上肢 IK。
+- 手部关节当前仍发送零值。
 
 它还不是完整的人体到 G1 重定向。后续需要：
 
 - BVH 关节名配置化。
-- 手腕/head 姿态坐标系校正。
+- 更精细的手腕/head 姿态坐标系配置。
 - 身高、臂长、肩宽比例处理。
-- 与 G1 FK 参考姿态严格对齐。
+- 基于肩肘腕的 G1 上肢 IK。
+
+判断问题位置时按顺序看：
+
+1. `--visualize-vr3pt --visualize-g1` 中三点本身是否顺滑、方向是否合理。
+2. 三点窗口合理但 MuJoCo 不自然，优先调 deploy / planner / compliance。
+3. 三点窗口本身就飘、抖或左右手方向明显不对，优先改 `VR3PointRetargeter`。
+4. 如果目标是完整复原 BVH，而不是实时稳定遥操作，需要新增 pose/reference streaming，把 BVH retarget 成 G1 `joint_pos`，不要只依赖 `PLANNER_VR_3PT`。
+
+调参建议：
+
+```bash
+# 更跟手，但可能更抖
+--vr3pt-position-alpha 0.65 --vr3pt-orientation-alpha 0.65
+
+# 更稳，但滞后更明显
+--vr3pt-position-alpha 0.30 --vr3pt-orientation-alpha 0.30 --vr3pt-max-speed 2.0
+
+# 对比旧行为
+--no-vr3pt-fk-calibration --no-vr3pt-filter
+```
 
 ## 推荐验证顺序
 
