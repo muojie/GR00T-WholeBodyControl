@@ -119,7 +119,7 @@ cd /home/nolo/GR00T-WholeBodyControl
 
 ```text
 [MocapManager] publishing planner data on tcp://*:5556; playing BVH ...
-[MocapManager] recv_fps=25.0 recv=56 vr_3pt=yes dropped=0 frame=110 ...
+[MocapManager] recv_fps=25.0 recv=56 vr_3pt=yes span=0.371m head_z=0.398m max_v=1.350m/s lag=0.169m fk=1 dropped=0 frame=110 ... joints=12 ...
 ```
 
 重点看：
@@ -134,6 +134,16 @@ vr_3pt=yes
 - 左腕、右腕、头部三点已提取。
 - `VR3PointRetargeter` 已生成 `vr_position` / `vr_orientation`。
 - manager 正在向 `planner` topic 发布三点目标。
+
+同一行里的质量指标用于判断动作是否合理：
+
+| 字段 | 含义 | 判断方式 |
+|------|------|----------|
+| `span` | 左右腕目标距离 | 长期过小会像夹臂，长期过大会让上肢目标不可达 |
+| `head_z` | head 目标高度 | 明显异常时优先检查坐标系、单位和 body-local 处理 |
+| `max_v` | 三点最大速度 | 抽动时看它是否频繁接近 `--vr3pt-max-speed` |
+| `lag` | 滤波前后三点最大偏差 | 越大越稳但越滞后，越小越跟手但可能抖 |
+| `fk` | G1 FK 参考标定状态 | `1` 是正常优化路径，`0` 说明回退到了旧标定 |
 
 ## 当前样例解释
 
@@ -251,12 +261,14 @@ bash deploy.sh --input-type zmq_manager --zmq-port 5556 sim
 当前 BVH 路径仍是三点 retarget，但已经加入第一阶段优化：
 
 - 默认查找 `LeftHand`、`RightHand`、`Head`。
+- 默认尽量保留 `spine`、`chest`、`neck`、`head`、`shoulder`、`elbow`、`wrist`、`pelvis` 等有效关节；`RAYNOS_Motion1.bvh` 当前可匹配到 `joints=12`。
 - 默认 Y-up 转 Z-up。
 - 默认使用 head / neck 初始朝向做 body frame 归一化。
 - 默认使用 G1 FK 参考姿态计算左右腕位置和姿态 offset。
 - 默认启用三点位置滤波、四元数 slerp、速度和加速度限制。
+- 默认在日志中输出 `span/head_z/max_v/lag/fk`，用于判断输入尺度、滤波滞后和 FK 标定状态。
 - 如果 G1 FK 依赖不可用，默认回退到旧的首帧位置平移标定。
-- 没有使用 shoulder / elbow / torso 信息做上肢 IK。
+- shoulder / elbow / torso 信息已经进入 `MocapFrame`，但还没有参与 G1 上肢 IK。
 - 手部关节当前仍发送零值。
 
 对应工程提交：
@@ -267,17 +279,19 @@ bash deploy.sh --input-type zmq_manager --zmq-port 5556 sim
 
 它还不是完整的人体到 G1 重定向。后续需要：
 
-- BVH 关节名配置化。
+- 基于 shoulder-elbow-wrist 的 G1 上肢 IK。
+- BVH 关节名配置化，避免不同 BVH 文件反复改代码。
 - 更精细的手腕/head 姿态坐标系配置。
 - 身高、臂长、肩宽比例处理。
-- 基于肩肘腕的 G1 上肢 IK。
+- 需要完整复原 BVH 时，新增 G1 `joint_pos` pose/reference streaming，而不是只走 `PLANNER_VR_3PT`。
 
 判断问题位置时按顺序看：
 
 1. `--visualize-vr3pt --visualize-g1` 中三点本身是否顺滑、方向是否合理。
-2. 三点窗口合理但 MuJoCo 不自然，优先调 deploy / planner / compliance。
-3. 三点窗口本身就飘、抖或左右手方向明显不对，优先改 `VR3PointRetargeter`。
-4. 如果目标是完整复原 BVH，而不是实时稳定遥操作，需要新增 pose/reference streaming，把 BVH retarget 成 G1 `joint_pos`，不要只依赖 `PLANNER_VR_3PT`。
+2. 日志里的 `span/head_z/max_v/lag/fk` 是否稳定、尺度是否合理。
+3. 三点窗口合理但 MuJoCo 不自然，优先调 deploy / planner / compliance。
+4. 三点窗口本身就飘、抖或左右手方向明显不对，优先改 `VR3PointRetargeter`。
+5. 如果目标是完整复原 BVH，而不是实时稳定遥操作，需要新增 pose/reference streaming，把 BVH retarget 成 G1 `joint_pos`，不要只依赖 `PLANNER_VR_3PT`。
 
 调参建议：
 

@@ -244,9 +244,19 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
                         f"joints={len(frame.joints)} bones={len(frame.bones)}"
                     )
                 vr_desc = "yes" if vr_position is not None else "no"
+                metrics_desc = ""
+                metrics = retargeter.diagnostics
+                if vr_position is not None and metrics:
+                    metrics_desc = (
+                        f" span={metrics.get('wrist_span_m', 0.0):.3f}m"
+                        f" head_z={metrics.get('head_height_m', 0.0):.3f}m"
+                        f" max_v={metrics.get('max_speed_mps', 0.0):.3f}m/s"
+                        f" lag={metrics.get('max_filter_delta_m', 0.0):.3f}m"
+                        f" fk={int(metrics.get('fk_calibrated', 0.0))}"
+                    )
                 print(
                     f"[MocapManager] recv_fps={diag['fps']:.1f} recv={diag['received_packets']} "
-                    f"vr_3pt={vr_desc} "
+                    f"vr_3pt={vr_desc}{metrics_desc} "
                     f"dropped={diag['dropped_packets']} {frame_desc}"
                 )
                 if diag["last_error"]:

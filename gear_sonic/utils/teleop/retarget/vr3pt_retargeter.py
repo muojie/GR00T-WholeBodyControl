@@ -48,6 +48,7 @@ DEFAULT_VR_ORIENTATION = np.array(
 class VR3PointTarget:
     position: np.ndarray
     orientation: np.ndarray
+    metrics: dict[str, float] | None = None
 
 
 class VR3PointRetargeter:
@@ -101,6 +102,7 @@ class VR3PointRetargeter:
         self._last_filtered_position: np.ndarray | None = None
         self._last_filtered_orientation: np.ndarray | None = None
         self._last_velocity: np.ndarray | None = None
+        self._last_metrics: dict[str, float] = {}
 
     def reset(self) -> None:
         self._position_offset = None
@@ -116,6 +118,11 @@ class VR3PointRetargeter:
         self._last_filtered_position = None
         self._last_filtered_orientation = None
         self._last_velocity = None
+        self._last_metrics = {}
+
+    @property
+    def diagnostics(self) -> dict[str, float]:
+        return dict(self._last_metrics)
 
     def preload(self) -> None:
         """Load optional FK dependencies before live mocap frames start arriving."""
@@ -299,7 +306,13 @@ class VR3PointRetargeter:
         orientation = _normalize_orientation_array(orientation)
 
         if not self.enable_filter:
-            return VR3PointTarget(position=position.reshape(-1), orientation=orientation.reshape(-1))
+            metrics = self._compute_metrics(position, position, np.zeros_like(position))
+            self._last_metrics = metrics
+            return VR3PointTarget(
+                position=position.reshape(-1),
+                orientation=orientation.reshape(-1),
+                metrics=metrics,
+            )
 
         if (
             self._last_filter_time_s is None
@@ -310,7 +323,13 @@ class VR3PointRetargeter:
             self._last_filtered_position = position.copy()
             self._last_filtered_orientation = orientation.copy()
             self._last_velocity = np.zeros_like(position)
-            return VR3PointTarget(position=position.reshape(-1), orientation=orientation.reshape(-1))
+            metrics = self._compute_metrics(position, position, self._last_velocity)
+            self._last_metrics = metrics
+            return VR3PointTarget(
+                position=position.reshape(-1),
+                orientation=orientation.reshape(-1),
+                metrics=metrics,
+            )
 
         dt = max(1e-3, min(0.2, float(timestamp_s) - self._last_filter_time_s))
         last_position = self._last_filtered_position
@@ -356,11 +375,43 @@ class VR3PointRetargeter:
         self._last_filtered_position = smoothed_position.astype(np.float32)
         self._last_filtered_orientation = smoothed_orientation
         self._last_velocity = velocity.astype(np.float32)
+        metrics = self._compute_metrics(
+            position,
+            self._last_filtered_position,
+            self._last_velocity,
+        )
+        self._last_metrics = metrics
 
         return VR3PointTarget(
             position=self._last_filtered_position.reshape(-1),
             orientation=self._last_filtered_orientation.reshape(-1),
+            metrics=metrics,
         )
+
+    def _compute_metrics(
+        self, raw_position: np.ndarray, filtered_position: np.ndarray, velocity: np.ndarray
+    ) -> dict[str, float]:
+        raw_position = np.asarray(raw_position, dtype=np.float32).reshape(3, 3)
+        filtered_position = np.asarray(filtered_position, dtype=np.float32).reshape(3, 3)
+        velocity = np.asarray(velocity, dtype=np.float32).reshape(3, 3)
+
+        filter_delta = np.linalg.norm(raw_position - filtered_position, axis=1)
+        speeds = np.linalg.norm(velocity, axis=1)
+        wrist_span = float(np.linalg.norm(filtered_position[0] - filtered_position[1]))
+        left_height = float(filtered_position[0, 2])
+        right_height = float(filtered_position[1, 2])
+        head_height = float(filtered_position[2, 2])
+
+        return {
+            "wrist_span_m": wrist_span,
+            "left_wrist_height_m": left_height,
+            "right_wrist_height_m": right_height,
+            "head_height_m": head_height,
+            "max_filter_delta_m": float(np.max(filter_delta)),
+            "max_speed_mps": float(np.max(speeds)),
+            "fk_calibrated": 1.0 if self._calibration_neck_quat_inv is not None else 0.0,
+            "filter_enabled": 1.0 if self.enable_filter else 0.0,
+        }
 
 
 def _find_joint(frame: MocapFrame, aliases: tuple[str, ...]) -> Pose7D | None:

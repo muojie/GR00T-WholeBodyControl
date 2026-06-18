@@ -104,7 +104,7 @@ BVH 回放适合在没有 mocopi 硬件时验证后续链路，也适合调试�
   --visualize-vr3pt
 ```
 
-BVH source 会解析 hierarchy 和 motion 数据，执行 FK，提取 `LeftHand`、`RightHand`、`Head` 等关节，再通过 `VR3PointRetargeter` 转成 deploy 侧需要的 VR 三点目标。
+BVH source 会解析 hierarchy 和 motion 数据，执行 FK，并尽量保留 torso、neck、head、shoulder、elbow、wrist、pelvis 等有效关节。当前 planner 仍只消费 `left_wrist`、`right_wrist`、`head` 三点，但保留更多关节后，后续可以继续做肩肘腕 IK、肘部方向约束和 torso 姿态约束。
 
 如果用于评估动作自然度，建议让 BVH 回放频率和 manager 发布频率一致。例如 BVH 原始文件是 `50 Hz` 时，先用：
 
@@ -278,18 +278,48 @@ BVH source 支持常见 BVH hierarchy/motion 文件。默认约定：
 - 默认把 BVH Y-up 转成 SONIC / MuJoCo 使用的 Z-up：`(x, y, z) -> (x, -z, y)`。
 - 默认查找 `Hips`、`LeftHand`、`RightHand`、`Head`。
 
-如果 BVH 文件使用不同关节命名，需要后续扩展 `BVH_DEFAULT_JOINT_ALIASES`，或者先在上游转换成兼容命名。
+当前内置别名已经覆盖常见 BVH / Mixamo 命名，也覆盖了 `RAYNOS_Motion1.bvh` 中的 `torso_*`、`l_shoulder`、`l_low_arm`、`r_shoulder`、`r_low_arm`、`l_hand`、`r_hand` 等命名。如果 BVH 文件使用其他关节命名，需要继续扩展 `BVH_DEFAULT_JOINT_ALIASES`，或者先在上游转换成兼容命名。
 
 BVH source 输出的是标准 `MocapFrame`，其中包含：
 
 ```text
-left_wrist
-right_wrist
-head
 root
+pelvis
+spine
+chest
+neck
+head
+left_shoulder
+left_elbow
+left_wrist
+right_shoulder
+right_elbow
+right_wrist
 ```
 
 随后 `VR3PointRetargeter` 会进行首帧位置标定，让第一帧对齐 deploy 侧默认 VR 三点姿态。这样回放 BVH 时不会因为 BVH 原始站位离机器人默认参考姿态太远而产生明显跳变。
+
+运行日志中的 `joints=N` 表示当前输入帧携带了多少个有效命名关节。以 `/home/nolo/RAYNOS_Motion1.bvh` 为例，当前应能看到 `joints=12`。
+
+## VR3PT 质量指标
+
+当 `vr_3pt=yes` 时，manager 会在日志中附带一组质量指标：
+
+```text
+span=0.371m head_z=0.398m max_v=1.350m/s lag=0.169m fk=1
+```
+
+含义：
+
+| 字段 | 含义 | 用途 |
+|------|------|------|
+| `span` | 左右腕三点目标距离 | 判断动作尺度是否过大或过小 |
+| `head_z` | head 三点目标高度 | 判断坐标系、身高和 body-local 处理是否合理 |
+| `max_v` | 三点中最大的滤波后速度 | 判断是否过冲、抽动或限速过紧 |
+| `lag` | 原始三点和滤波后三点的最大距离 | 判断滤波带来的滞后 |
+| `fk` | 是否使用 G1 FK 参考标定 | `1` 表示使用 FK 标定，`0` 表示回退到旧的首帧平移标定 |
+
+这些指标不会改变 planner 消息格式，只用于调试。后续如果 MuJoCo 里动作不自然，先看三点窗口和这组指标，再决定是调 `VR3PointRetargeter`、planner，还是补完整 IK。
 
 ## 与 PICO 遥操作的关系
 
@@ -375,11 +405,12 @@ BVH file
 
 1. 已完成：把 PICO 的三点标定策略移植到 `VR3PointRetargeter`，包括 neck 朝向归一化、G1 FK 参考、左右腕位置 offset、左右腕姿态 offset。
 2. 已完成：给三点目标增加滤波和限速，包括位置低通、四元数 slerp、最大速度和最大加速度限制。
-3. 下一步：扩展 `MocapFrame` 的有效关节，至少保留 shoulder / elbow / wrist / head / pelvis，不要只取三点。
-4. 下一步：基于 shoulder-elbow-wrist 做 G1 上肢 IK，目标函数同时考虑 wrist 位置、wrist 朝向、肘部方向、关节限位和上一帧平滑项。
-5. 下一步：给 BVH 关节别名和坐标系 offset 做外部配置，避免不同 BVH 文件反复改代码。
-6. 下一步：为 mocopi 官方二进制包补完整 FK / 标定层，把 27 bone 转成机器人 body frame 下的稳定三点和可选上肢目标。
-7. 如果目标是“尽量复原离线 BVH”，应增加 pose/reference streaming 路径，直接输出 G1 `joint_pos`；如果目标是“实时遥操作稳定控制”，继续优先优化 planner VR 三点路径。
+3. 已完成：扩展 `MocapFrame` 的有效关节，至少保留 spine / chest / neck / head / shoulder / elbow / wrist / pelvis，不再只保留三点。
+4. 已完成：在 manager 日志中增加 VR3PT 质量指标，包括腕距、head 高度、最大速度、滤波滞后和 FK 标定状态。
+5. 下一步：基于 shoulder-elbow-wrist 做 G1 上肢 IK，目标函数同时考虑 wrist 位置、wrist 朝向、肘部方向、关节限位和上一帧平滑项。
+6. 下一步：给 BVH 关节别名和坐标系 offset 做外部配置，避免不同 BVH 文件反复改代码。
+7. 下一步：为 mocopi 官方二进制包补完整 FK / 标定层，把 27 bone 转成机器人 body frame 下的稳定三点和可选上肢目标。
+8. 如果目标是“尽量复原离线 BVH”，应增加 pose/reference streaming 路径，直接输出 G1 `joint_pos`；如果目标是“实时遥操作稳定控制”，继续优先优化 planner VR 三点路径。
 
 推荐先用默认优化参数跑。如果动作仍然滞后，可以提高：
 
