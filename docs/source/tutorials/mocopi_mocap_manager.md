@@ -9,6 +9,11 @@
 这是第一版输入源集成层。它可以接收 mocopi UDP 数据、回放 BVH 文件，并发布现有 `command`、`planner`、`manager_state` ZMQ topic。真正可直接闭环控制机器人的 mocopi 路径目前依赖上游桥接程序提供 `vr_position` 和 `vr_orientation`；完整的 mocopi 骨架 FK 与标定层仍是后续工作。
 ```
 
+```{admonition} 默认不会弹出窗口
+:class: note
+`mocap_manager_server.py` 默认只是 ZMQ publisher，不会自动打开可视化窗口。要看本地三点目标窗口，需要显式添加 `--visualize-vr3pt`。要看机器人实际运动，还需要另开 sim/deploy 进程订阅 `5556`。
+```
+
 ## 代码位置
 
 mocopi 输入链路由以下文件实现：
@@ -87,6 +92,18 @@ BVH 回放适合在没有 mocopi 硬件时验证后续链路，也适合调试�
   --zmq-port 5556
 ```
 
+如果只想先看 BVH 生成的三点目标，不连接 deploy，可以打开本地可视化窗口：
+
+```bash
+.venv_teleop/bin/python gear_sonic/scripts/mocap_manager_server.py \
+  --source bvh \
+  --bvh-file /path/to/motion.bvh \
+  --bvh-loop \
+  --bvh-fps 30 \
+  --zmq-port 5556 \
+  --visualize-vr3pt
+```
+
 BVH source 会解析 hierarchy 和 motion 数据，执行 FK，提取 `LeftHand`、`RightHand`、`Head` 等关节，再通过 `VR3PointRetargeter` 转成 deploy 侧需要的 VR 三点目标。
 
 常用参数：
@@ -110,6 +127,9 @@ BVH source 会解析 hierarchy 和 motion 数据，执行 FK，提取 `LeftHand`
 | `--allow-bone-translation-vr` | 关闭 | 调试用途：把 bone translation 当作 VR 三点位置 |
 | `--no-vr3pt-calibration` | 关闭 | 禁用命名关节输入的首帧位置标定 |
 | `--vr3pt-scale` | `1.0` | 命名关节位置进入首帧标定前的缩放系数 |
+| `--visualize-vr3pt` | 关闭 | 打开 PyVista 窗口，实时显示生成的 VR 三点目标 |
+| `--visualize-g1` | 关闭 | 在三点可视化窗口中同时显示 G1 模型 |
+| `--visualize-width` / `--visualize-height` | `1400` / `900` | 可视化窗口尺寸 |
 
 ## 运行时命令
 
@@ -138,6 +158,8 @@ abort
 2. 用 JSON bridge 发送一帧 `vr_position` / `vr_orientation`，确认 manager 日志出现 `vr_3pt=yes`。这一步验证 ZMQ 发布和 deploy 侧三点字段，不依赖 mocopi 骨架 FK。
 3. 用 `--source bvh` 回放 BVH 文件，确认离线动捕文件能进入同一套 `MocapFrame -> VR3PointRetargeter -> planner` 链路。
 4. 再接真实 mocopi 二进制包，做 27 bone 可视化、FK、首帧标定和坐标系校正。
+
+如果 manager 日志已经出现 `vr_3pt=yes`，但屏幕没有窗口，通常是因为没有加 `--visualize-vr3pt`。如果加了参数仍没有窗口，检查当前环境是否有可用桌面显示，例如 `echo $DISPLAY`。
 
 ## 输入格式
 

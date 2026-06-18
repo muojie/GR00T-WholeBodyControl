@@ -74,6 +74,37 @@ def _send_manager_state(socket: zmq.Socket, stream_mode: StreamMode, toggle_dc: 
     )
 
 
+def _create_vr3pt_visualizer(args: argparse.Namespace):
+    if not args.visualize_vr3pt:
+        return None
+
+    try:
+        from gear_sonic.utils.teleop.vis.vr3pt_pose_visualizer import VR3PtPoseVisualizer
+    except ImportError as exc:
+        raise RuntimeError(
+            "VR 3-point visualization requires PyVista/VTK dependencies from .venv_teleop"
+        ) from exc
+
+    visualizer = VR3PtPoseVisualizer(with_g1_robot=args.visualize_g1)
+    visualizer.create_realtime_plotter(
+        interactive=True,
+        window_size=(args.visualize_width, args.visualize_height),
+        with_reference_frames=True,
+    )
+    print("[MocapManager] VR 3-point visualization window opened")
+    return visualizer
+
+
+def _vr_arrays_to_pose(vr_position: np.ndarray, vr_orientation: np.ndarray) -> np.ndarray:
+    return np.concatenate(
+        (
+            np.asarray(vr_position, dtype=np.float32).reshape(3, 3),
+            np.asarray(vr_orientation, dtype=np.float32).reshape(3, 4),
+        ),
+        axis=1,
+    )
+
+
 def _create_source(args: argparse.Namespace):
     if args.source == "mocopi":
         source = MocopiUdpSource(
@@ -116,6 +147,7 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
         allow_bone_translation_vr=args.allow_bone_translation_vr,
     )
     controls = LineControlSource(auto_start=not args.start_paused)
+    visualizer = _create_vr3pt_visualizer(args)
 
     context = zmq.Context.instance()
     socket = context.socket(zmq.PUB)
@@ -160,6 +192,16 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
                     if target is not None:
                         vr_position = target.position
                         vr_orientation = target.orientation
+                        if visualizer is not None:
+                            vr_pose = _vr_arrays_to_pose(vr_position, vr_orientation)
+                            visualizer.update_vr_poses(vr_pose)
+                            visualizer.render()
+                            if not visualizer.is_open:
+                                print("[MocapManager] visualization window closed")
+                                socket.send(build_command_message(start=False, stop=True, planner=True))
+                                current_stream_mode = StreamMode.OFF
+                                _send_manager_state(socket, current_stream_mode, False, False)
+                                break
 
             socket.send(
                 build_planner_message(
@@ -209,6 +251,8 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
         print("\n[MocapManager] stopping")
         socket.send(build_command_message(start=False, stop=True, planner=True))
     finally:
+        if visualizer is not None:
+            visualizer.close()
         source.stop()
         socket.close(0)
 
@@ -278,6 +322,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=1.0,
         help="Scale named-joint mocap positions before first-frame calibration.",
     )
+    parser.add_argument(
+        "--visualize-vr3pt",
+        action="store_true",
+        help="Open a PyVista window that renders the generated VR 3-point targets.",
+    )
+    parser.add_argument(
+        "--visualize-g1",
+        action="store_true",
+        help="Also render the G1 mesh in the VR 3-point visualization window.",
+    )
+    parser.add_argument("--visualize-width", type=int, default=1400)
+    parser.add_argument("--visualize-height", type=int, default=900)
     return parser
 
 
