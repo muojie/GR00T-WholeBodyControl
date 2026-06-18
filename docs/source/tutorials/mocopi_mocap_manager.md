@@ -2,6 +2,8 @@
 
 本文档说明如何使用 Sony mocopi、基于 mocopi 的桥接程序，或者 BVH 文件回放，作为 SONIC 现有 ZMQ 部署链路的输入源。
 
+当前主线先以 `planner` topic 的 VR3PT 三点验证为主。PICO 的腿部 tracker 数据主要通过 full-body `pose` topic / SMPL reference 路径进入 deploy，后续 mocopi / BVH 的 POSE 流支持单独在 [Sony mocopi / BVH POSE 流支持追踪](mocopi_pose_stream.md) 中记录。
+
 当前实现刻意独立于 `pico_manager_thread_server.py`。这样可以先验证非 PICO 输入链路，而不影响已有 PICO/XR 遥操作流程。
 
 ```{admonition} 当前状态
@@ -58,6 +60,8 @@ Sony mocopi app / mocopi bridge / BVH file
 ```
 
 deploy 侧继续消费现有 ZMQ schema。第一版集成不需要在 deploy 侧新增 topic。
+
+注意：这张图描述的是 `planner` topic 的三点实时验证链路，不是 PICO full-body `pose` topic。PICO 的下肢 tracker 数据会融入 full-body / SMPL 数据；mocopi / BVH 要对齐这条能力，需要新增 POSE 流支持，而不是继续扩展 `PLANNER_VR_3PT`。
 
 ## 启动 mocopi UDP 输入
 

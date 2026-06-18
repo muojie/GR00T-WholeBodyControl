@@ -313,7 +313,7 @@ bash deploy.sh --input-type zmq_manager --zmq-port 5556 sim
 - 如果 G1 FK 依赖不可用，默认回退到旧的首帧位置平移标定。
 - shoulder / elbow / torso 信息已经进入 `MocapFrame`；当前 IK 先用 wrist 目标，尚未把 BVH elbow pole vector 纳入目标函数。
 - 手部关节当前仍发送零值。
-- 腿部复原还没有做。当前 planner 模式下腿部由 locomotion policy 生成；如果要逐帧复原 BVH 腿部，需要新增 G1 `joint_pos` pose/reference streaming 或扩展 deploy schema。
+- 当前 `PLANNER_VR_3PT` 不携带完整下肢 tracker 信息。PICO 的腿部 tracker 数据主要通过 full-body `pose` topic / SMPL reference 路径进入 deploy；如果要让 BVH/mocopi 对齐这条能力，下一步应新增 `pose` topic 支持，而不是在 `planner` topic 里做腿部 IK。
 
 对应工程提交：
 
@@ -323,12 +323,11 @@ bash deploy.sh --input-type zmq_manager --zmq-port 5556 sim
 
 它还不是完整的人体到 G1 重定向。后续需要：
 
-- 把 BVH shoulder-elbow-wrist 的 elbow pole vector 加入现有 G1 上肢 IK。
+- 新增 `pose` topic / full-body reference stream，字段和 shape 对齐 PICO POSE 流。
 - BVH 关节名配置化，避免不同 BVH 文件反复改代码。
-- 上肢 IK 的 elbow pole vector、关节限位余量和目标尺度调优。
 - 更精细的手腕/head 姿态坐标系配置。
 - 身高、臂长、肩宽比例处理。
-- 需要完整复原 BVH 时，新增 G1 `joint_pos` pose/reference streaming，而不是只走 `PLANNER_VR_3PT`。
+- POSE 流打通后，再评估是否继续做上肢 IK 的 elbow pole vector、关节限位余量和目标尺度调优。
 
 判断问题位置时按顺序看：
 
@@ -337,7 +336,7 @@ bash deploy.sh --input-type zmq_manager --zmq-port 5556 sim
 3. 如果启用 IK，先看 `ik_dq/ik_active/ik_v` 判断 manager 是否生成了不同上肢目标，再看 `ik_err` 和 `ik_margin`。`ik_margin` 长期为 `0` 时，不要继续加大动作幅度，先调目标尺度或补 elbow pole vector。
 4. 三点窗口合理但 MuJoCo 不自然，优先调 deploy / planner / compliance。
 5. 三点窗口本身就飘、抖或左右手方向明显不对，优先改 `VR3PointRetargeter`。
-6. 如果目标是完整复原 BVH，而不是实时稳定遥操作，需要新增 pose/reference streaming，把 BVH retarget 成 G1 `joint_pos`，不要只依赖 `PLANNER_VR_3PT`。
+6. 如果目标是完整复原 BVH 或利用腿部 tracker/full-body 信息，不要只依赖 `PLANNER_VR_3PT`，需要新增 `pose` topic / reference streaming。后续用 [Sony mocopi / BVH POSE 流支持追踪](mocopi_pose_stream.md) 单独记录。
 
 调参建议：
 

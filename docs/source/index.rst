@@ -93,6 +93,7 @@ Documentation
    tutorials/vr_wholebody_teleop
    tutorials/mocopi_mocap_manager
    tutorials/mocopi_mujoco_deploy
+   tutorials/mocopi_pose_stream
    tutorials/data_collection
    tutorials/vla_workflow
    tutorials/vla_inference
