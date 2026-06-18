@@ -113,6 +113,29 @@ cd /home/nolo/GR00T-WholeBodyControl
 --visualize-g1
 ```
 
+如果要验证实验性上肢 IK，再加：
+
+```bash
+--enable-upper-body-ik
+```
+
+完整验证命令：
+
+```bash
+.venv_teleop/bin/python gear_sonic/scripts/mocap_manager_server.py \
+  --source bvh \
+  --bvh-file /home/nolo/RAYNOS_Motion1.bvh \
+  --bvh-loop \
+  --bvh-fps 25 \
+  --target-fps 25 \
+  --zmq-port 5556 \
+  --visualize-vr3pt \
+  --visualize-g1 \
+  --enable-upper-body-ik
+```
+
+这个开关会额外发布 deploy 侧已有的 `upper_body_position` / `upper_body_velocity`。它不改变腿部控制；腿部仍由 locomotion planner 根据 `mode/movement/facing/speed/height` 生成。
+
 ## 预期日志
 
 终端 3 应出现类似：
@@ -144,6 +167,20 @@ vr_3pt=yes
 | `max_v` | 三点最大速度 | 抽动时看它是否频繁接近 `--vr3pt-max-speed` |
 | `lag` | 滤波前后三点最大偏差 | 越大越稳但越滞后，越小越跟手但可能抖 |
 | `fk` | G1 FK 参考标定状态 | `1` 是正常优化路径，`0` 说明回退到了旧标定 |
+
+如果启用了 `--enable-upper-body-ik`，还会出现：
+
+```text
+ik=1 ik_err=0.057m ik_margin=0.000rad
+```
+
+含义：
+
+| 字段 | 含义 | 判断方式 |
+|------|------|----------|
+| `ik` | 是否发送了 17 维上肢关节目标 | `1` 表示本帧包含 `upper_body_position` |
+| `ik_err` | 左右 wrist 中较大的 IK 位置误差 | 越小表示 wrist 目标越能被 G1 上肢达到 |
+| `ik_margin` | 上肢关节离最近限位的最小余量 | 长期接近 `0` 表示目标贴近关节限位，需要调尺度或加肘部约束 |
 
 ## 当前样例解释
 
@@ -267,9 +304,11 @@ bash deploy.sh --input-type zmq_manager --zmq-port 5556 sim
 - 默认使用 G1 FK 参考姿态计算左右腕位置和姿态 offset。
 - 默认启用三点位置滤波、四元数 slerp、速度和加速度限制。
 - 默认在日志中输出 `span/head_z/max_v/lag/fk`，用于判断输入尺度、滤波滞后和 FK 标定状态。
+- 可选 `--enable-upper-body-ik`，从 VR3PT wrist 目标求解并发布 17 维上肢关节目标。
 - 如果 G1 FK 依赖不可用，默认回退到旧的首帧位置平移标定。
-- shoulder / elbow / torso 信息已经进入 `MocapFrame`，但还没有参与 G1 上肢 IK。
+- shoulder / elbow / torso 信息已经进入 `MocapFrame`；当前 IK 先用 wrist 目标，尚未把 BVH elbow pole vector 纳入目标函数。
 - 手部关节当前仍发送零值。
+- 腿部复原还没有做。当前 planner 模式下腿部由 locomotion policy 生成；如果要逐帧复原 BVH 腿部，需要新增 G1 `joint_pos` pose/reference streaming 或扩展 deploy schema。
 
 对应工程提交：
 
@@ -281,6 +320,7 @@ bash deploy.sh --input-type zmq_manager --zmq-port 5556 sim
 
 - 基于 shoulder-elbow-wrist 的 G1 上肢 IK。
 - BVH 关节名配置化，避免不同 BVH 文件反复改代码。
+- 上肢 IK 的 elbow pole vector、关节限位余量和目标尺度调优。
 - 更精细的手腕/head 姿态坐标系配置。
 - 身高、臂长、肩宽比例处理。
 - 需要完整复原 BVH 时，新增 G1 `joint_pos` pose/reference streaming，而不是只走 `PLANNER_VR_3PT`。
@@ -289,9 +329,10 @@ bash deploy.sh --input-type zmq_manager --zmq-port 5556 sim
 
 1. `--visualize-vr3pt --visualize-g1` 中三点本身是否顺滑、方向是否合理。
 2. 日志里的 `span/head_z/max_v/lag/fk` 是否稳定、尺度是否合理。
-3. 三点窗口合理但 MuJoCo 不自然，优先调 deploy / planner / compliance。
-4. 三点窗口本身就飘、抖或左右手方向明显不对，优先改 `VR3PointRetargeter`。
-5. 如果目标是完整复原 BVH，而不是实时稳定遥操作，需要新增 pose/reference streaming，把 BVH retarget 成 G1 `joint_pos`，不要只依赖 `PLANNER_VR_3PT`。
+3. 如果启用 IK，看 `ik_err` 和 `ik_margin`。`ik_margin` 长期为 `0` 时，不要继续加大动作幅度，先调目标尺度或补 elbow pole vector。
+4. 三点窗口合理但 MuJoCo 不自然，优先调 deploy / planner / compliance。
+5. 三点窗口本身就飘、抖或左右手方向明显不对，优先改 `VR3PointRetargeter`。
+6. 如果目标是完整复原 BVH，而不是实时稳定遥操作，需要新增 pose/reference streaming，把 BVH retarget 成 G1 `joint_pos`，不要只依赖 `PLANNER_VR_3PT`。
 
 调参建议：
 

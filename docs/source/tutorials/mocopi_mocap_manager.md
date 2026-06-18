@@ -27,6 +27,7 @@ gear_sonic/utils/teleop/sources/__init__.py
 gear_sonic/utils/teleop/controls/keyboard_control.py
 gear_sonic/utils/teleop/controls/__init__.py
 gear_sonic/utils/teleop/retarget/vr3pt_retargeter.py
+gear_sonic/utils/teleop/retarget/upper_body_ik.py
 gear_sonic/utils/teleop/retarget/__init__.py
 ```
 
@@ -38,6 +39,7 @@ gear_sonic/utils/teleop/retarget/__init__.py
 - `bvh_source.py`：实现 BVH hierarchy/motion 解析、FK、循环回放，并输出 `MocapFrame`。
 - `keyboard_control.py`：提供基于 stdin 的行命令控制，用来替代 PICO 手柄按键。
 - `vr3pt_retargeter.py`：把标准化后的动捕帧转换为 deploy 侧需要的 `vr_position` / `vr_orientation`。
+- `upper_body_ik.py`：实验性可选模块，把 VR3PT wrist 目标求解成 deploy 侧 17 维 `upper_body_position` / `upper_body_velocity`。
 
 ## 数据流
 
@@ -104,7 +106,7 @@ BVH 回放适合在没有 mocopi 硬件时验证后续链路，也适合调试�
   --visualize-vr3pt
 ```
 
-BVH source 会解析 hierarchy 和 motion 数据，执行 FK，并尽量保留 torso、neck、head、shoulder、elbow、wrist、pelvis 等有效关节。当前 planner 仍只消费 `left_wrist`、`right_wrist`、`head` 三点，但保留更多关节后，后续可以继续做肩肘腕 IK、肘部方向约束和 torso 姿态约束。
+BVH source 会解析 hierarchy 和 motion 数据，执行 FK，并尽量保留 torso、neck、head、shoulder、elbow、wrist、pelvis 等有效关节。默认 planner 仍只消费 `left_wrist`、`right_wrist`、`head` 三点；如果显式开启 `--enable-upper-body-ik`，manager 会额外发布 deploy 侧已有的 17 维上肢关节目标。
 
 如果用于评估动作自然度，建议让 BVH 回放频率和 manager 发布频率一致。例如 BVH 原始文件是 `50 Hz` 时，先用：
 
@@ -157,6 +159,14 @@ BVH source 会解析 hierarchy 和 motion 数据，执行 FK，并尽量保留 t
 | `--vr3pt-max-speed` | `3.0` | 三点最大平移速度，单位 m/s，`<=0` 表示关闭 |
 | `--vr3pt-max-accel` | `25.0` | 三点最大平移加速度，单位 m/s^2，`<=0` 表示关闭 |
 | `--vr3pt-max-angular-speed` | `8.0` | 三点最大角速度，单位 rad/s，`<=0` 表示关闭 |
+| `--enable-upper-body-ik` | 关闭 | 实验开关：从 VR3PT wrist 目标求解并发布 `upper_body_position` / `upper_body_velocity` |
+| `--upper-body-ik-iterations` | `8` | 每帧上肢 IK 迭代次数 |
+| `--upper-body-ik-damping` | `0.08` | damped least-squares 阻尼，越大越稳但误差可能更大 |
+| `--upper-body-ik-position-weight` | `1.0` | wrist 位置误差权重 |
+| `--upper-body-ik-orientation-weight` | `0.15` | wrist 姿态误差权重 |
+| `--upper-body-ik-posture-weight` | `0.03` | 回到默认姿态的正则权重 |
+| `--upper-body-ik-step-size` | `0.7` | IK 单次更新步长 |
+| `--upper-body-ik-max-joint-step` | `0.08` | 每次迭代单关节最大变化，单位 rad |
 | `--visualize-vr3pt` | 关闭 | 打开 PyVista 窗口，实时显示生成的 VR 三点目标 |
 | `--visualize-g1` | 关闭 | 在三点可视化窗口中同时显示 G1 模型 |
 | `--visualize-width` / `--visualize-height` | `1400` / `900` | 可视化窗口尺寸 |
@@ -321,6 +331,61 @@ span=0.371m head_z=0.398m max_v=1.350m/s lag=0.169m fk=1
 
 这些指标不会改变 planner 消息格式，只用于调试。后续如果 MuJoCo 里动作不自然，先看三点窗口和这组指标，再决定是调 `VR3PointRetargeter`、planner，还是补完整 IK。
 
+## 可选上肢 IK
+
+默认路径只发送 VR3PT 三点。为了验证 shoulder / elbow / wrist 方向的下一步优化空间，当前新增了一个默认关闭的上肢 IK 验证链路：
+
+```bash
+.venv_teleop/bin/python gear_sonic/scripts/mocap_manager_server.py \
+  --source bvh \
+  --bvh-file /home/nolo/RAYNOS_Motion1.bvh \
+  --bvh-loop \
+  --bvh-fps 25 \
+  --target-fps 25 \
+  --zmq-port 5556 \
+  --enable-upper-body-ik
+```
+
+启用后，manager 会在普通 `vr_position` / `vr_orientation` 之外，额外发送：
+
+```text
+upper_body_position: 17 floats
+upper_body_velocity: 17 floats
+```
+
+17 维顺序和 deploy 侧一致：
+
+```text
+waist_yaw, waist_roll, waist_pitch,
+left_shoulder_pitch, left_shoulder_roll, left_shoulder_yaw, left_elbow,
+left_wrist_roll, left_wrist_pitch, left_wrist_yaw,
+right_shoulder_pitch, right_shoulder_roll, right_shoulder_yaw, right_elbow,
+right_wrist_roll, right_wrist_pitch, right_wrist_yaw
+```
+
+实现要点：
+
+- IK 使用 G1 Pinocchio robot model。
+- wrist 目标来自已经标定和滤波后的 VR3PT 左右腕。
+- wrist 目标点使用与 `get_g1_key_frame_poses()` 相同的本地 offset，不直接使用 wrist link 原点。
+- 求解器使用 damped least-squares、关节限位裁剪、默认姿态正则和单步限幅。
+
+启用后日志会多出：
+
+```text
+ik=1 ik_err=0.057m ik_margin=0.000rad
+```
+
+含义：
+
+| 字段 | 含义 |
+|------|------|
+| `ik` | `1` 表示本帧发送了 `upper_body_position`，`0` 表示没有发送 |
+| `ik_err` | 左右 wrist 中较大的 IK 位置误差 |
+| `ik_margin` | 当前上肢关节离最近限位的最小余量 |
+
+如果 `ik_margin` 长期接近 `0`，说明目标容易把 G1 上肢推到关节限位，应先降低 wrist 目标尺度、增加正则，或继续补 elbow pole vector 约束。这个功能仍是实验路径，不建议直接替代默认 VR3PT 稳定链路。
+
 ## 与 PICO 遥操作的关系
 
 PICO 遥操作当前链路：
@@ -383,7 +448,8 @@ BVH file
 
 - 只使用 `left_wrist`、`right_wrist`、`head` 三个点。
 - planner 消息里的 `left_hand_joints` / `right_hand_joints` 当前仍发送零值。
-- BVH 的肩、肘、躯干等信息尚未参与 G1 上肢 IK。
+- 默认路径下 BVH 的肩、肘、躯干信息尚未直接参与 G1 上肢 IK。
+- 已提供实验性 `--enable-upper-body-ik`，可把 VR3PT wrist 目标求解成 deploy 侧 17 维上肢关节目标，但还没有把 BVH elbow pole vector 作为约束。
 
 现在 `VR3PointRetargeter` 已补齐第一阶段优化：
 
@@ -407,10 +473,11 @@ BVH file
 2. 已完成：给三点目标增加滤波和限速，包括位置低通、四元数 slerp、最大速度和最大加速度限制。
 3. 已完成：扩展 `MocapFrame` 的有效关节，至少保留 spine / chest / neck / head / shoulder / elbow / wrist / pelvis，不再只保留三点。
 4. 已完成：在 manager 日志中增加 VR3PT 质量指标，包括腕距、head 高度、最大速度、滤波滞后和 FK 标定状态。
-5. 下一步：基于 shoulder-elbow-wrist 做 G1 上肢 IK，目标函数同时考虑 wrist 位置、wrist 朝向、肘部方向、关节限位和上一帧平滑项。
-6. 下一步：给 BVH 关节别名和坐标系 offset 做外部配置，避免不同 BVH 文件反复改代码。
-7. 下一步：为 mocopi 官方二进制包补完整 FK / 标定层，把 27 bone 转成机器人 body frame 下的稳定三点和可选上肢目标。
-8. 如果目标是“尽量复原离线 BVH”，应增加 pose/reference streaming 路径，直接输出 G1 `joint_pos`；如果目标是“实时遥操作稳定控制”，继续优先优化 planner VR 三点路径。
+5. 已完成：新增默认关闭的上肢 IK 验证链路，能从 VR3PT wrist 目标发布 17 维 `upper_body_position` / `upper_body_velocity`。
+6. 下一步：把 BVH shoulder-elbow-wrist 的 elbow pole vector 加入 IK 目标函数，减少 `ik_margin=0` 和肘部折叠方向不稳定。
+7. 下一步：给 BVH 关节别名和坐标系 offset 做外部配置，避免不同 BVH 文件反复改代码。
+8. 下一步：为 mocopi 官方二进制包补完整 FK / 标定层，把 27 bone 转成机器人 body frame 下的稳定三点和可选上肢目标。
+9. 如果目标是“尽量复原离线 BVH”，应增加 pose/reference streaming 路径，直接输出 G1 `joint_pos`；如果目标是“实时遥操作稳定控制”，继续优先优化 planner VR 三点路径。
 
 推荐先用默认优化参数跑。如果动作仍然滞后，可以提高：
 

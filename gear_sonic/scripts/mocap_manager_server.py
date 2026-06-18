@@ -16,7 +16,7 @@ import numpy as np
 import zmq
 
 from gear_sonic.utils.teleop.controls import LineControlSource
-from gear_sonic.utils.teleop.retarget import VR3PointRetargeter
+from gear_sonic.utils.teleop.retarget import UpperBodyIKRetargeter, VR3PointRetargeter
 from gear_sonic.utils.teleop.sources import (
     MOCOPI_DEFAULT_PORT,
     BvhPlaybackSource,
@@ -154,6 +154,17 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
         max_position_accel=args.vr3pt_max_accel,
         max_angular_speed=args.vr3pt_max_angular_speed,
     )
+    upper_body_ik = None
+    if args.enable_upper_body_ik:
+        upper_body_ik = UpperBodyIKRetargeter(
+            iterations=args.upper_body_ik_iterations,
+            damping=args.upper_body_ik_damping,
+            position_weight=args.upper_body_ik_position_weight,
+            orientation_weight=args.upper_body_ik_orientation_weight,
+            posture_weight=args.upper_body_ik_posture_weight,
+            step_size=args.upper_body_ik_step_size,
+            max_joint_step=args.upper_body_ik_max_joint_step,
+        )
     controls = LineControlSource(auto_start=not args.start_paused)
     visualizer = _create_vr3pt_visualizer(args)
 
@@ -162,6 +173,8 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
     socket.bind(f"tcp://*:{args.zmq_port}")
 
     retargeter.preload()
+    if upper_body_ik is not None:
+        upper_body_ik.preload()
     source.start()
     time.sleep(args.publisher_warmup_s)
 
@@ -194,6 +207,8 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
             frame = source.get_latest()
             vr_position = None
             vr_orientation = None
+            upper_body_position = None
+            upper_body_velocity = None
             if frame is not None:
                 frame_age_s = time.time() - frame.host_time_s
                 if frame_age_s <= args.mocap_timeout_s:
@@ -201,6 +216,11 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
                     if target is not None:
                         vr_position = target.position
                         vr_orientation = target.orientation
+                        if upper_body_ik is not None:
+                            upper_body_target = upper_body_ik.build_target(target, frame.host_time_s)
+                            if upper_body_target is not None:
+                                upper_body_position = upper_body_target.position
+                                upper_body_velocity = upper_body_target.velocity
                         if visualizer is not None:
                             vr_pose = _vr_arrays_to_pose(vr_position, vr_orientation)
                             visualizer.update_vr_poses(vr_pose)
@@ -219,6 +239,12 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
                     control.facing.tolist(),
                     speed=control.speed,
                     height=control.height,
+                    upper_body_position=(
+                        upper_body_position.tolist() if upper_body_position is not None else None
+                    ),
+                    upper_body_velocity=(
+                        upper_body_velocity.tolist() if upper_body_velocity is not None else None
+                    ),
                     left_hand_position=np.zeros(7, dtype=np.float32).tolist(),
                     right_hand_position=np.zeros(7, dtype=np.float32).tolist(),
                     vr_3pt_position=vr_position.tolist() if vr_position is not None else None,
@@ -254,9 +280,20 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
                         f" lag={metrics.get('max_filter_delta_m', 0.0):.3f}m"
                         f" fk={int(metrics.get('fk_calibrated', 0.0))}"
                     )
+                ik_desc = ""
+                if upper_body_ik is not None:
+                    ik_metrics = upper_body_ik.diagnostics
+                    if upper_body_position is not None and ik_metrics:
+                        ik_desc = (
+                            f" ik=1"
+                            f" ik_err={ik_metrics.get('upper_body_ik_max_wrist_error_m', 0.0):.3f}m"
+                            f" ik_margin={ik_metrics.get('upper_body_ik_min_limit_margin_rad', 0.0):.3f}rad"
+                        )
+                    else:
+                        ik_desc = " ik=0"
                 print(
                     f"[MocapManager] recv_fps={diag['fps']:.1f} recv={diag['received_packets']} "
-                    f"vr_3pt={vr_desc}{metrics_desc} "
+                    f"vr_3pt={vr_desc}{metrics_desc}{ik_desc} "
                     f"dropped={diag['dropped_packets']} {frame_desc}"
                 )
                 if diag["last_error"]:
@@ -385,6 +422,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=8.0,
         help="Maximum VR 3-point angular speed in rad/s. Use <=0 to disable.",
+    )
+    parser.add_argument(
+        "--enable-upper-body-ik",
+        action="store_true",
+        help=(
+            "Solve and publish deploy-side upper_body_position/upper_body_velocity "
+            "from VR 3-point wrist targets. Disabled by default."
+        ),
+    )
+    parser.add_argument("--upper-body-ik-iterations", type=int, default=8)
+    parser.add_argument("--upper-body-ik-damping", type=float, default=0.08)
+    parser.add_argument("--upper-body-ik-position-weight", type=float, default=1.0)
+    parser.add_argument("--upper-body-ik-orientation-weight", type=float, default=0.15)
+    parser.add_argument("--upper-body-ik-posture-weight", type=float, default=0.03)
+    parser.add_argument("--upper-body-ik-step-size", type=float, default=0.7)
+    parser.add_argument(
+        "--upper-body-ik-max-joint-step",
+        type=float,
+        default=0.08,
+        help="Maximum upper-body IK joint update per solver iteration, in radians.",
     )
     parser.add_argument(
         "--visualize-vr3pt",
