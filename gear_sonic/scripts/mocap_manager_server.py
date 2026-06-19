@@ -27,6 +27,7 @@ from gear_sonic.utils.teleop.zmq.zmq_planner_sender import (
     build_planner_message,
     pack_pose_message,
 )
+from gear_sonic.utils.teleop.zmq.zmq_pose_sender import PoseStreamPublisher
 
 
 class LocomotionMode(IntEnum):
@@ -178,10 +179,24 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
     source.start()
     time.sleep(args.publisher_warmup_s)
 
-    current_stream_mode = StreamMode.PLANNER_VR_3PT
-    socket.send(build_command_message(start=not args.start_paused, stop=False, planner=True))
+    pose_stream_enabled = args.enable_pose_stream or args.control_mode == "pose"
+    pose_publisher = PoseStreamPublisher(
+        window_size=args.pose_window_size,
+        protocol_version=args.pose_protocol_version,
+    )
+    control_uses_planner = args.control_mode == "planner"
+    current_stream_mode = StreamMode.PLANNER_VR_3PT if control_uses_planner else StreamMode.POSE
+    socket.send(
+        build_command_message(
+            start=(not args.start_paused) and control_uses_planner,
+            stop=False,
+            planner=control_uses_planner,
+        )
+    )
     print(
-        f"[MocapManager] publishing planner data on tcp://*:{args.zmq_port}; "
+        f"[MocapManager] publishing on tcp://*:{args.zmq_port}; "
+        f"control_mode={args.control_mode} pose_stream={int(pose_stream_enabled)} "
+        f"pose_protocol=v{args.pose_protocol_version}; "
         f"{source_description}"
     )
     print("[MocapManager] stdin commands: start, pause, stop, mode N, move x y z, face x y z, dc, abort")
@@ -194,21 +209,23 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
             loop_start = time.time()
             control = controls.poll()
             if control.stop_requested:
-                socket.send(build_command_message(start=False, stop=True, planner=True))
+                socket.send(
+                    build_command_message(
+                        start=False,
+                        stop=True,
+                        planner=control_uses_planner,
+                    )
+                )
                 current_stream_mode = StreamMode.OFF
                 _send_manager_state(socket, current_stream_mode, False, False)
                 break
-
-            if control.enabled:
-                socket.send(build_command_message(start=True, stop=False, planner=True))
-            else:
-                socket.send(build_command_message(start=False, stop=False, planner=True))
 
             frame = source.get_latest()
             vr_position = None
             vr_orientation = None
             upper_body_position = None
             upper_body_velocity = None
+            pose_sent = False
             if frame is not None:
                 frame_age_s = time.time() - frame.host_time_s
                 if frame_age_s <= args.mocap_timeout_s:
@@ -227,30 +244,58 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
                             visualizer.render()
                             if not visualizer.is_open:
                                 print("[MocapManager] visualization window closed")
-                                socket.send(build_command_message(start=False, stop=True, planner=True))
+                                socket.send(
+                                    build_command_message(
+                                        start=False,
+                                        stop=True,
+                                        planner=control_uses_planner,
+                                    )
+                                )
                                 current_stream_mode = StreamMode.OFF
                                 _send_manager_state(socket, current_stream_mode, False, False)
                                 break
+                    if pose_stream_enabled and frame.full_body is not None:
+                        pose_sent = pose_publisher.publish(
+                            socket,
+                            frame.full_body,
+                            frame_index=frame.frame_index,
+                            vr_position=vr_position,
+                            vr_orientation=vr_orientation,
+                        )
 
+            start_allowed = control.enabled and (
+                control_uses_planner
+                or not pose_stream_enabled
+                or pose_publisher.sent_messages > 0
+            )
             socket.send(
-                build_planner_message(
-                    int(control.mode),
-                    control.movement.tolist(),
-                    control.facing.tolist(),
-                    speed=control.speed,
-                    height=control.height,
-                    upper_body_position=(
-                        upper_body_position.tolist() if upper_body_position is not None else None
-                    ),
-                    upper_body_velocity=(
-                        upper_body_velocity.tolist() if upper_body_velocity is not None else None
-                    ),
-                    left_hand_position=np.zeros(7, dtype=np.float32).tolist(),
-                    right_hand_position=np.zeros(7, dtype=np.float32).tolist(),
-                    vr_3pt_position=vr_position.tolist() if vr_position is not None else None,
-                    vr_3pt_orientation=vr_orientation.tolist() if vr_orientation is not None else None,
+                build_command_message(
+                    start=start_allowed,
+                    stop=False,
+                    planner=control_uses_planner,
                 )
             )
+
+            if control_uses_planner:
+                socket.send(
+                    build_planner_message(
+                        int(control.mode),
+                        control.movement.tolist(),
+                        control.facing.tolist(),
+                        speed=control.speed,
+                        height=control.height,
+                        upper_body_position=(
+                            upper_body_position.tolist() if upper_body_position is not None else None
+                        ),
+                        upper_body_velocity=(
+                            upper_body_velocity.tolist() if upper_body_velocity is not None else None
+                        ),
+                        left_hand_position=np.zeros(7, dtype=np.float32).tolist(),
+                        right_hand_position=np.zeros(7, dtype=np.float32).tolist(),
+                        vr_3pt_position=vr_position.tolist() if vr_position is not None else None,
+                        vr_3pt_orientation=vr_orientation.tolist() if vr_orientation is not None else None,
+                    )
+                )
 
             _send_manager_state(
                 socket,
@@ -270,6 +315,13 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
                         f"joints={len(frame.joints)} bones={len(frame.bones)}"
                     )
                 vr_desc = "yes" if vr_position is not None else "no"
+                pose_desc = "off"
+                if pose_stream_enabled:
+                    pose_desc = (
+                        f"sent:{pose_publisher.sent_messages}"
+                        if pose_sent
+                        else f"buf:{pose_publisher.buffered_frames}/{pose_publisher.window_size}"
+                    )
                 metrics_desc = ""
                 metrics = retargeter.diagnostics
                 if vr_position is not None and metrics:
@@ -296,7 +348,7 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
                         ik_desc = " ik=0"
                 print(
                     f"[MocapManager] recv_fps={diag['fps']:.1f} recv={diag['received_packets']} "
-                    f"vr_3pt={vr_desc}{metrics_desc}{ik_desc} "
+                    f"vr_3pt={vr_desc} pose={pose_desc}{metrics_desc}{ik_desc} "
                     f"dropped={diag['dropped_packets']} {frame_desc}"
                 )
                 if diag["last_error"]:
@@ -308,7 +360,13 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
                 time.sleep(sleep_s)
     except KeyboardInterrupt:
         print("\n[MocapManager] stopping")
-        socket.send(build_command_message(start=False, stop=True, planner=True))
+        socket.send(
+            build_command_message(
+                start=False,
+                stop=True,
+                planner=control_uses_planner,
+            )
+        )
     finally:
         if visualizer is not None:
             visualizer.close()
@@ -353,6 +411,36 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--zmq-port", type=int, default=5556, help="ZMQ PUB port for deploy side")
     parser.add_argument("--target-fps", type=float, default=20.0)
+    parser.add_argument(
+        "--control-mode",
+        choices=["planner", "pose"],
+        default="planner",
+        help=(
+            "Which deploy mode to select through the command topic. "
+            "'planner' keeps PLANNER_VR_3PT behavior; 'pose' selects streamed-motion POSE."
+        ),
+    )
+    parser.add_argument(
+        "--enable-pose-stream",
+        action="store_true",
+        help=(
+            "Publish the pose topic when the source provides full_body reference data. "
+            "Automatically enabled when --control-mode pose is used."
+        ),
+    )
+    parser.add_argument(
+        "--pose-window-size",
+        type=int,
+        default=5,
+        help="Number of full-body frames per pose topic message, matching PICO's sliding window.",
+    )
+    parser.add_argument(
+        "--pose-protocol-version",
+        type=int,
+        choices=[2, 3],
+        default=3,
+        help="POSE ZMQ protocol version. Use v3 for deploy SMPL mode; v2 is debug-only.",
+    )
     parser.add_argument("--start-paused", action="store_true")
     parser.add_argument("--publisher-warmup-s", type=float, default=0.2)
     parser.add_argument("--log-interval-s", type=float, default=2.0)

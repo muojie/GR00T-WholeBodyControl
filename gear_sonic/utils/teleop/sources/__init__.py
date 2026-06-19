@@ -1,6 +1,6 @@
 """Motion-capture input sources for teleoperation managers."""
 
-from gear_sonic.utils.teleop.sources.base import MocapFrame, MocapSource, Pose7D
+from gear_sonic.utils.teleop.sources.base import FullBodyReference, MocapFrame, MocapSource, Pose7D
 from gear_sonic.utils.teleop.sources.bvh_source import BvhPlaybackSource, load_bvh_motion
 from gear_sonic.utils.teleop.sources.mocopi_source import (
     MOCOPI_DEFAULT_PORT,
@@ -13,6 +13,7 @@ from gear_sonic.utils.teleop.sources.mocopi_source import (
 
 __all__ = [
     "BvhPlaybackSource",
+    "FullBodyReference",
     "MOCOPI_DEFAULT_PORT",
     "MocapFrame",
     "MocapSource",

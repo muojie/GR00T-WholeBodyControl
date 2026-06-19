@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from gear_sonic.utils.teleop.sources.base import MocapFrame, Pose7D
+from gear_sonic.utils.teleop.sources.base import FullBodyReference, MocapFrame, Pose7D
 
 
 BVH_DEFAULT_JOINT_ALIASES = {
@@ -80,7 +80,125 @@ BVH_DEFAULT_JOINT_ALIASES = {
         "mixamorig:RightForeArm",
     ),
     "right_wrist": ("RightHand", "RightWrist", "R_Hand", "mixamorig:RightHand"),
+    "left_hip": (
+        "LeftUpLeg",
+        "LeftUpperLeg",
+        "LeftThigh",
+        "L_UpLeg",
+        "L_Hip",
+        "left_upper_leg",
+        "mixamorig:LeftUpLeg",
+    ),
+    "right_hip": (
+        "RightUpLeg",
+        "RightUpperLeg",
+        "RightThigh",
+        "R_UpLeg",
+        "R_Hip",
+        "right_upper_leg",
+        "mixamorig:RightUpLeg",
+    ),
+    "left_knee": (
+        "LeftLeg",
+        "LeftLowerLeg",
+        "LeftKnee",
+        "L_Leg",
+        "L_LowerLeg",
+        "left_lower_leg",
+        "mixamorig:LeftLeg",
+    ),
+    "right_knee": (
+        "RightLeg",
+        "RightLowerLeg",
+        "RightKnee",
+        "R_Leg",
+        "R_LowerLeg",
+        "right_lower_leg",
+        "mixamorig:RightLeg",
+    ),
+    "left_ankle": (
+        "LeftFoot",
+        "LeftAnkle",
+        "L_Foot",
+        "left_foot",
+        "mixamorig:LeftFoot",
+    ),
+    "right_ankle": (
+        "RightFoot",
+        "RightAnkle",
+        "R_Foot",
+        "right_foot",
+        "mixamorig:RightFoot",
+    ),
+    "left_foot": (
+        "LeftToeBase",
+        "LeftToe",
+        "LeftToe_End",
+        "left_toes",
+        "mixamorig:LeftToeBase",
+    ),
+    "right_foot": (
+        "RightToeBase",
+        "RightToe",
+        "RightToe_End",
+        "right_toes",
+        "mixamorig:RightToeBase",
+    ),
 }
+
+SMPL_PARENT_INDICES = [
+    -1,
+    0,
+    0,
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    9,
+    9,
+    12,
+    13,
+    14,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+]
+
+SMPL_JOINT_SOURCE_KEYS = [
+    "pelvis",
+    "left_hip",
+    "right_hip",
+    "spine",
+    "left_knee",
+    "right_knee",
+    "chest",
+    "left_ankle",
+    "right_ankle",
+    "chest",
+    "left_foot",
+    "right_foot",
+    "neck",
+    "left_shoulder",
+    "right_shoulder",
+    "head",
+    "left_shoulder",
+    "right_shoulder",
+    "left_elbow",
+    "right_elbow",
+    "left_wrist",
+    "right_wrist",
+    "left_wrist",
+    "right_wrist",
+]
 
 
 @dataclass
@@ -94,6 +212,7 @@ class BvhMotion:
     frame_stride: int
     playback_fps: float
     selected_indices: dict[str, int]
+    smpl_source_indices: list[int | None]
 
     @property
     def frame_count(self) -> int:
@@ -212,6 +331,7 @@ class BvhPlaybackSource:
             frame_index=int(frame_idx),
             fps=float(self.motion.playback_fps),
             joints=joints,
+            full_body=_build_full_body_reference(self.motion, frame_idx),
             metadata={
                 "format": "bvh",
                 "path": self.motion.path,
@@ -271,6 +391,63 @@ def load_bvh_motion(
         frame_stride=int(frame_stride),
         playback_fps=float(playback_fps),
         selected_indices=selected_indices,
+        smpl_source_indices=[
+            selected_indices.get(source_key) for source_key in SMPL_JOINT_SOURCE_KEYS
+        ],
+    )
+
+
+def _build_full_body_reference(motion: BvhMotion, frame_idx: int) -> FullBodyReference:
+    smpl_joints = np.zeros((24, 3), dtype=np.float32)
+    smpl_pose = np.zeros((21, 3), dtype=np.float32)
+
+    root_idx = motion.smpl_source_indices[0]
+    root_position = (
+        motion.world_positions[frame_idx, root_idx]
+        if root_idx is not None
+        else np.zeros(3, dtype=np.float32)
+    )
+    root_quat_wxyz = (
+        motion.world_quat_wxyz[frame_idx, root_idx]
+        if root_idx is not None
+        else np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    )
+    root_rot = _rotation_from_wxyz(root_quat_wxyz)
+    root_inv = root_rot.inv()
+
+    for smpl_idx, source_idx in enumerate(motion.smpl_source_indices):
+        if source_idx is not None:
+            world_position = motion.world_positions[frame_idx, source_idx]
+            smpl_joints[smpl_idx] = root_inv.apply(world_position - root_position)
+            continue
+
+        parent_idx = SMPL_PARENT_INDICES[smpl_idx]
+        if parent_idx >= 0:
+            smpl_joints[smpl_idx] = smpl_joints[parent_idx]
+
+    world_quats_xyzw = motion.world_quat_wxyz[frame_idx][:, [1, 2, 3, 0]]
+    world_rots = Rotation.from_quat(world_quats_xyzw)
+    for smpl_idx in range(1, min(22, len(motion.smpl_source_indices))):
+        source_idx = motion.smpl_source_indices[smpl_idx]
+        if source_idx is None:
+            continue
+
+        parent_smpl_idx = SMPL_PARENT_INDICES[smpl_idx]
+        parent_source_idx = (
+            motion.smpl_source_indices[parent_smpl_idx] if parent_smpl_idx >= 0 else None
+        )
+        child_rot = world_rots[source_idx]
+        if parent_source_idx is not None:
+            local_rot = world_rots[parent_source_idx].inv() * child_rot
+        else:
+            local_rot = root_inv * child_rot
+        smpl_pose[smpl_idx - 1] = local_rot.as_rotvec().astype(np.float32)
+
+    return FullBodyReference(
+        smpl_joints=smpl_joints,
+        smpl_pose=smpl_pose,
+        body_quat_w=root_quat_wxyz,
+        frame_index=int(frame_idx),
     )
 
 
@@ -395,6 +572,16 @@ def _resolve_selected_indices(joint_names: list[str]) -> dict[str, int]:
         if idx is not None:
             selected[target_name] = idx
     return selected
+
+
+def _rotation_from_wxyz(quat_wxyz: np.ndarray) -> Rotation:
+    quat = np.asarray(quat_wxyz, dtype=np.float64)
+    norm = float(np.linalg.norm(quat))
+    if norm < 1e-8 or not np.isfinite(norm):
+        quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    else:
+        quat = quat / norm
+    return Rotation.from_quat(quat[[1, 2, 3, 0]])
 
 
 def _find_first_joint_index(joint_names: list[str], aliases: tuple[str, ...]) -> int | None:

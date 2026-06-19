@@ -17,7 +17,12 @@ from typing import Any
 
 import numpy as np
 
-from gear_sonic.utils.teleop.sources.base import MocapFrame, Pose7D, normalize_quat_wxyz
+from gear_sonic.utils.teleop.sources.base import (
+    FullBodyReference,
+    MocapFrame,
+    Pose7D,
+    normalize_quat_wxyz,
+)
 
 
 MOCOPI_DEFAULT_PORT = 12351
@@ -239,6 +244,8 @@ def parse_mocopi_json_packet(packet: bytes) -> MocapFrame:
         direct_vr_position = vr_pose[:, :3].reshape(-1)
         direct_vr_orientation = vr_pose[:, 3:7].reshape(-1)
 
+    full_body = _full_body_from_json_payload(payload)
+
     return MocapFrame(
         source=str(payload.get("source", "sony_mocopi_json")),
         host_time_s=time.time(),
@@ -249,7 +256,56 @@ def parse_mocopi_json_packet(packet: bytes) -> MocapFrame:
         bones=bones,
         direct_vr_position=direct_vr_position,
         direct_vr_orientation=direct_vr_orientation,
+        full_body=full_body,
         metadata={"format": "json", **payload.get("metadata", {})},
+    )
+
+
+def _full_body_from_json_payload(payload: dict[str, Any]) -> FullBodyReference | None:
+    smpl_joints = payload.get("smpl_joints")
+    smpl_pose = payload.get("smpl_pose")
+    if smpl_joints is None or smpl_pose is None:
+        return None
+
+    body_quat_w = payload.get("body_quat_w", payload.get("body_quat"))
+    if body_quat_w is None:
+        body_quat_w = [1.0, 0.0, 0.0, 0.0]
+
+    smpl_joints_np = np.asarray(smpl_joints, dtype=np.float32)
+    if smpl_joints_np.shape == (1, 24, 3):
+        smpl_joints_np = smpl_joints_np[0]
+
+    smpl_pose_np = np.asarray(smpl_pose, dtype=np.float32)
+    if smpl_pose_np.shape == (1, 21, 3):
+        smpl_pose_np = smpl_pose_np[0]
+    elif smpl_pose_np.shape == (63,):
+        smpl_pose_np = smpl_pose_np.reshape(21, 3)
+
+    body_quat_np = np.asarray(body_quat_w, dtype=np.float32)
+    if body_quat_np.shape == (1, 4):
+        body_quat_np = body_quat_np[0]
+
+    joint_pos = payload.get("joint_pos")
+    joint_pos_np = None
+    if joint_pos is not None:
+        joint_pos_np = np.asarray(joint_pos, dtype=np.float32)
+        if joint_pos_np.shape == (1, 29):
+            joint_pos_np = joint_pos_np[0]
+
+    joint_vel = payload.get("joint_vel")
+    joint_vel_np = None
+    if joint_vel is not None:
+        joint_vel_np = np.asarray(joint_vel, dtype=np.float32)
+        if joint_vel_np.shape == (1, 29):
+            joint_vel_np = joint_vel_np[0]
+
+    return FullBodyReference(
+        smpl_joints=smpl_joints_np,
+        smpl_pose=smpl_pose_np,
+        body_quat_w=body_quat_np,
+        joint_pos=joint_pos_np,
+        joint_vel=joint_vel_np,
+        frame_index=payload.get("frame_index"),
     )
 
 
