@@ -370,6 +370,11 @@ class ZMQManager : public InputInterface {
                           current_motion_mutex);
       } else {
         // Streamed motion mode: delegate to pose interface
+        if (start_control_ && !operator_state.start) {
+          operator_state.start = true;
+          reinitialize_heading = true;
+          std::cout << "[ZMQManager] Streamed motion control start requested" << std::endl;
+        }
         if (pose_interface_) {
           pose_interface_->handle_input(motion_reader, current_motion, current_frame,
                                        operator_state, reinitialize_heading,
