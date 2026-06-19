@@ -74,6 +74,69 @@ mocopi / BVH
 
 这条链路适合快速验证实时三点遥操作，但它天然不会携带完整下肢 tracker 信息。BVH source 已经能保留 pelvis、spine、head、shoulder、elbow、wrist 等关节，后续需要扩展为 full-body `pose` stream，才能更接近 PICO 的 full-body 数据路径。
 
+## 当前实现
+
+已新增非 PICO 输入源的第一版 `pose` topic 发布能力，重点用于 BVH 回放验证。
+
+实现范围：
+
+- `MocapFrame` 新增 `full_body` 字段，统一携带 `smpl_joints=(24,3)`、`smpl_pose=(21,3)`、`body_quat_w=(4,)`。
+- `FullBodyReference` 同时携带 `joint_pos=(29,)`、`joint_vel=(29,)`。如果输入源没有显式提供 `joint_pos`，会按 PICO manager 的同一套 SMPL elbow/wrist 映射补齐左右 wrist 的 6 个 G1 wrist 关节，其余关节为 0，`joint_vel` 默认为 0。
+- `BvhPlaybackSource` 会基于 BVH FK 结果生成 SMPL-like full-body reference。`smpl_joints` 会减去 root/pelvis 平移，并用 root 四元数逆旋回本地坐标，以接近 PICO 的 `smpl_joints_local`。
+- `mocap_manager_server.py` 新增 `pose` topic publisher，默认按 deploy 支持的 protocol v3 发送：`smpl_joints`、`smpl_pose`、`body_quat_w`、`joint_pos`、`joint_vel`、`frame_index`。
+- 新增 `--control-mode pose`，通过 `command` topic 发送 `planner=false`，让 deploy 的 `ZMQManager` 切到 streamed-motion / POSE 模式。
+- 新增 `--enable-pose-stream`，可以在保持 `planner` 控制模式时额外发布 `pose` topic，便于抓包和数据流调试。
+- JSON bridge 如果直接提供 `smpl_joints`、`smpl_pose`、`body_quat_w`，也会填入 `full_body` 并可进入 `pose` topic；如果额外提供 `joint_pos` / `joint_vel`，manager 会直接透传。
+
+BVH POSE 回放示例：
+
+```bash
+.venv_teleop/bin/python gear_sonic/scripts/mocap_manager_server.py \
+  --source bvh \
+  --bvh-file /home/nolo/RAYNOS_Motion1.bvh \
+  --bvh-loop \
+  --bvh-fps 30 \
+  --target-fps 30 \
+  --control-mode pose \
+  --pose-window-size 5 \
+  --zmq-port 5556
+```
+
+如果只想在 planner/VR3PT 控制模式下同时发布 `pose` topic 做调试：
+
+```bash
+.venv_teleop/bin/python gear_sonic/scripts/mocap_manager_server.py \
+  --source bvh \
+  --bvh-file /home/nolo/RAYNOS_Motion1.bvh \
+  --bvh-loop \
+  --bvh-fps 30 \
+  --target-fps 30 \
+  --control-mode planner \
+  --enable-pose-stream \
+  --zmq-port 5556
+```
+
+## MuJoCo 无动作问题定位
+
+第一版 BVH POSE publisher 使用了 protocol v2，只发送 `smpl_joints`、`smpl_pose`、`body_quat_w`、`frame_index`。这会被 deploy 解析为 SMPL encoder mode，但是 release 版 `observation_config.yaml` 的 `smpl` mode 还要求：
+
+```text
+motion_joint_positions_wrists_10frame_step1
+```
+
+这个 observation 来自 streamed motion 的 `joint_pos`。如果 POSE 包里没有 `joint_pos/joint_vel`，deploy 侧虽然能收到 SMPL 字段，但 wrist joint observation 缺失，策略输入不完整，表现就是 MuJoCo 没有明显动作，甚至启动控制后机器人倒下。
+
+当前修正：
+
+- POSE 默认协议改为 v3。
+- v3 消息包含 `joint_pos=(N,29)` 和 `joint_vel=(N,29)`。
+- `joint_pos` 的 wrist 6 维按 PICO manager 的 SMPL elbow/wrist 映射生成。
+- POSE 模式下 manager 会等到第一条 pose 窗口实际发出后，才在 `command` topic 中发送 `start=True`。
+
+因此重新测试时，建议同时重启终端 2 的 deploy 和终端 3 的 manager，避免 deploy 侧保留旧 protocol 状态。
+
+当前没有把官方 mocopi UDP 27 bone 强行映射成 POSE。官方二进制包仍优先走 VR3PT；mocopi 要进入 POSE，需要后续补稳定的 mocopi 27 bone -> SMPL 24/21 映射，或由上游 bridge 直接输出 SMPL-like 字段。
+
 ## 下一步目标
 
 短期不继续推进 `--enable-upper-body-ik` 的第二阶段，也不做腿部 IK。下一步目标是新增非 PICO 输入源的 `pose` topic 发布能力：
@@ -82,18 +145,25 @@ mocopi / BVH
 BVH / mocopi full-body source
   -> normalized full-body skeleton
   -> smpl_pose / smpl_joints / body_quat_w
-  -> optional joint_pos / joint_vel
+  -> joint_pos / joint_vel
   -> pose topic
   -> deploy streamed motion / policy observation
 ```
 
-优先实现顺序：
+已完成：
 
-1. 梳理 PICO `pose` topic 的最小必需字段、shape、dtype 和帧窗口。
-2. 为 BVH source 输出可复用的 full-body reference 数据，而不仅是 VR3PT 三点。
-3. 新增 `pose` topic publisher，先对齐 PICO 当前字段名和 dtype。
-4. 用 BVH 文件做离线回放，确认 deploy 能解码 `smpl_pose`、`smpl_joints`、`body_quat_w`。
-5. 再决定是否需要把 mocopi 官方 27 bone 映射到 SMPL 24 joints，或先用 bridge 输出中间格式。
+- 梳理 PICO `pose` topic 的最小必需字段、shape、dtype 和帧窗口。
+- 为 BVH source 输出可复用的 full-body reference 数据，而不仅是 VR3PT 三点。
+- 新增 `pose` topic publisher，对齐 deploy protocol v3 的字段名和 dtype。
+- 用 BVH 文件做离线回放 smoke test，确认 manager 能持续发布 POSE 窗口。
+- 修正 MuJoCo 无动作问题：补齐 deploy SMPL mode 需要的 `joint_pos/joint_vel`，并延迟 POSE 模式的 `start=True`。
+
+下一步：
+
+1. 联合 MuJoCo deploy 验证 `ZMQManager` 侧能解码 protocol v3，并进入 streamed-motion。
+2. 对 BVH -> SMPL-like 的关节映射做可视化和误差检查，尤其是 shoulder/collar、foot/toe、root heading。
+3. 再决定是否需要把 mocopi 官方 27 bone 映射到 SMPL 24 joints，或先要求 bridge 输出中间格式。
+4. POSE 路径稳定后，再评估是否回到上肢 IK、手腕细节或腿部 retarget。
 
 ## 暂不做的事
 
@@ -106,7 +176,7 @@ BVH / mocopi full-body source
 
 第一阶段成功标准：
 
-- 非 PICO 输入源可以发布 `pose` topic。
-- deploy 侧能解码 `smpl_pose`、`smpl_joints`、`body_quat_w`，日志不报 shape / field 缺失。
+- 非 PICO 输入源可以发布 `pose` topic。已完成 BVH / JSON bridge 路径。
+- deploy 侧能解码 `smpl_pose`、`smpl_joints`、`body_quat_w`、`joint_pos`、`joint_vel`，日志不报 shape / field 缺失。待 MuJoCo 联调确认。
 - BVH / mocopi 的 full-body 数据能进入 motion/reference observation，而不是只剩 VR3PT 三点。
 - `planner` topic 仍可作为三点实时验证链路独立运行。

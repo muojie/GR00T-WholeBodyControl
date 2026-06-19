@@ -17,10 +17,39 @@ BVH / mocopi source
   -> MuJoCo sim loop
 ```
 
+BVH POSE 验证链路：
+
+```text
+BVH source
+  -> MocapFrame.full_body
+  -> pose topic, protocol v3, ZMQ 5556
+  -> deploy zmq_manager，command planner=false
+  -> streamed motion / POSE reference
+  -> MuJoCo sim loop
+```
+
 ```{admonition} 关键点
 :class: note
 `mocap_manager_server.py` 默认只是 ZMQ publisher，不会自动显示机器人窗口。MuJoCo 机器人窗口由 `gear_sonic/scripts/run_sim_loop.py` 打开；VR 三点调试窗口由 `mocap_manager_server.py --visualize-vr3pt` 打开。
 ```
+
+## 日志目录
+
+调试时统一把三端日志保存到：
+
+```text
+/home/nolo/GR00T-WholeBodyControl/logs/mocopi_pose/latest/
+```
+
+开始新一轮测试前，在任意终端运行：
+
+```bash
+cd /home/nolo/GR00T-WholeBodyControl
+mkdir -p logs/mocopi_pose/latest
+rm -f logs/mocopi_pose/latest/*.log
+```
+
+下面的命令都使用 `2>&1 | tee ...` 保存日志，不要再用 `script -c`。`script` 的最后一个参数是输出文件，写错路径会覆盖源码文件；`tee` 更直观，适合当前三端调试。
 
 ## 终端 1：启动 MuJoCo 仿真
 
@@ -29,8 +58,8 @@ BVH / mocopi source
 ```bash
 cd /home/nolo/GR00T-WholeBodyControl
 
-source .venv_sim/bin/activate
-python gear_sonic/scripts/run_sim_loop.py
+bash -lc 'cd /home/nolo/GR00T-WholeBodyControl && source .venv_sim/bin/activate && PYTHONUNBUFFERED=1 python -u gear_sonic/scripts/run_sim_loop.py' \
+  2>&1 | tee /home/nolo/GR00T-WholeBodyControl/logs/mocopi_pose/latest/terminal1_mujoco.log
 ```
 
 预期现象：
@@ -43,13 +72,8 @@ python gear_sonic/scripts/run_sim_loop.py
 在 `gear_sonic_deploy/` 下运行：
 
 ```bash
-cd /home/nolo/GR00T-WholeBodyControl/gear_sonic_deploy
-
-bash deploy.sh \
-  --input-type zmq_manager \
-  --zmq-host localhost \
-  --zmq-port 5556 \
-  sim
+bash -lc 'cd /home/nolo/GR00T-WholeBodyControl/gear_sonic_deploy && stdbuf -oL -eL bash deploy.sh --input-type zmq_manager --zmq-host localhost --zmq-port 5556 sim' \
+  2>&1 | tee /home/nolo/GR00T-WholeBodyControl/logs/mocopi_pose/latest/terminal2_deploy.log
 ```
 
 这里必须使用：
@@ -68,11 +92,13 @@ manager_state
 
 普通 `--input-type zmq --zmq-topic pose` 是 pose/reference streaming 路径，不是 planner 三点控制路径。
 
-启动后操作：
+默认 planner / VR3PT 链路启动后操作：
 
 1. 在 deploy 终端按 `]` 启动控制。
 2. 回到 MuJoCo 窗口按 `9`，把机器人放到地面。
 3. 保持 deploy 终端运行，等待终端 3 的 planner 数据。
+
+BVH POSE 链路不要在终端 3 启动前提前按 `]`。POSE 模式由终端 3 的 `command.start=true` 自动触发 streamed-motion 控制；如果需要手动按键，也等终端 3 出现 `pose=sent:N` 之后再按。
 
 ## 终端 3：启动 BVH 回放输入
 
@@ -81,12 +107,8 @@ manager_state
 ```bash
 cd /home/nolo/GR00T-WholeBodyControl
 
-.venv_teleop/bin/python gear_sonic/scripts/mocap_manager_server.py \
-  --source bvh \
-  --bvh-file /home/nolo/RAYNOS_Motion1.bvh \
-  --bvh-loop \
-  --bvh-fps 30 \
-  --zmq-port 5556
+bash -lc 'cd /home/nolo/GR00T-WholeBodyControl && PYTHONUNBUFFERED=1 .venv_teleop/bin/python -u gear_sonic/scripts/mocap_manager_server.py --source bvh --bvh-file /home/nolo/RAYNOS_Motion1.bvh --bvh-loop --bvh-fps 30 --zmq-port 5556' \
+  2>&1 | tee /home/nolo/GR00T-WholeBodyControl/logs/mocopi_pose/latest/terminal3_mocap_manager.log
 ```
 
 如果需要本地三点可视化窗口，加：
@@ -98,13 +120,8 @@ cd /home/nolo/GR00T-WholeBodyControl
 完整命令：
 
 ```bash
-.venv_teleop/bin/python gear_sonic/scripts/mocap_manager_server.py \
-  --source bvh \
-  --bvh-file /home/nolo/RAYNOS_Motion1.bvh \
-  --bvh-loop \
-  --bvh-fps 30 \
-  --zmq-port 5556 \
-  --visualize-vr3pt
+bash -lc 'cd /home/nolo/GR00T-WholeBodyControl && PYTHONUNBUFFERED=1 .venv_teleop/bin/python -u gear_sonic/scripts/mocap_manager_server.py --source bvh --bvh-file /home/nolo/RAYNOS_Motion1.bvh --bvh-loop --bvh-fps 30 --zmq-port 5556 --visualize-vr3pt' \
+  2>&1 | tee /home/nolo/GR00T-WholeBodyControl/logs/mocopi_pose/latest/terminal3_mocap_manager.log
 ```
 
 如果还想在三点窗口中显示 G1 模型，加：
@@ -117,6 +134,46 @@ cd /home/nolo/GR00T-WholeBodyControl
 
 ```bash
 --enable-upper-body-ik
+```
+
+### BVH POSE 模式
+
+如果目标是验证 full-body `pose` topic，而不是默认三点 planner 链路，终端 3 使用：
+
+```bash
+bash -lc 'cd /home/nolo/GR00T-WholeBodyControl && PYTHONUNBUFFERED=1 .venv_teleop/bin/python -u gear_sonic/scripts/mocap_manager_server.py --source bvh --bvh-file /home/nolo/RAYNOS_Motion1.bvh --bvh-loop --bvh-fps 30 --target-fps 30 --control-mode pose --pose-window-size 5 --zmq-port 5556' \
+  2>&1 | tee /home/nolo/GR00T-WholeBodyControl/logs/mocopi_pose/latest/terminal3_mocap_manager.log
+```
+
+这个命令会发送 `command.planner=false`，让 `zmq_manager` 进入 streamed-motion / POSE。日志中应能看到：
+
+```text
+pose_protocol=v3
+pose=sent:N
+```
+
+POSE 模式下 manager 会等第一条 pose 窗口发出后再发送 `start=True`，避免 deploy 先进入控制但还没有 reference motion。当前默认 v3 消息包含 `smpl_joints`、`smpl_pose`、`body_quat_w`、`joint_pos`、`joint_vel`、`frame_index`；release policy 的 SMPL mode 需要 `joint_pos` 里的 wrist observation，因此不要把 `--pose-protocol-version 2` 当作 MuJoCo 主验证路径。
+
+如果之前跑过 protocol v2，建议重启终端 2 的 deploy，再重启终端 3 的 manager。deploy 侧会记录 active protocol version，混用旧 v2 和新 v3 容易触发协议状态不一致。
+
+### POSE 模式没有动作或机器人倒下
+
+优先检查：
+
+1. 终端 3 是否显示 `pose_protocol=v3` 和持续增长的 `pose=sent:N`。
+2. 终端 2 是否使用 `--input-type zmq_manager`，而不是普通 `--input-type zmq --zmq-topic pose`。
+3. 是否重启过 deploy，避免残留旧 protocol v2 状态。
+4. deploy 日志是否出现 `Version 3 missing required field 'joint_pos'`、`motion has no joints`、`Failed to gather encoder observations` 等错误。
+
+第一版 v2 只发 `smpl_*` 和 `body_quat`，没有 `joint_pos/joint_vel`，会导致 release SMPL mode 的 `motion_joint_positions_wrists_10frame_step1` 缺失。这是“manager 有 pose 日志但 MuJoCo 没动作”的主要原因。
+
+第二个会导致“完全没反应”的问题是 streamed-motion 的启动转发。`zmq_manager` 初始在 planner mode，如果在终端 3 启动前就按 `]`，这个按键不会传给内部 POSE 接口；同时第一版 `ZMQManager` 没有把 `command.start=true` 转发到 streamed-motion 控制启动逻辑。当前已在 `ZMQManager` 中补齐：切到 streamed-motion 后收到 `command.start=true` 会设置 `operator_state.start=true`。修改后需要重新编译 deploy，并重启终端 2。
+
+重新编译：
+
+```bash
+cd /home/nolo/GR00T-WholeBodyControl
+cmake --build gear_sonic_deploy/build --target g1_deploy_onnx_ref -j2
 ```
 
 完整验证命令：
@@ -137,6 +194,29 @@ cd /home/nolo/GR00T-WholeBodyControl
 这个开关会额外发布 deploy 侧已有的 `upper_body_position` / `upper_body_velocity`。它不改变腿部控制；腿部仍由 locomotion planner 根据 `mode/movement/facing/speed/height` 生成。
 
 ## 预期日志
+
+测试结束后，日志文件应包含：
+
+```text
+logs/mocopi_pose/latest/terminal1_mujoco.log
+logs/mocopi_pose/latest/terminal2_deploy.log
+logs/mocopi_pose/latest/terminal3_mocap_manager.log
+```
+
+快速定位命令：
+
+```bash
+cd /home/nolo/GR00T-WholeBodyControl
+rg -n "ERROR|Error|missing|required|Failed|Protocol|STREAMED|ZMQ STREAMING|motion name|pose=|start requested|operator_state|倒|nan|NaN" \
+  logs/mocopi_pose/latest/*.log
+```
+
+如果需要把最近一轮日志整体打包：
+
+```bash
+cd /home/nolo/GR00T-WholeBodyControl
+tar -czf logs/mocopi_pose/latest.tar.gz -C logs/mocopi_pose latest
+```
 
 终端 3 应出现类似：
 
@@ -282,25 +362,27 @@ echo $DISPLAY
 4. 终端 3 是否显示 `vr_3pt=yes`。
 5. 端口 `5556` 是否被旧进程占用。
 
-### 不要用普通 ZMQ pose 模式
+### ZMQ input 类型选择
 
-不要用：
+默认 VR3PT planner 链路不要用：
 
 ```bash
 bash deploy.sh --input-type zmq --zmq-topic pose sim
 ```
 
-除非输入源发布的是 `pose` topic。
+因为默认 `mocap_manager_server.py` 发布的是 `command` + `planner`，需要 `zmq_manager` 同时订阅多个 topic。
 
-当前 `mocap_manager_server.py` 发布 planner 控制消息，应使用：
+默认三点 planner 和新增 BVH POSE 都建议使用：
 
 ```bash
 bash deploy.sh --input-type zmq_manager --zmq-port 5556 sim
 ```
 
+差别在终端 3 的 `--control-mode`：`planner` 会让 deploy 使用 planner topic；`pose` 会让 deploy 使用 pose topic。
+
 ### BVH 目标姿态不自然
 
-当前 BVH 路径仍是三点 retarget，但已经加入第一阶段优化：
+BVH 默认路径仍是三点 retarget，但已经加入第一阶段优化：
 
 - 默认查找 `LeftHand`、`RightHand`、`Head`。
 - 默认尽量保留 `spine`、`chest`、`neck`、`head`、`shoulder`、`elbow`、`wrist`、`pelvis` 等有效关节；`RAYNOS_Motion1.bvh` 当前可匹配到 `joints=12`。
@@ -313,7 +395,7 @@ bash deploy.sh --input-type zmq_manager --zmq-port 5556 sim
 - 如果 G1 FK 依赖不可用，默认回退到旧的首帧位置平移标定。
 - shoulder / elbow / torso 信息已经进入 `MocapFrame`；当前 IK 先用 wrist 目标，尚未把 BVH elbow pole vector 纳入目标函数。
 - 手部关节当前仍发送零值。
-- 当前 `PLANNER_VR_3PT` 不携带完整下肢 tracker 信息。PICO 的腿部 tracker 数据主要通过 full-body `pose` topic / SMPL reference 路径进入 deploy；如果要让 BVH/mocopi 对齐这条能力，下一步应新增 `pose` topic 支持，而不是在 `planner` topic 里做腿部 IK。
+- 当前 `PLANNER_VR_3PT` 不携带完整下肢 tracker 信息。PICO 的腿部 tracker 数据主要通过 full-body `pose` topic / SMPL reference 路径进入 deploy；BVH 已新增第一版 `pose` topic 支持，mocopi 官方二进制包还需要补 27 bone -> SMPL 映射或由 bridge 直接输出 SMPL-like 字段。
 
 对应工程提交：
 
@@ -336,7 +418,7 @@ bash deploy.sh --input-type zmq_manager --zmq-port 5556 sim
 3. 如果启用 IK，先看 `ik_dq/ik_active/ik_v` 判断 manager 是否生成了不同上肢目标，再看 `ik_err` 和 `ik_margin`。`ik_margin` 长期为 `0` 时，不要继续加大动作幅度，先调目标尺度或补 elbow pole vector。
 4. 三点窗口合理但 MuJoCo 不自然，优先调 deploy / planner / compliance。
 5. 三点窗口本身就飘、抖或左右手方向明显不对，优先改 `VR3PointRetargeter`。
-6. 如果目标是完整复原 BVH 或利用腿部 tracker/full-body 信息，不要只依赖 `PLANNER_VR_3PT`，需要新增 `pose` topic / reference streaming。后续用 [Sony mocopi / BVH POSE 流支持追踪](mocopi_pose_stream.md) 单独记录。
+6. 如果目标是完整复原 BVH 或利用腿部 tracker/full-body 信息，不要只依赖 `PLANNER_VR_3PT`，应使用 `--control-mode pose` 验证 `pose` topic / reference streaming。后续用 [Sony mocopi / BVH POSE 流支持追踪](mocopi_pose_stream.md) 单独记录。
 
 调参建议：
 

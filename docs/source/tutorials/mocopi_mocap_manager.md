@@ -31,6 +31,7 @@ gear_sonic/utils/teleop/controls/__init__.py
 gear_sonic/utils/teleop/retarget/vr3pt_retargeter.py
 gear_sonic/utils/teleop/retarget/upper_body_ik.py
 gear_sonic/utils/teleop/retarget/__init__.py
+gear_sonic/utils/teleop/zmq/zmq_pose_sender.py
 ```
 
 职责划分：
@@ -42,6 +43,7 @@ gear_sonic/utils/teleop/retarget/__init__.py
 - `keyboard_control.py`：提供基于 stdin 的行命令控制，用来替代 PICO 手柄按键。
 - `vr3pt_retargeter.py`：把标准化后的动捕帧转换为 deploy 侧需要的 `vr_position` / `vr_orientation`。
 - `upper_body_ik.py`：实验性可选模块，把 VR3PT wrist 目标求解成 deploy 侧 17 维 `upper_body_position` / `upper_body_velocity`。
+- `zmq_pose_sender.py`：维护 POSE 滑动窗口，并按 deploy protocol v3 发布 `pose` topic。
 
 ## 数据流
 
@@ -62,6 +64,20 @@ Sony mocopi app / mocopi bridge / BVH file
 deploy 侧继续消费现有 ZMQ schema。第一版集成不需要在 deploy 侧新增 topic。
 
 注意：这张图描述的是 `planner` topic 的三点实时验证链路，不是 PICO full-body `pose` topic。PICO 的下肢 tracker 数据会融入 full-body / SMPL 数据；mocopi / BVH 要对齐这条能力，需要新增 POSE 流支持，而不是继续扩展 `PLANNER_VR_3PT`。
+
+BVH / JSON bridge 提供 full-body reference 时，也可以走 `pose` topic：
+
+```text
+BVH file / SMPL-like JSON bridge
+  -> MocapFrame.full_body
+  -> PoseStreamPublisher
+  -> ZMQ PUB，默认端口 5556
+      - command，planner=false 时切到 streamed-motion
+      - pose，protocol v3: smpl_joints / smpl_pose / body_quat_w / joint_pos / joint_vel / frame_index
+      - manager_state
+  -> deploy 侧 ZMQManager
+  -> streamed motion / POSE reference
+```
 
 ## 启动 mocopi UDP 输入
 
@@ -110,6 +126,28 @@ BVH 回放适合在没有 mocopi 硬件时验证后续链路，也适合调试�
   --visualize-vr3pt
 ```
 
+如果要验证 BVH full-body POSE 流，使用 `--control-mode pose`。这个模式会在 `command` topic 中发送 `planner=false`，让 deploy 的 `ZMQManager` 切到 streamed-motion / POSE：
+
+```bash
+.venv_teleop/bin/python gear_sonic/scripts/mocap_manager_server.py \
+  --source bvh \
+  --bvh-file /path/to/motion.bvh \
+  --bvh-loop \
+  --bvh-fps 30 \
+  --target-fps 30 \
+  --control-mode pose \
+  --pose-window-size 5 \
+  --zmq-port 5556
+```
+
+`pose` 模式默认使用 `--pose-protocol-version 3`。v3 会补齐 deploy release SMPL mode 需要的 `joint_pos/joint_vel`，其中 wrist 6 维按 PICO manager 的 SMPL elbow/wrist 映射生成，其余 G1 关节默认为 0。如果只做抓包或协议兼容调试，可以显式指定 `--pose-protocol-version 2`，但 v2 不适合作为当前 MuJoCo release policy 的主验证路径。
+
+如果只想在原来的 planner/VR3PT 模式下同时发布 `pose` topic 做抓包或数据检查，可以保持 `--control-mode planner` 并添加：
+
+```bash
+--enable-pose-stream
+```
+
 BVH source 会解析 hierarchy 和 motion 数据，执行 FK，并尽量保留 torso、neck、head、shoulder、elbow、wrist、pelvis 等有效关节。默认 planner 仍只消费 `left_wrist`、`right_wrist`、`head` 三点；如果显式开启 `--enable-upper-body-ik`，manager 会额外发布 deploy 侧已有的 17 维上肢关节目标。
 
 如果用于评估动作自然度，建议让 BVH 回放频率和 manager 发布频率一致。例如 BVH 原始文件是 `50 Hz` 时，先用：
@@ -150,6 +188,9 @@ BVH source 会解析 hierarchy 和 motion 数据，执行 FK，并尽量保留 t
 | `--bvh-world-frame` | 关闭 | 保留 BVH root 全局平移，不做 body-local 化 |
 | `--zmq-port` | `5556` | deploy 侧订阅的 ZMQ PUB 端口 |
 | `--target-fps` | `20` | planner 发布循环频率 |
+| `--control-mode` | `planner` | 通过 command topic 选择 deploy 控制模式；`planner` 使用 PLANNER/VR3PT，`pose` 使用 streamed-motion / POSE |
+| `--enable-pose-stream` | 关闭 | 当输入源有 `full_body` 时额外发布 `pose` topic；`--control-mode pose` 会自动开启 |
+| `--pose-window-size` | `5` | 每条 POSE 消息包含的 full-body 帧数，对齐 PICO 的滑动窗口 |
 | `--mocap-timeout-s` | `0.5` | 最新动捕帧超过该时间后停止发布 VR 三点目标 |
 | `--start-paused` | 关闭 | 启动时不立即启用控制 |
 | `--allow-bone-translation-vr` | 关闭 | 调试用途：把 bone translation 当作 VR 三点位置 |
@@ -238,7 +279,7 @@ quat_wxyz: [w, x, y, z]
 
 ```{admonition} 重要限制
 :class: warning
-官方 mocopi 数据包还不是机器人可直接使用的 VR 三点目标。它主要提供 mocopi 骨架 transform。要稳定得到机器人坐标系下的 `left_wrist`、`right_wrist`、`head` 全局目标，还需要补骨架 FK 和标定层。
+官方 mocopi 数据包还不是机器人可直接使用的完整 POSE 数据。它主要提供 mocopi 骨架 transform。当前官方二进制包仍优先用于 VR3PT；要稳定进入 POSE，需要补 mocopi 27 bone 到 SMPL 24/21 的映射，或由上游 bridge 直接输出 SMPL-like 字段。
 ```
 
 ### JSON Bridge
@@ -260,6 +301,18 @@ quat_wxyz: [w, x, y, z]
     1, 0, 0, 0
   ]
 }
+```
+
+JSON bridge 也可以直接发送 full-body POSE 所需字段。实际发送时数组必须是完整长度：
+
+```text
+source: sony_mocopi_bridge
+frame_index: int
+smpl_joints: [24, 3] 或 [1, 24, 3]
+smpl_pose: [21, 3]、[1, 21, 3] 或展平后的 [63]
+body_quat_w: [4]
+joint_pos: 可选，[29] 或 [1, 29]
+joint_vel: 可选，[29] 或 [1, 29]
 ```
 
 `vr_position` 顺序：
