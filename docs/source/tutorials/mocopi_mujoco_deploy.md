@@ -154,7 +154,15 @@ pose=sent:N
 
 POSE 模式下 manager 会等第一条 pose 窗口发出后再发送 `start=True`，避免 deploy 先进入控制但还没有 reference motion。当前默认 v3 消息包含 `smpl_joints`、`smpl_pose`、`body_quat_w`、`joint_pos`、`joint_vel`、`frame_index`；release policy 的 SMPL mode 需要 `joint_pos` 里的 wrist observation，因此不要把 `--pose-protocol-version 2` 当作 MuJoCo 主验证路径。
 
-`--pose-window-size` 不要沿用早期的 `5`。release policy 的 SMPL mode 会读取类似 `10frame_step5` 的未来 observation，5 帧窗口太短，deploy 会频繁打印 `Motion streamed completed and waiting following motion`。当前推荐用 50 Hz BVH 回放和 80 帧窗口，日志中应出现 `Processing 80 frames`、`Merged streamed data: 80+ current-rate frames`，表示 streamed-motion 窗口足够长。
+`--pose-window-size` 不要沿用早期的 `5`。release policy 的 SMPL mode 会读取类似 `10frame_step5` 的未来 observation，5 帧窗口太短，deploy 会频繁打印 `Motion streamed completed and waiting following motion`。当前 `--control-mode pose` 在不显式设置窗口时默认使用 80 帧；命令里保留 `--pose-window-size 80` 是为了让验证参数更清楚。日志中应出现 `Processing 80 frames`、`Merged streamed data: 80+ current-rate frames`，表示 streamed-motion 窗口足够长。
+
+BVH 循环回放时，manager 发给 deploy 的 `frame_index` 必须保持单调递增。当前实现已经把 ZMQ `frame_index` 改成播放流编号，并在日志里额外打印原始 BVH 帧号：
+
+```text
+frame=1013 ... source_frame=87
+```
+
+这表示 BVH 文件已经 loop 回源帧 87，但 deploy 看到的全局帧仍是 1013。正常情况下 loop 边界后仍应继续看到 `pose=sent:N`，不应重新进入 `pose=buf:x/80`。
 
 如果之前跑过 protocol v2，建议重启终端 2 的 deploy，再重启终端 3 的 manager。deploy 侧会记录 active protocol version，混用旧 v2 和新 v3 容易触发协议状态不一致。
 
@@ -180,13 +188,13 @@ cmake --build gear_sonic_deploy/build --target g1_deploy_onnx_ref -j2
 
 ### ChannelFactory / LowState 日志判断
 
-`ChannelFactory create domain error` 需要结合上下文判断。MuJoCo 仿真端的 `run_sim_loop.py` 会在创建 simulator 前调用一次 `init_channel(config)`；随后 `BaseSimulator.__init__()` 里又会第二次调用 `ChannelFactoryInitialize(...)`，并把异常捕获后打印成：
+`ChannelFactory create domain error` 需要结合上下文判断。当前 MuJoCo 仿真端已经去掉了 `run_sim_loop.py` 里的提前初始化，只保留 `BaseSimulator.__init__()` 中带异常保护的 `ChannelFactoryInitialize(...)`。如果初始化失败，会打印成：
 
 ```text
 Note: Channel factory initialization attempt: ...
 ```
 
-因此，如果 MuJoCo 仿真端没有直接退出，deploy 控制端日志后续又出现 `Init Done`，说明 MuJoCo 和 deploy 之间的 `rt/lowstate` 至少已经建立过，`ChannelFactory create domain error` 更可能是第二次重复初始化的非致命日志，不要直接把它当作 POSE 链路失败。
+因此，如果 MuJoCo 仿真端没有直接退出，deploy 控制端日志后续又出现 `Init Done`，说明 MuJoCo 和 deploy 之间的 `rt/lowstate` 至少已经建立过，不要直接把这条日志当作 POSE 链路失败。
 
 真正需要关注的是 deploy 是否长期收不到 LowState：
 

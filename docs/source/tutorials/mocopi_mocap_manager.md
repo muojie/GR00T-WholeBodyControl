@@ -142,7 +142,9 @@ BVH 回放适合在没有 mocopi 硬件时验证后续链路，也适合调试�
 
 `pose` 模式默认使用 `--pose-protocol-version 3`。v3 会补齐 deploy release SMPL mode 需要的 `joint_pos/joint_vel`，其中 wrist 6 维按 PICO manager 的 SMPL elbow/wrist 映射生成，其余 G1 关节默认为 0。如果只做抓包或协议兼容调试，可以显式指定 `--pose-protocol-version 2`，但 v2 不适合作为当前 MuJoCo release policy 的主验证路径。
 
-MuJoCo release policy 的 SMPL mode 还会读取未来帧 observation。不要用早期 `--pose-window-size 5` 做主验证，当前推荐 `--bvh-fps 50 --target-fps 50 --pose-window-size 80`，否则 deploy 会频繁打印 `Motion streamed completed and waiting following motion`。
+MuJoCo release policy 的 SMPL mode 还会读取未来帧 observation。不要用早期 `--pose-window-size 5` 做主验证，当前 `--control-mode pose` 不显式设置窗口时默认使用 80 帧；推荐命令里仍保留 `--pose-window-size 80`，否则旧脚本或手工命令容易复现 `Motion streamed completed and waiting following motion`。
+
+BVH loop 回放时，`frame_index` 使用播放流单调编号，源 BVH 帧号写入日志的 `source_frame`。因此 loop 后应看到类似 `frame=1013 ... source_frame=87`，而不是 `frame` 回到 0。
 
 如果只想在原来的 planner/VR3PT 模式下同时发布 `pose` topic 做抓包或数据检查，可以保持 `--control-mode planner` 并添加：
 
@@ -192,7 +194,7 @@ BVH source 会解析 hierarchy 和 motion 数据，执行 FK，并尽量保留 t
 | `--target-fps` | `20` | planner 发布循环频率 |
 | `--control-mode` | `planner` | 通过 command topic 选择 deploy 控制模式；`planner` 使用 PLANNER/VR3PT，`pose` 使用 streamed-motion / POSE |
 | `--enable-pose-stream` | 关闭 | 当输入源有 `full_body` 时额外发布 `pose` topic；`--control-mode pose` 会自动开启 |
-| `--pose-window-size` | `5` | 每条 POSE 消息包含的 full-body 帧数；MuJoCo release policy 验证建议显式设为 `80` |
+| `--pose-window-size` | `pose` 模式为 `80`；planner/debug 为 `5` | 每条 POSE 消息包含的 full-body 帧数；MuJoCo release policy 验证建议显式设为 `80` |
 | `--mocap-timeout-s` | `0.5` | 最新动捕帧超过该时间后停止发布 VR 三点目标 |
 | `--start-paused` | 关闭 | 启动时不立即启用控制 |
 | `--allow-bone-translation-vr` | 关闭 | 调试用途：把 bone translation 当作 VR 三点位置 |

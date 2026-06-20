@@ -102,7 +102,9 @@ BVH POSE 回放示例：
   --zmq-port 5556
 ```
 
-MuJoCo release policy 的 SMPL mode 会读取未来帧 observation，`--pose-window-size 5` 太短，deploy 会频繁进入 `Motion streamed completed and waiting following motion`。当前 BVH POSE 验证优先用 `--bvh-fps 50 --target-fps 50 --pose-window-size 80`，deploy 控制端应能看到 `Processing 80 frames` 和 `Merged streamed data: 80+ current-rate frames`。
+MuJoCo release policy 的 SMPL mode 会读取未来帧 observation，`--pose-window-size 5` 太短，deploy 会频繁进入 `Motion streamed completed and waiting following motion`。当前 `--control-mode pose` 不显式设置窗口时默认使用 80 帧；BVH POSE 验证仍建议把 `--pose-window-size 80` 写在命令里，deploy 控制端应能看到 `Processing 80 frames` 和 `Merged streamed data: 80+ current-rate frames`。
+
+BVH source 的 `frame_index` 是播放流单调编号，不再直接使用源 BVH 帧号。源文件帧号会进入日志的 `source_frame` 字段；当 `--bvh-loop` 回到文件开头时，`frame` 继续递增，`source_frame` 回到小值，从而避免 deploy merger 把 loop 当成旧数据或新会话。
 
 如果只想在 planner/VR3PT 控制模式下同时发布 `pose` topic 做调试：
 
