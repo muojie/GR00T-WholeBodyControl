@@ -286,11 +286,12 @@ class BvhPlaybackSource:
     def _run(self) -> None:
         frame_period_s = 1.0 / max(1.0, self.motion.playback_fps)
         frame_idx = 0
+        stream_frame_idx = self._frames_emitted
         next_tick_s = time.time()
 
         while self._running.is_set():
             try:
-                frame = self._build_frame(frame_idx)
+                frame = self._build_frame(frame_idx, stream_frame_idx)
             except Exception as exc:
                 with self._lock:
                     self._last_error = str(exc)
@@ -298,9 +299,10 @@ class BvhPlaybackSource:
 
             with self._lock:
                 self._latest = frame
-                self._frames_emitted += 1
+                self._frames_emitted = stream_frame_idx + 1
                 self._last_error = None
 
+            stream_frame_idx += 1
             frame_idx += self.motion.frame_stride
             if frame_idx >= self.motion.frame_count:
                 if self.loop:
@@ -317,7 +319,7 @@ class BvhPlaybackSource:
             else:
                 next_tick_s = time.time()
 
-    def _build_frame(self, frame_idx: int) -> MocapFrame:
+    def _build_frame(self, frame_idx: int, stream_frame_idx: int) -> MocapFrame:
         joints: dict[str, Pose7D] = {}
         for target_name, joint_idx in self.motion.selected_indices.items():
             joints[target_name] = Pose7D(
@@ -328,13 +330,14 @@ class BvhPlaybackSource:
         return MocapFrame(
             source="bvh",
             host_time_s=time.time(),
-            frame_index=int(frame_idx),
+            frame_index=int(stream_frame_idx),
             fps=float(self.motion.playback_fps),
             joints=joints,
             full_body=_build_full_body_reference(self.motion, frame_idx),
             metadata={
                 "format": "bvh",
                 "path": self.motion.path,
+                "source_frame_index": int(frame_idx),
                 "source_fps": self.motion.source_fps,
                 "frame_stride": self.motion.frame_stride,
                 "joint_names": self.motion.joint_names,

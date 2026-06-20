@@ -62,6 +62,10 @@ class StreamMode(IntEnum):
     PLANNER_VR_3PT = 5
 
 
+POSE_DEBUG_WINDOW_SIZE = 5
+POSE_CONTROL_WINDOW_SIZE = 80
+
+
 def _send_manager_state(socket: zmq.Socket, stream_mode: StreamMode, toggle_dc: bool, toggle_da: bool) -> None:
     socket.send(
         pack_pose_message(
@@ -140,6 +144,19 @@ def _create_source(args: argparse.Namespace):
     raise ValueError(f"unsupported source {args.source!r}")
 
 
+def _resolve_pose_window_size(args: argparse.Namespace) -> int:
+    if args.pose_window_size is not None:
+        window_size = int(args.pose_window_size)
+    elif args.control_mode == "pose":
+        window_size = POSE_CONTROL_WINDOW_SIZE
+    else:
+        window_size = POSE_DEBUG_WINDOW_SIZE
+
+    if window_size <= 0:
+        raise ValueError("--pose-window-size must be positive")
+    return window_size
+
+
 def run_mocap_manager(args: argparse.Namespace) -> None:
     source, source_description = _create_source(args)
     retargeter = VR3PointRetargeter(
@@ -180,8 +197,9 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
     time.sleep(args.publisher_warmup_s)
 
     pose_stream_enabled = args.enable_pose_stream or args.control_mode == "pose"
+    pose_window_size = _resolve_pose_window_size(args)
     pose_publisher = PoseStreamPublisher(
-        window_size=args.pose_window_size,
+        window_size=pose_window_size,
         protocol_version=args.pose_protocol_version,
     )
     control_uses_planner = args.control_mode == "planner"
@@ -196,7 +214,7 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
     print(
         f"[MocapManager] publishing on tcp://*:{args.zmq_port}; "
         f"control_mode={args.control_mode} pose_stream={int(pose_stream_enabled)} "
-        f"pose_protocol=v{args.pose_protocol_version}; "
+        f"pose_protocol=v{args.pose_protocol_version} pose_window={pose_window_size}; "
         f"{source_description}"
     )
     print("[MocapManager] stdin commands: start, pause, stop, mode N, move x y z, face x y z, dc, abort")
@@ -309,10 +327,17 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
                 diag = source.diagnostics
                 frame_desc = "none"
                 if frame is not None:
+                    source_frame_index = frame.metadata.get("source_frame_index")
+                    source_frame_desc = (
+                        f" source_frame={source_frame_index}"
+                        if source_frame_index is not None and source_frame_index != frame.frame_index
+                        else ""
+                    )
                     frame_desc = (
                         f"frame={frame.frame_index} source_ts={frame.source_time_ns} "
                         f"age={time.time() - frame.host_time_s:.3f}s "
                         f"joints={len(frame.joints)} bones={len(frame.bones)}"
+                        f"{source_frame_desc}"
                     )
                 vr_desc = "yes" if vr_position is not None else "no"
                 pose_desc = "off"
@@ -431,8 +456,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pose-window-size",
         type=int,
-        default=5,
-        help="Number of full-body frames per pose topic message, matching PICO's sliding window.",
+        default=None,
+        help=(
+            "Number of full-body frames per pose topic message. "
+            "Defaults to 80 in --control-mode pose and 5 for planner/debug pose streaming."
+        ),
     )
     parser.add_argument(
         "--pose-protocol-version",
