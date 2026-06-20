@@ -95,12 +95,14 @@ BVH POSE 回放示例：
   --source bvh \
   --bvh-file /home/nolo/RAYNOS_Motion1.bvh \
   --bvh-loop \
-  --bvh-fps 30 \
-  --target-fps 30 \
+  --bvh-fps 50 \
+  --target-fps 50 \
   --control-mode pose \
-  --pose-window-size 5 \
+  --pose-window-size 80 \
   --zmq-port 5556
 ```
+
+MuJoCo release policy 的 SMPL mode 会读取未来帧 observation，`--pose-window-size 5` 太短，deploy 会频繁进入 `Motion streamed completed and waiting following motion`。当前 BVH POSE 验证优先用 `--bvh-fps 50 --target-fps 50 --pose-window-size 80`，deploy 控制端应能看到 `Processing 80 frames` 和 `Merged streamed data: 80+ current-rate frames`。
 
 如果只想在 planner/VR3PT 控制模式下同时发布 `pose` topic 做调试：
 
@@ -109,8 +111,8 @@ BVH POSE 回放示例：
   --source bvh \
   --bvh-file /home/nolo/RAYNOS_Motion1.bvh \
   --bvh-loop \
-  --bvh-fps 30 \
-  --target-fps 30 \
+  --bvh-fps 50 \
+  --target-fps 50 \
   --control-mode planner \
   --enable-pose-stream \
   --zmq-port 5556

@@ -141,7 +141,7 @@ bash -lc 'cd /home/nolo/GR00T-WholeBodyControl && PYTHONUNBUFFERED=1 .venv_teleo
 如果目标是验证 full-body `pose` topic，而不是默认三点 planner 链路，终端 3 使用：
 
 ```bash
-bash -lc 'cd /home/nolo/GR00T-WholeBodyControl && PYTHONUNBUFFERED=1 .venv_teleop/bin/python -u gear_sonic/scripts/mocap_manager_server.py --source bvh --bvh-file /home/nolo/RAYNOS_Motion1.bvh --bvh-loop --bvh-fps 30 --target-fps 30 --control-mode pose --pose-window-size 5 --zmq-port 5556' \
+bash -lc 'cd /home/nolo/GR00T-WholeBodyControl && PYTHONUNBUFFERED=1 .venv_teleop/bin/python -u gear_sonic/scripts/mocap_manager_server.py --source bvh --bvh-file /home/nolo/RAYNOS_Motion1.bvh --bvh-loop --bvh-fps 50 --target-fps 50 --control-mode pose --pose-window-size 80 --zmq-port 5556' \
   2>&1 | tee /home/nolo/GR00T-WholeBodyControl/logs/mocopi_pose/latest/terminal3_mocap_manager.log
 ```
 
@@ -153,6 +153,8 @@ pose=sent:N
 ```
 
 POSE 模式下 manager 会等第一条 pose 窗口发出后再发送 `start=True`，避免 deploy 先进入控制但还没有 reference motion。当前默认 v3 消息包含 `smpl_joints`、`smpl_pose`、`body_quat_w`、`joint_pos`、`joint_vel`、`frame_index`；release policy 的 SMPL mode 需要 `joint_pos` 里的 wrist observation，因此不要把 `--pose-protocol-version 2` 当作 MuJoCo 主验证路径。
+
+`--pose-window-size` 不要沿用早期的 `5`。release policy 的 SMPL mode 会读取类似 `10frame_step5` 的未来 observation，5 帧窗口太短，deploy 会频繁打印 `Motion streamed completed and waiting following motion`。当前推荐用 50 Hz BVH 回放和 80 帧窗口，日志中应出现 `Processing 80 frames`、`Merged streamed data: 80+ current-rate frames`，表示 streamed-motion 窗口足够长。
 
 如果之前跑过 protocol v2，建议重启终端 2 的 deploy，再重启终端 3 的 manager。deploy 侧会记录 active protocol version，混用旧 v2 和新 v3 容易触发协议状态不一致。
 
@@ -175,6 +177,26 @@ POSE 模式下 manager 会等第一条 pose 窗口发出后再发送 `start=True
 cd /home/nolo/GR00T-WholeBodyControl
 cmake --build gear_sonic_deploy/build --target g1_deploy_onnx_ref -j2
 ```
+
+### ChannelFactory / LowState 日志判断
+
+`ChannelFactory create domain error` 需要结合上下文判断。MuJoCo 仿真端的 `run_sim_loop.py` 会在创建 simulator 前调用一次 `init_channel(config)`；随后 `BaseSimulator.__init__()` 里又会第二次调用 `ChannelFactoryInitialize(...)`，并把异常捕获后打印成：
+
+```text
+Note: Channel factory initialization attempt: ...
+```
+
+因此，如果 MuJoCo 仿真端没有直接退出，deploy 控制端日志后续又出现 `Init Done`，说明 MuJoCo 和 deploy 之间的 `rt/lowstate` 至少已经建立过，`ChannelFactory create domain error` 更可能是第二次重复初始化的非致命日志，不要直接把它当作 POSE 链路失败。
+
+真正需要关注的是 deploy 是否长期收不到 LowState：
+
+```text
+LowState is not available, waiting for robot to be ready
+```
+
+如果这类日志一直持续且没有 `Init Done`，优先排查 MuJoCo 仿真端 / deploy 控制端的 Unitree DDS 接口是否一致。MuJoCo 端发布 `rt/lowstate`、订阅 `rt/lowcmd`；deploy 端订阅 `rt/lowstate`、发布 `rt/lowcmd`。这条 DDS 闭环不通时，ZMQ POSE 即使正常收到也无法驱动 MuJoCo。
+
+`Lost LowState data connection from robot` 如果出现在手动停止 MuJoCo 仿真端或 deploy 控制端之后，通常只是进程停止后的副作用；如果出现在运行中，则表示 deploy 的 LowState 时间戳超过安全阈值，会触发 `Safety check failed` 并停止控制。
 
 完整验证命令：
 
@@ -207,7 +229,7 @@ logs/mocopi_pose/latest/terminal3_mocap_manager.log
 
 ```bash
 cd /home/nolo/GR00T-WholeBodyControl
-rg -n "ERROR|Error|missing|required|Failed|Protocol|STREAMED|ZMQ STREAMING|motion name|pose=|start requested|operator_state|倒|nan|NaN" \
+rg -n "ERROR|Error|missing|required|Failed|Protocol|STREAMED|ZMQ STREAMING|motion name|pose=|start requested|operator_state|ChannelFactory|LowState|倒|nan|NaN" \
   logs/mocopi_pose/latest/*.log
 ```
 
