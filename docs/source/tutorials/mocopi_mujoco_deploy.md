@@ -152,7 +152,7 @@ pose_protocol=v3
 pose=sent:N
 ```
 
-POSE 模式下 manager 会等第一条 pose 窗口发出后再发送 `start=True`，避免 deploy 先进入控制但还没有 reference motion。当前默认 v3 消息包含 `smpl_joints`、`smpl_pose`、`body_quat_w`、`joint_pos`、`joint_vel`、`frame_index`；release policy 的 SMPL mode 需要 `joint_pos` 里的 wrist observation，因此不要把 `--pose-protocol-version 2` 当作 MuJoCo 主验证路径。
+POSE 模式下 manager 会等第一条 pose 窗口发出后再发送 `start=True`，避免 deploy 先进入控制但还没有 reference motion。当前默认 v3 消息包含 `smpl_joints`、`smpl_pose`、`body_pos`、`body_quat_w`、`joint_pos`、`joint_vel`、`frame_index`；release policy 的 SMPL mode 需要 `joint_pos` 里的 wrist observation，因此不要把 `--pose-protocol-version 2` 当作 MuJoCo 主验证路径。
 
 `--pose-window-size` 不要沿用早期的 `5`。release policy 的 SMPL mode 会读取类似 `10frame_step5` 的未来 observation，5 帧窗口太短，deploy 会频繁打印 `Motion streamed completed and waiting following motion`。当前 `--control-mode pose` 在不显式设置窗口时默认使用 80 帧；命令里保留 `--pose-window-size 80` 是为了让验证参数更清楚。日志中应出现 `Processing 80 frames`、`Merged streamed data: 80+ current-rate frames`，表示 streamed-motion 窗口足够长。
 
@@ -191,15 +191,16 @@ frame=1013 ... source_frame=87
 | `smpl_lz` | SMPL 下肢在 root-local 坐标里的 z 范围是否明显反向或尺度异常 |
 | `smpl_lspan` | 下肢包围盒尺度是否接近人体比例 |
 | `smpl_lpose` | SMPL 下肢 local pose 幅度是否过大 |
+| `root_z` | POSE `body_pos` 的 root 高度；默认 BVH 路径应为 `0.793m`，不能是 `0.000m` |
 | `root_tilt` | root 姿态是否大幅倾斜，过大时很容易切入后失稳 |
 
 示例：
 
 ```text
-pose=sent:24 q=[-1.15,0.98] dq_abs=0.00 lower_dq=0.00 smpl_lz=[-0.76,0.00] smpl_lspan=0.90m smpl_lpose=0.53rad root_tilt=0.53rad
+pose=sent:24 q=[-1.15,0.98] dq_abs=0.00 lower_dq=0.00 smpl_lz=[-0.76,0.00] smpl_lspan=0.90m smpl_lpose=0.53rad root_z=0.793m root_tilt=0.53rad
 ```
 
-这类日志表示下肢 G1 `joint_pos` 仍保持默认站姿，但 SMPL 下肢和 root 姿态已经在变化。若此时仍倒，下一步应优先检查 streamed motion 的 root/body position、root 高度和启动切入连续性，而不是继续盲调 VR3PT 或上肢 IK。
+这类日志表示下肢 G1 `joint_pos` 仍保持默认站姿，但 SMPL 下肢和 root 姿态已经在变化。此前 streamed motion 未携带 `BodyPositions`，deploy 侧的 `motion_root_z_position` / `base_trans_target` 可能读到 `z=0`；当前已补 `body_pos` 字段，并在 deploy merger 中为旧消息加入 `{0,0,0.793}` 的 root 高度保底。如果仍会倒，下一步优先看 root 倾斜、SMPL 下肢姿态是否过激，以及启动切入瞬间是否和当前机器人状态差太大。
 
 重新编译：
 

@@ -33,6 +33,7 @@ POSE stream 发送的数据包括：
 ```text
 smpl_pose
 smpl_joints
+body_pos
 body_quat_w
 joint_pos
 joint_vel
@@ -80,10 +81,10 @@ mocopi / BVH
 
 实现范围：
 
-- `MocapFrame` 新增 `full_body` 字段，统一携带 `smpl_joints=(24,3)`、`smpl_pose=(21,3)`、`body_quat_w=(4,)`。
+- `MocapFrame` 新增 `full_body` 字段，统一携带 `smpl_joints=(24,3)`、`smpl_pose=(21,3)`、`body_quat_w=(4,)`，以及 root `body_pos_w=(3,)`。
 - `FullBodyReference` 同时携带 `joint_pos=(29,)`、`joint_vel=(29,)`。如果输入源没有显式提供 `joint_pos`，会先填入 deploy 同源的 G1 默认站姿，再按 PICO manager 的同一套 SMPL elbow/wrist 映射覆盖左右 wrist 的 6 个 G1 wrist 关节，`joint_vel` 默认为 0。
 - `BvhPlaybackSource` 会基于 BVH FK 结果生成 SMPL-like full-body reference。`smpl_joints` 会减去 root/pelvis 平移，并用 root 四元数逆旋回本地坐标，以接近 PICO 的 `smpl_joints_local`。
-- `mocap_manager_server.py` 新增 `pose` topic publisher，默认按 deploy 支持的 protocol v3 发送：`smpl_joints`、`smpl_pose`、`body_quat_w`、`joint_pos`、`joint_vel`、`frame_index`。
+- `mocap_manager_server.py` 新增 `pose` topic publisher，默认按 deploy 支持的 protocol v3 发送：`smpl_joints`、`smpl_pose`、`body_pos`、`body_quat_w`、`joint_pos`、`joint_vel`、`frame_index`。
 - 新增 `--control-mode pose`，通过 `command` topic 发送 `planner=false`，让 deploy 的 `ZMQManager` 切到 streamed-motion / POSE 模式。
 - 新增 `--enable-pose-stream`，可以在保持 `planner` 控制模式时额外发布 `pose` topic，便于抓包和数据流调试。
 - JSON bridge 如果直接提供 `smpl_joints`、`smpl_pose`、`body_quat_w`，也会填入 `full_body` 并可进入 `pose` topic；如果额外提供 `joint_pos` / `joint_vel`，manager 会直接透传。
@@ -140,7 +141,7 @@ motion_joint_positions_wrists_10frame_step1
 运行时日志会输出 POSE 诊断字段：
 
 ```text
-pose=sent:24 q=[-1.15,0.98] dq_abs=0.00 lower_dq=0.00 smpl_lz=[-0.76,0.00] smpl_lspan=0.90m smpl_lpose=0.53rad root_tilt=0.53rad
+pose=sent:24 q=[-1.15,0.98] dq_abs=0.00 lower_dq=0.00 smpl_lz=[-0.76,0.00] smpl_lspan=0.90m smpl_lpose=0.53rad root_z=0.793m root_tilt=0.53rad
 ```
 
 字段含义：
@@ -153,6 +154,7 @@ pose=sent:24 q=[-1.15,0.98] dq_abs=0.00 lower_dq=0.00 smpl_lz=[-0.76,0.00] smpl_
 | `smpl_lz` | SMPL 下肢 joints 在 root-local 坐标中的 z 范围 |
 | `smpl_lspan` | SMPL 下肢 joints 的包围盒对角线长度，用于观察输入尺度 |
 | `smpl_lpose` | SMPL 下肢 local pose rotvec 最大范数 |
+| `root_z` | POSE `body_pos` 的 root 高度；默认 BVH 路径应为 `0.793m` |
 | `root_tilt` | root quaternion 相对竖直方向的倾斜角 |
 
 这组日志用于区分两类现象：腿部跟着动，通常来自 `smpl_joints/smpl_pose` 被 policy 使用；而 `lower_dq=0.00` 表示当前并没有把 BVH 下肢显式重定向为 G1 hip/knee/ankle 关节角。
@@ -182,12 +184,13 @@ BVH / mocopi full-body source
 - 用 BVH 文件做离线回放 smoke test，确认 manager 能持续发布 POSE 窗口。
 - 修正 MuJoCo 无动作问题：补齐 deploy SMPL mode 需要的 `joint_pos/joint_vel`，并延迟 POSE 模式的 `start=True`。
 - 修正 POSE `joint_pos` 默认值：非 PICO 输入源没有显式 `joint_pos` 时，使用 G1 默认站姿作为稳定基线，而不是 29 维全 0。
+- 修正 POSE root 高度：发送端新增 `body_pos`，默认 root 高度为 `0.793m`；deploy merger 对旧消息也用 `{0,0,0.793}` 保底，避免 streamed motion 的 `BodyPositions` 仍为 `z=0`。
 - 新增 POSE 运行时诊断：记录下肢 SMPL 范围、下肢 joint_pos 相对默认站姿偏差、整体关节目标范围和 root 倾斜。
 
 下一步：
 
 1. 联合 MuJoCo deploy 验证 `ZMQManager` 侧能解码 protocol v3，并进入 streamed-motion。
-2. 用新增日志判断“仍会摔倒”时是 root/body position 缺失、SMPL 下肢姿态过激，还是切入瞬间参考姿态不连续。
+2. 用新增日志判断“仍会摔倒”时是 root 倾斜过大、SMPL 下肢姿态过激，还是切入瞬间参考姿态不连续。
 3. 对 BVH -> SMPL-like 的关节映射做可视化和误差检查，尤其是 shoulder/collar、foot/toe、root heading。
 4. 再决定是否需要把 mocopi 官方 27 bone 映射到 SMPL 24 joints，或先要求 bridge 输出中间格式。
 5. POSE 路径稳定后，再评估是否回到上肢 IK、手腕细节或腿部 retarget。
