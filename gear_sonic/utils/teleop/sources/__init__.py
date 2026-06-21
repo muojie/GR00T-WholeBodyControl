@@ -1,6 +1,13 @@
 """Motion-capture input sources for teleoperation managers."""
 
-from gear_sonic.utils.teleop.sources.base import FullBodyReference, MocapFrame, MocapSource, Pose7D
+from gear_sonic.utils.teleop.sources.base import (
+    FullBodyReference,
+    G1_DEFAULT_JOINT_POS_ISAACLAB,
+    G1_LOWER_BODY_JOINT_IDX_ISAACLAB,
+    MocapFrame,
+    MocapSource,
+    Pose7D,
+)
 from gear_sonic.utils.teleop.sources.bvh_source import BvhPlaybackSource, load_bvh_motion
 from gear_sonic.utils.teleop.sources.mocopi_source import (
     MOCOPI_DEFAULT_PORT,
@@ -14,6 +21,8 @@ from gear_sonic.utils.teleop.sources.mocopi_source import (
 __all__ = [
     "BvhPlaybackSource",
     "FullBodyReference",
+    "G1_DEFAULT_JOINT_POS_ISAACLAB",
+    "G1_LOWER_BODY_JOINT_IDX_ISAACLAB",
     "MOCOPI_DEFAULT_PORT",
     "MocapFrame",
     "MocapSource",

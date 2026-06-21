@@ -21,6 +21,85 @@ G1_R_WRIST_PITCH_IDX = 26
 G1_L_WRIST_YAW_IDX = 27
 G1_R_WRIST_YAW_IDX = 28
 
+# Values copied from deploy's policy_parameters.hpp. The C++ array is named
+# isaaclab_to_mujoco, but its use maps MuJoCo/hardware index -> IsaacLab index.
+G1_MUJOCO_TO_ISAACLAB_IDX = np.array(
+    [
+        0,
+        6,
+        12,
+        1,
+        7,
+        13,
+        2,
+        8,
+        14,
+        3,
+        9,
+        15,
+        22,
+        4,
+        10,
+        16,
+        23,
+        5,
+        11,
+        17,
+        24,
+        18,
+        25,
+        19,
+        26,
+        20,
+        27,
+        21,
+        28,
+    ],
+    dtype=np.int64,
+)
+
+G1_DEFAULT_JOINT_POS_MUJOCO = np.array(
+    [
+        -0.312,
+        0.0,
+        0.0,
+        0.669,
+        -0.363,
+        0.0,
+        -0.312,
+        0.0,
+        0.0,
+        0.669,
+        -0.363,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.2,
+        0.2,
+        0.0,
+        0.6,
+        0.0,
+        0.0,
+        0.0,
+        0.2,
+        -0.2,
+        0.0,
+        0.6,
+        0.0,
+        0.0,
+        0.0,
+    ],
+    dtype=np.float32,
+)
+G1_DEFAULT_JOINT_POS_ISAACLAB = np.zeros(G1_JOINT_COUNT, dtype=np.float32)
+G1_DEFAULT_JOINT_POS_ISAACLAB[G1_MUJOCO_TO_ISAACLAB_IDX] = G1_DEFAULT_JOINT_POS_MUJOCO
+
+G1_LOWER_BODY_JOINT_IDX_ISAACLAB = np.array(
+    [0, 3, 6, 9, 13, 17, 1, 4, 7, 10, 14, 18],
+    dtype=np.int64,
+)
+
 
 def _vector(name: str, value: Any, length: int) -> np.ndarray:
     arr = np.asarray(value, dtype=np.float32)
@@ -83,7 +162,7 @@ def _decompose_rotation_aa(rotation_aa: np.ndarray, axis: np.ndarray) -> tuple[n
 def smpl_pose_to_g1_wrist_joint_pos(smpl_pose: Any) -> np.ndarray:
     """Project SMPL elbow/wrist rotations to the six G1 wrist joints used by deploy."""
     body_pose = np.asarray(smpl_pose, dtype=np.float32).reshape(-1, 21, 3)
-    joint_pos = np.zeros(G1_JOINT_COUNT, dtype=np.float32)
+    joint_pos = G1_DEFAULT_JOINT_POS_ISAACLAB.copy()
 
     smpl_l_elbow_aa = body_pose[:, SMPL_L_ELBOW_IDX]
     smpl_l_wrist_aa = body_pose[:, SMPL_L_WRIST_IDX]

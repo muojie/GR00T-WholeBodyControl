@@ -347,6 +347,19 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
                         if pose_sent
                         else f"buf:{pose_publisher.buffered_frames}/{pose_publisher.window_size}"
                     )
+                    pose_metrics = pose_publisher.diagnostics
+                    if pose_metrics:
+                        pose_desc += (
+                            f" q=[{pose_metrics.get('joint_pos_min', 0.0):.2f},"
+                            f"{pose_metrics.get('joint_pos_max', 0.0):.2f}]"
+                            f" dq_abs={pose_metrics.get('joint_vel_abs_max', 0.0):.2f}"
+                            f" lower_dq={pose_metrics.get('lower_joint_default_delta_abs_max', 0.0):.2f}"
+                            f" smpl_lz=[{pose_metrics.get('smpl_lower_z_min', 0.0):.2f},"
+                            f"{pose_metrics.get('smpl_lower_z_max', 0.0):.2f}]"
+                            f" smpl_lspan={pose_metrics.get('smpl_lower_span_m', 0.0):.2f}m"
+                            f" smpl_lpose={pose_metrics.get('smpl_lower_pose_abs_max_rad', 0.0):.2f}rad"
+                            f" root_tilt={pose_metrics.get('root_tilt_rad', 0.0):.2f}rad"
+                        )
                 metrics_desc = ""
                 metrics = retargeter.diagnostics
                 if vr_position is not None and metrics:

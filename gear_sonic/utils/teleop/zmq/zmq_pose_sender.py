@@ -8,8 +8,15 @@ from dataclasses import dataclass, field
 import numpy as np
 import zmq
 
-from gear_sonic.utils.teleop.sources import FullBodyReference
+from gear_sonic.utils.teleop.sources import (
+    FullBodyReference,
+    G1_DEFAULT_JOINT_POS_ISAACLAB,
+    G1_LOWER_BODY_JOINT_IDX_ISAACLAB,
+)
 from gear_sonic.utils.teleop.zmq.zmq_planner_sender import pack_pose_message
+
+SMPL_LOWER_BODY_JOINT_IDX = np.array([1, 2, 4, 5, 7, 8, 10, 11], dtype=np.int64)
+SMPL_LOWER_BODY_POSE_IDX = np.array([0, 1, 3, 4, 6, 7, 9, 10], dtype=np.int64)
 
 
 @dataclass
@@ -21,6 +28,7 @@ class PoseStreamPublisher:
     _buffers: dict[str, deque] = field(init=False, repr=False)
     _last_frame_index: int | None = field(default=None, init=False)
     _generated_frame_index: int = field(default=0, init=False)
+    _diagnostics: dict[str, float] = field(default_factory=dict, init=False, repr=False)
     sent_messages: int = 0
 
     def __post_init__(self) -> None:
@@ -44,6 +52,10 @@ class PoseStreamPublisher:
     @property
     def is_ready(self) -> bool:
         return self.buffered_frames >= self.window_size
+
+    @property
+    def diagnostics(self) -> dict[str, float]:
+        return dict(self._diagnostics)
 
     def reset(self) -> None:
         for buffer in self._buffers.values():
@@ -107,3 +119,41 @@ class PoseStreamPublisher:
         self._buffers["joint_pos"].append(reference.joint_pos)
         self._buffers["joint_vel"].append(reference.joint_vel)
         self._buffers["frame_index"].append(int(frame_index))
+        self._diagnostics = _compute_pose_diagnostics(reference)
+
+
+def _compute_pose_diagnostics(reference: FullBodyReference) -> dict[str, float]:
+    joint_pos = np.asarray(reference.joint_pos, dtype=np.float32).reshape(-1)
+    joint_vel = np.asarray(reference.joint_vel, dtype=np.float32).reshape(-1)
+    lower_joint_pos = joint_pos[G1_LOWER_BODY_JOINT_IDX_ISAACLAB]
+    lower_default = G1_DEFAULT_JOINT_POS_ISAACLAB[G1_LOWER_BODY_JOINT_IDX_ISAACLAB]
+    smpl_lower_joints = np.asarray(reference.smpl_joints, dtype=np.float32)[
+        SMPL_LOWER_BODY_JOINT_IDX
+    ]
+    smpl_lower_pose = np.asarray(reference.smpl_pose, dtype=np.float32)[SMPL_LOWER_BODY_POSE_IDX]
+    quat = np.asarray(reference.body_quat_w, dtype=np.float32).reshape(4)
+    quat_norm = float(np.linalg.norm(quat))
+    if quat_norm > 1e-8 and np.isfinite(quat_norm):
+        quat = quat / quat_norm
+    else:
+        quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    _, qx, qy, _ = quat
+    root_z_dot = float(np.clip(1.0 - 2.0 * (qx * qx + qy * qy), -1.0, 1.0))
+    root_tilt_rad = float(np.arccos(root_z_dot))
+
+    return {
+        "joint_pos_min": float(np.min(joint_pos)),
+        "joint_pos_max": float(np.max(joint_pos)),
+        "joint_pos_abs_max": float(np.max(np.abs(joint_pos))),
+        "joint_vel_abs_max": float(np.max(np.abs(joint_vel))),
+        "lower_joint_default_delta_abs_max": float(
+            np.max(np.abs(lower_joint_pos - lower_default))
+        ),
+        "smpl_lower_z_min": float(np.min(smpl_lower_joints[:, 2])),
+        "smpl_lower_z_max": float(np.max(smpl_lower_joints[:, 2])),
+        "smpl_lower_span_m": float(
+            np.linalg.norm(np.max(smpl_lower_joints, axis=0) - np.min(smpl_lower_joints, axis=0))
+        ),
+        "smpl_lower_pose_abs_max_rad": float(np.max(np.linalg.norm(smpl_lower_pose, axis=1))),
+        "root_tilt_rad": root_tilt_rad,
+    }
