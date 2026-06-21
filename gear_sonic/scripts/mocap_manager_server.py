@@ -358,6 +358,7 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
                             f"{pose_metrics.get('smpl_lower_z_max', 0.0):.2f}]"
                             f" smpl_lspan={pose_metrics.get('smpl_lower_span_m', 0.0):.2f}m"
                             f" smpl_lpose={pose_metrics.get('smpl_lower_pose_abs_max_rad', 0.0):.2f}rad"
+                            f" root_z={pose_metrics.get('root_pos_z_m', 0.0):.3f}m"
                             f" root_tilt={pose_metrics.get('root_tilt_rad', 0.0):.2f}rad"
                         )
                 metrics_desc = ""

@@ -68,6 +68,8 @@ public:
     static constexpr int HISTORY_FRAMES = 5;
     /// Maximum tolerated gap (in current-rate frames) before a catch-up reset.
     static constexpr int MAX_GAP_FRAMES = 200;
+    /// Safe standing root position used when old POSE senders omit body_pos.
+    static constexpr std::array<double, 3> DEFAULT_STREAMED_ROOT_POSITION = {0.0, 0.0, 0.793};
     
     /// Returned by MergeIncomingData() to communicate what happened.
     struct MergeResult {
@@ -87,6 +89,9 @@ public:
         
         // -- Body quaternions (required for all versions) --
         std::vector<std::vector<std::array<double, 4>>> body_quat;  ///< [frame][body][w,x,y,z].
+
+        // -- Body positions (optional; root-only for current POSE streaming) --
+        std::vector<std::vector<std::array<double, 3>>> body_pos;  ///< [frame][body][x,y,z].
         
         // -- SMPL data (required in v2 & v3, optional in v1) --
         std::vector<std::vector<std::array<double, 3>>> smpl_joints;  ///< [frame][joint][x,y,z].
@@ -100,6 +105,7 @@ public:
         // Derived dimensions (must match the vector sizes above)
         int num_frames = 0;       ///< Number of frames in this chunk.
         int num_joints = 0;       ///< Joints per frame (joint_pos / joint_vel width).
+        int num_bodies = 0;       ///< Bodies per frame (body_pos width).
         int num_quat_bodies = 0;  ///< Number of rigid bodies per frame (body_quat width).
         int num_smpl_joints = 0;  ///< SMPL joints per frame.
         int num_smpl_poses = 0;   ///< SMPL pose parameters per frame.
@@ -114,6 +120,7 @@ public:
         streamed_motion_ = std::make_shared<MotionSequence>();
         streamed_motion_->name = "streamed";
         streamed_motion_->ReserveCapacity(15000, 29, 1, 1, 0, 0);
+        InitializeDefaultBodyPositions(streamed_motion_, 15000);
         stream_window_start_ = 0;
     }
     
@@ -181,6 +188,7 @@ public:
         
         // Update total timesteps
         new_motion->timesteps = merge_dst_frame + data.num_frames;
+        new_motion->ComputeGlobalVelocities(false);
         
         if constexpr (DEBUG_LOGGING) {
             std::cout << "[StreamedMotionMerger] Merged motion: " << new_motion->timesteps 
@@ -350,8 +358,8 @@ private:
         new_motion->name = "streamed";
         
         int joints_to_reserve = data.num_joints;
-        int bodies_to_reserve = 1;
-        int body_quaternions_to_reserve = data.num_quat_bodies;
+        int bodies_to_reserve = std::max(1, data.num_bodies);
+        int body_quaternions_to_reserve = std::max(1, data.num_quat_bodies);
         int smpl_joints_to_reserve = data.num_smpl_joints;
         int smpl_poses_to_reserve = data.num_smpl_poses;
         
@@ -364,10 +372,25 @@ private:
             smpl_poses_to_reserve
         );
         
-        // Initialize body_part_indexes (typically just root for streaming)
-        new_motion->SetBodyPartIndexes({0});
+        int body_part_count = std::min(bodies_to_reserve, body_quaternions_to_reserve);
+        std::vector<int> body_part_indexes;
+        body_part_indexes.reserve(body_part_count);
+        for (int i = 0; i < body_part_count; ++i) {
+            body_part_indexes.push_back(i);
+        }
+        new_motion->SetBodyPartIndexes(body_part_indexes);
+        InitializeDefaultBodyPositions(new_motion, 15000);
         
         return new_motion;
+    }
+
+    void InitializeDefaultBodyPositions(std::shared_ptr<MotionSequence> motion, int frames) const {
+        if (!motion || motion->GetNumBodies() <= 0) {
+            return;
+        }
+        for (int frame = 0; frame < frames; ++frame) {
+            motion->BodyPositions(frame)[0] = DEFAULT_STREAMED_ROOT_POSITION;
+        }
     }
     
     // Copy old data to new motion to fill gap before incoming data
@@ -420,6 +443,15 @@ private:
                     new_motion->JointVelocities(copy_dst_idx + i)[joint] = 
                         old_motion->JointVelocities(copy_src_idx + i)[joint];
                 }
+            }
+        }
+
+        // Copy body positions before quaternion data so root height stays continuous.
+        int bodies_to_copy = std::min(new_motion->GetNumBodies(), old_motion->GetNumBodies());
+        for (int i = 0; i < copy_count; ++i) {
+            for (int body = 0; body < bodies_to_copy; ++body) {
+                new_motion->BodyPositions(copy_dst_idx + i)[body] =
+                    old_motion->BodyPositions(copy_src_idx + i)[body];
             }
         }
         
@@ -510,8 +542,19 @@ private:
                 }
             }
         }
+
+        // Copy body positions if present. When absent, CreateNewMotion has already
+        // initialized the root to a standing height instead of leaving z = 0.
+        if (!data.body_pos.empty()) {
+            int bodies_to_copy = std::min(data.num_bodies, motion->GetNumBodies());
+            for (int frame = 0; frame < data.num_frames; ++frame) {
+                for (int body = 0; body < bodies_to_copy; ++body) {
+                    motion->BodyPositions(dst_frame_offset + frame)[body] =
+                        data.body_pos[frame][body];
+                }
+            }
+        }
     }
 };
 
 #endif // STREAMED_MOTION_MERGER_HPP
-

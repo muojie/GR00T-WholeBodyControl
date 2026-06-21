@@ -285,6 +285,15 @@ def _full_body_from_json_payload(payload: dict[str, Any]) -> FullBodyReference |
     if body_quat_np.shape == (1, 4):
         body_quat_np = body_quat_np[0]
 
+    body_pos = payload.get("body_pos_w", payload.get("body_pos"))
+    body_pos_np = None
+    if body_pos is not None:
+        body_pos_np = np.asarray(body_pos, dtype=np.float32)
+        if body_pos_np.shape == (1, 3):
+            body_pos_np = body_pos_np[0]
+        elif body_pos_np.shape == (1, 1, 3):
+            body_pos_np = body_pos_np[0, 0]
+
     joint_pos = payload.get("joint_pos")
     joint_pos_np = None
     if joint_pos is not None:
@@ -303,6 +312,7 @@ def _full_body_from_json_payload(payload: dict[str, Any]) -> FullBodyReference |
         smpl_joints=smpl_joints_np,
         smpl_pose=smpl_pose_np,
         body_quat_w=body_quat_np,
+        body_pos_w=body_pos_np,
         joint_pos=joint_pos_np,
         joint_vel=joint_vel_np,
         frame_index=payload.get("frame_index"),

@@ -39,6 +39,7 @@ class PoseStreamPublisher:
         self._buffers = {
             "smpl_pose": deque(maxlen=self.window_size),
             "smpl_joints": deque(maxlen=self.window_size),
+            "body_pos": deque(maxlen=self.window_size),
             "body_quat_w": deque(maxlen=self.window_size),
             "joint_pos": deque(maxlen=self.window_size),
             "joint_vel": deque(maxlen=self.window_size),
@@ -85,6 +86,7 @@ class PoseStreamPublisher:
         data = {
             "smpl_pose": np.stack(self._buffers["smpl_pose"], axis=0).astype(np.float32),
             "smpl_joints": np.stack(self._buffers["smpl_joints"], axis=0).astype(np.float32),
+            "body_pos": np.stack(self._buffers["body_pos"], axis=0).astype(np.float32),
             "body_quat_w": np.stack(self._buffers["body_quat_w"], axis=0).astype(np.float32),
             "frame_index": np.asarray(self._buffers["frame_index"], dtype=np.int64),
             "catch_up": np.array([catch_up], dtype=bool),
@@ -115,6 +117,7 @@ class PoseStreamPublisher:
     def _append_reference(self, reference: FullBodyReference, frame_index: int) -> None:
         self._buffers["smpl_pose"].append(reference.smpl_pose)
         self._buffers["smpl_joints"].append(reference.smpl_joints)
+        self._buffers["body_pos"].append(reference.body_pos_w)
         self._buffers["body_quat_w"].append(reference.body_quat_w)
         self._buffers["joint_pos"].append(reference.joint_pos)
         self._buffers["joint_vel"].append(reference.joint_vel)
@@ -131,6 +134,7 @@ def _compute_pose_diagnostics(reference: FullBodyReference) -> dict[str, float]:
         SMPL_LOWER_BODY_JOINT_IDX
     ]
     smpl_lower_pose = np.asarray(reference.smpl_pose, dtype=np.float32)[SMPL_LOWER_BODY_POSE_IDX]
+    body_pos = np.asarray(reference.body_pos_w, dtype=np.float32).reshape(3)
     quat = np.asarray(reference.body_quat_w, dtype=np.float32).reshape(4)
     quat_norm = float(np.linalg.norm(quat))
     if quat_norm > 1e-8 and np.isfinite(quat_norm):
@@ -155,5 +159,6 @@ def _compute_pose_diagnostics(reference: FullBodyReference) -> dict[str, float]:
             np.linalg.norm(np.max(smpl_lower_joints, axis=0) - np.min(smpl_lower_joints, axis=0))
         ),
         "smpl_lower_pose_abs_max_rad": float(np.max(np.linalg.norm(smpl_lower_pose, axis=1))),
+        "root_pos_z_m": float(body_pos[2]),
         "root_tilt_rad": root_tilt_rad,
     }

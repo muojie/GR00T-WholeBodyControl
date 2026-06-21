@@ -94,6 +94,7 @@ G1_DEFAULT_JOINT_POS_MUJOCO = np.array(
 )
 G1_DEFAULT_JOINT_POS_ISAACLAB = np.zeros(G1_JOINT_COUNT, dtype=np.float32)
 G1_DEFAULT_JOINT_POS_ISAACLAB[G1_MUJOCO_TO_ISAACLAB_IDX] = G1_DEFAULT_JOINT_POS_MUJOCO
+G1_DEFAULT_ROOT_POS_W = np.array([0.0, 0.0, 0.793], dtype=np.float32)
 
 G1_LOWER_BODY_JOINT_IDX_ISAACLAB = np.array(
     [0, 3, 6, 9, 13, 17, 1, 4, 7, 10, 14, 18],
@@ -220,6 +221,7 @@ class FullBodyReference:
     smpl_joints: np.ndarray
     smpl_pose: np.ndarray
     body_quat_w: np.ndarray
+    body_pos_w: np.ndarray | None = None
     joint_pos: np.ndarray | None = None
     joint_vel: np.ndarray | None = None
     frame_index: int | None = None
@@ -234,6 +236,10 @@ class FullBodyReference:
             raise ValueError(f"smpl_pose must have shape (21, 3), got {self.smpl_pose.shape}")
 
         self.body_quat_w = normalize_quat_wxyz(self.body_quat_w)
+        if self.body_pos_w is None:
+            self.body_pos_w = G1_DEFAULT_ROOT_POS_W.copy()
+        else:
+            self.body_pos_w = _vector("body_pos_w", self.body_pos_w, 3)
 
         if self.joint_pos is None:
             self.joint_pos = smpl_pose_to_g1_wrist_joint_pos(self.smpl_pose)

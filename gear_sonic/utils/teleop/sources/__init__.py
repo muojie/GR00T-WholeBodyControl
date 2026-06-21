@@ -3,6 +3,7 @@
 from gear_sonic.utils.teleop.sources.base import (
     FullBodyReference,
     G1_DEFAULT_JOINT_POS_ISAACLAB,
+    G1_DEFAULT_ROOT_POS_W,
     G1_LOWER_BODY_JOINT_IDX_ISAACLAB,
     MocapFrame,
     MocapSource,
@@ -22,6 +23,7 @@ __all__ = [
     "BvhPlaybackSource",
     "FullBodyReference",
     "G1_DEFAULT_JOINT_POS_ISAACLAB",
+    "G1_DEFAULT_ROOT_POS_W",
     "G1_LOWER_BODY_JOINT_IDX_ISAACLAB",
     "MOCOPI_DEFAULT_PORT",
     "MocapFrame",

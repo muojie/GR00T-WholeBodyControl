@@ -33,9 +33,10 @@
  *   2       | smpl_joints, smpl_pose           | joint_pos, joint_vel
  *   3       | joint_pos, joint_vel, smpl_joints, smpl_pose | —
  *
- * ## Optional Fields (all versions)
- *
- *   - `left_hand_joints`, `right_hand_joints` – 7-DOF Dex3 joint values.
+   * ## Optional Fields (all versions)
+   *
+   *   - `body_pos` / `body_pos_w` – root/body positions; root falls back to standing height if absent.
+   *   - `left_hand_joints`, `right_hand_joints` – 7-DOF Dex3 joint values.
  *   - `vr_position` (9 doubles) – enables VR 3-point tracking mode.
  *   - `vr_orientation` (12 doubles) – defaults used if absent.
  *   - `vr_compliance` (3 doubles) – **IGNORED** (compliance is keyboard-controlled).
@@ -646,7 +647,7 @@ private:
         }
         
         // Find expected fields by name (including frame_index for alignment)
-        int joint_pos_idx = -1, joint_vel_idx = -1, body_quat_idx = -1, frame_index_idx = -1, smpl_joints_idx = -1, smpl_pose_idx = -1;
+        int joint_pos_idx = -1, joint_vel_idx = -1, body_pos_idx = -1, body_quat_idx = -1, frame_index_idx = -1, smpl_joints_idx = -1, smpl_pose_idx = -1;
         int left_hand_joints_idx = -1, right_hand_joints_idx = -1, catch_up_idx = -1;
         int token_state_idx = -1;  // Protocol v4: token-only streaming
         int heading_increment_idx = -1;
@@ -658,6 +659,7 @@ private:
             const auto& f = buffered_header_.fields[i];
             if (f.name == "joint_pos") joint_pos_idx = static_cast<int>(i);
             else if (f.name == "joint_vel") joint_vel_idx = static_cast<int>(i);
+            else if (f.name == "body_pos" || f.name == "body_pos_w" || f.name == "root_pos" || f.name == "root_pos_w") body_pos_idx = static_cast<int>(i);
             else if (f.name == "body_quat_w" || f.name == "body_quat") body_quat_idx = static_cast<int>(i);
             else if (f.name == "frame_index" || f.name == "last_smpl_global_frames") frame_index_idx = static_cast<int>(i);
             else if (f.name == "smpl_joints") smpl_joints_idx = static_cast<int>(i);
@@ -1105,6 +1107,71 @@ private:
         
         if constexpr (DEBUG_LOGGING) {
             std::cout << "[ZMQEndpointInterface] Decoded body quaternions: " << num_quat_bodies << " bodies per frame" << std::endl;
+        }
+
+        // Decode body positions if present.
+        // Supported shapes: [N, num_bodies, 3] or [N, 3] for a root-only stream.
+        std::vector<std::vector<std::array<double, 3>>> decoded_body_pos;
+        int num_body_pos_bodies = 0;
+        bool has_body_pos = (body_pos_idx >= 0);
+
+        if (has_body_pos) {
+            const auto& body_pos_field = buffered_header_.fields[body_pos_idx];
+            const auto& body_pos_buf = buffered_buffers_[body_pos_idx];
+
+            if (body_pos_field.shape.size() == 3 &&
+                static_cast<int>(body_pos_field.shape[0]) == num_frames &&
+                body_pos_field.shape[2] == 3) {
+                num_body_pos_bodies = static_cast<int>(body_pos_field.shape[1]);
+            } else if (body_pos_field.shape.size() == 2 &&
+                       static_cast<int>(body_pos_field.shape[0]) == num_frames &&
+                       body_pos_field.shape[1] == 3) {
+                num_body_pos_bodies = 1;
+            } else {
+                std::cerr << "[ZMQEndpointInterface] Invalid body_pos shape (expected [N,3] or [N,B,3])" << std::endl;
+                has_body_pos = false;
+            }
+
+            if (has_body_pos && num_body_pos_bodies > 0) {
+                decoded_body_pos.resize(num_frames);
+                int body_pos_stride = num_body_pos_bodies * 3;
+
+                if (body_pos_field.dtype == "f32") {
+                    for (int frame = 0; frame < num_frames; ++frame) {
+                        decoded_body_pos[frame].resize(num_body_pos_bodies);
+                        for (int body = 0; body < num_body_pos_bodies; ++body) {
+                            for (int xyz = 0; xyz < 3; ++xyz) {
+                                float val;
+                                std::memcpy(&val, body_pos_buf.data() + (frame * body_pos_stride + body * 3 + xyz) * sizeof(float), sizeof(float));
+                                if (needs_swap) val = byte_swap(val);
+                                decoded_body_pos[frame][body][xyz] = static_cast<double>(val);
+                            }
+                        }
+                    }
+                } else if (body_pos_field.dtype == "f64") {
+                    for (int frame = 0; frame < num_frames; ++frame) {
+                        decoded_body_pos[frame].resize(num_body_pos_bodies);
+                        for (int body = 0; body < num_body_pos_bodies; ++body) {
+                            for (int xyz = 0; xyz < 3; ++xyz) {
+                                double val;
+                                std::memcpy(&val, body_pos_buf.data() + (frame * body_pos_stride + body * 3 + xyz) * sizeof(double), sizeof(double));
+                                if (needs_swap) val = byte_swap(val);
+                                decoded_body_pos[frame][body][xyz] = val;
+                            }
+                        }
+                    }
+                } else {
+                    std::cerr << "[ZMQEndpointInterface] Unsupported body_pos dtype: " << body_pos_field.dtype << std::endl;
+                    decoded_body_pos.clear();
+                    num_body_pos_bodies = 0;
+                    has_body_pos = false;
+                }
+
+                if constexpr (DEBUG_LOGGING) {
+                    std::cout << "[ZMQEndpointInterface] Decoded body positions: "
+                              << num_body_pos_bodies << " bodies per frame" << std::endl;
+                }
+            }
         }
         
         // Decode SMPL joints if present
@@ -1621,6 +1688,21 @@ private:
                     std::cout << ")";
                 }
                 std::cout << "]";
+
+                if (has_body_pos && frame < static_cast<int>(decoded_body_pos.size())) {
+                    std::cout << ", body_pos: [";
+                    int print_pos_bodies = std::min(2, static_cast<int>(decoded_body_pos[frame].size()));
+                    for (int b = 0; b < print_pos_bodies; ++b) {
+                        if (b > 0) std::cout << "; ";
+                        std::cout << "(";
+                        for (int xyz = 0; xyz < 3; ++xyz) {
+                            if (xyz > 0) std::cout << ", ";
+                            std::cout << std::fixed << std::setprecision(6) << decoded_body_pos[frame][b][xyz];
+                        }
+                        std::cout << ")";
+                    }
+                    std::cout << "]";
+                }
                 
                 // Print smpl_joints if present
                 if (has_smpl_joints && frame < static_cast<int>(decoded_smpl_joints.size())) {
@@ -1681,6 +1763,7 @@ private:
         StreamedMotionMerger::IncomingData incoming_data;
         incoming_data.joint_pos = std::move(decoded_joint_pos);
         incoming_data.joint_vel = std::move(decoded_joint_vel);
+        incoming_data.body_pos = std::move(decoded_body_pos);
         incoming_data.body_quat = std::move(decoded_body_quat);
         incoming_data.smpl_joints = std::move(decoded_smpl_joints);
         incoming_data.smpl_pose = std::move(decoded_smpl_pose);
@@ -1689,6 +1772,7 @@ private:
         incoming_data.catch_up_enabled = catch_up_enabled;
         incoming_data.num_frames = num_frames;
         incoming_data.num_joints = num_joints;
+        incoming_data.num_bodies = num_body_pos_bodies;
         incoming_data.num_quat_bodies = num_quat_bodies;
         incoming_data.num_smpl_joints = num_smpl_joints;
         incoming_data.num_smpl_poses = num_smpl_poses;
