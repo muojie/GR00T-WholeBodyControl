@@ -140,11 +140,19 @@ BVH 回放适合在没有 mocopi 硬件时验证后续链路，也适合调试�
   --zmq-port 5556
 ```
 
-`pose` 模式默认使用 `--pose-protocol-version 3`。v3 会补齐 deploy release SMPL mode 需要的 `joint_pos/joint_vel`，其中 wrist 6 维按 PICO manager 的 SMPL elbow/wrist 映射生成，其余 G1 关节默认为 0。如果只做抓包或协议兼容调试，可以显式指定 `--pose-protocol-version 2`，但 v2 不适合作为当前 MuJoCo release policy 的主验证路径。
+`pose` 模式默认使用 `--pose-protocol-version 3`。v3 会补齐 deploy release SMPL mode 需要的 `joint_pos/joint_vel`。如果输入源没有显式提供 `joint_pos`，manager 会先填入 G1 默认站姿，再用 PICO manager 同源的 SMPL elbow/wrist 映射覆盖 wrist 6 维；下肢 G1 关节不会在这一步被 BVH 强行 IK。这样可以保留 SMPL 下肢参考，同时避免 29 维全 0 给策略造成不稳定站姿。如果只做抓包或协议兼容调试，可以显式指定 `--pose-protocol-version 2`，但 v2 不适合作为当前 MuJoCo release policy 的主验证路径。
 
 MuJoCo release policy 的 SMPL mode 还会读取未来帧 observation。不要用早期 `--pose-window-size 5` 做主验证，当前 `--control-mode pose` 不显式设置窗口时默认使用 80 帧；推荐命令里仍保留 `--pose-window-size 80`，否则旧脚本或手工命令容易复现 `Motion streamed completed and waiting following motion`。
 
 BVH loop 回放时，`frame_index` 使用播放流单调编号，源 BVH 帧号写入日志的 `source_frame`。因此 loop 后应看到类似 `frame=1013 ... source_frame=87`，而不是 `frame` 回到 0。
+
+POSE 日志会额外输出参考姿态诊断，例如：
+
+```text
+pose=sent:24 q=[-1.15,0.98] dq_abs=0.00 lower_dq=0.00 smpl_lz=[-0.76,0.00] smpl_lspan=0.90m smpl_lpose=0.53rad root_tilt=0.53rad
+```
+
+其中 `lower_dq` 是下肢 12 个 G1 关节相对默认站姿的最大偏差。当前 BVH 默认路径下它应接近 `0`，这说明腿部跟随主要来自 `smpl_joints/smpl_pose` reference，而不是 manager 手写 G1 下肢关节角。`smpl_lspan`、`smpl_lpose`、`root_tilt` 用来判断 BVH 下肢尺度、姿态幅度和根姿态是否异常。
 
 如果只想在原来的 planner/VR3PT 模式下同时发布 `pose` topic 做抓包或数据检查，可以保持 `--control-mode planner` 并添加：
 

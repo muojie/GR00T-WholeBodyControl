@@ -156,6 +156,8 @@ POSE 模式下 manager 会等第一条 pose 窗口发出后再发送 `start=True
 
 `--pose-window-size` 不要沿用早期的 `5`。release policy 的 SMPL mode 会读取类似 `10frame_step5` 的未来 observation，5 帧窗口太短，deploy 会频繁打印 `Motion streamed completed and waiting following motion`。当前 `--control-mode pose` 在不显式设置窗口时默认使用 80 帧；命令里保留 `--pose-window-size 80` 是为了让验证参数更清楚。日志中应出现 `Processing 80 frames`、`Merged streamed data: 80+ current-rate frames`，表示 streamed-motion 窗口足够长。
 
+非 PICO 输入源没有显式 `joint_pos` 时，manager 现在使用 G1 默认站姿作为 29 维 `joint_pos` 基线，再覆盖 wrist 6 维。下肢 G1 关节不会在这一步被 BVH 直接 IK，所以如果 MuJoCo 中腿部已经在动，主要表示 `smpl_joints/smpl_pose` 下肢 reference 已进入 policy；这不等于已经完成 G1 hip/knee/ankle 关节级下肢重定向。
+
 BVH 循环回放时，manager 发给 deploy 的 `frame_index` 必须保持单调递增。当前实现已经把 ZMQ `frame_index` 改成播放流编号，并在日志里额外打印原始 BVH 帧号：
 
 ```text
@@ -178,6 +180,26 @@ frame=1013 ... source_frame=87
 第一版 v2 只发 `smpl_*` 和 `body_quat`，没有 `joint_pos/joint_vel`，会导致 release SMPL mode 的 `motion_joint_positions_wrists_10frame_step1` 缺失。这是“manager 有 pose 日志但 MuJoCo 没动作”的主要原因。
 
 第二个会导致“完全没反应”的问题是 streamed-motion 的启动转发。`zmq_manager` 初始在 planner mode，如果在终端 3 启动前就按 `]`，这个按键不会传给内部 POSE 接口；同时第一版 `ZMQManager` 没有把 `command.start=true` 转发到 streamed-motion 控制启动逻辑。当前已在 `ZMQManager` 中补齐：切到 streamed-motion 后收到 `command.start=true` 会设置 `operator_state.start=true`。修改后需要重新编译 deploy，并重启终端 2。
+
+如果已经有动作但仍会倒，优先看终端 3 的 POSE 诊断：
+
+| 字段 | 判断重点 |
+|------|----------|
+| `q=[min,max]` | 29 维 `joint_pos` 范围是否异常放大 |
+| `dq_abs` | `joint_vel` 是否有速度尖峰；当前默认路径通常应接近 `0` |
+| `lower_dq` | 下肢 12 个 G1 关节相对默认站姿的偏差；当前 BVH 默认路径应接近 `0` |
+| `smpl_lz` | SMPL 下肢在 root-local 坐标里的 z 范围是否明显反向或尺度异常 |
+| `smpl_lspan` | 下肢包围盒尺度是否接近人体比例 |
+| `smpl_lpose` | SMPL 下肢 local pose 幅度是否过大 |
+| `root_tilt` | root 姿态是否大幅倾斜，过大时很容易切入后失稳 |
+
+示例：
+
+```text
+pose=sent:24 q=[-1.15,0.98] dq_abs=0.00 lower_dq=0.00 smpl_lz=[-0.76,0.00] smpl_lspan=0.90m smpl_lpose=0.53rad root_tilt=0.53rad
+```
+
+这类日志表示下肢 G1 `joint_pos` 仍保持默认站姿，但 SMPL 下肢和 root 姿态已经在变化。若此时仍倒，下一步应优先检查 streamed motion 的 root/body position、root 高度和启动切入连续性，而不是继续盲调 VR3PT 或上肢 IK。
 
 重新编译：
 
