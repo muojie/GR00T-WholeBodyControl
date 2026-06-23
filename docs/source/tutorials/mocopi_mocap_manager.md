@@ -6,6 +6,8 @@
 
 POSE 路线不要混写：当前主线见 [Sony mocopi / BVH-G1 POSE v1 路线](mocopi_pose_bvh_g1_v1_route.md)；更接近 SONIC 原生人体 pose encoder 的研究线见 [Sony mocopi / SMPL POSE v3 路线](mocopi_pose_smpl_v3_route.md)。
 
+BVH 输入源也不要混写：[`--source bvh`](mocopi_source_bvh_file.md) 是 manager 直接读本地 BVH 文件；[`--source bvh_stream`](mocopi_source_bvh_stream.md) 是 manager 监听 UDP skeleton stream，由 `bvh_stream_sender.py` 负责读文件和发送。
+
 当前实现刻意独立于 `pico_manager_thread_server.py`。这样可以先验证非 PICO 输入链路，而不影响已有 PICO/XR 遥操作流程。
 
 ```{admonition} 当前状态
@@ -117,9 +119,11 @@ BVH file
   --zmq-port 5556
 ```
 
-## 启动 BVH 文件回放
+## 启动 BVH 文件回放：`--source bvh`
 
-BVH 回放适合在没有 mocopi 硬件时验证后续链路，也适合调试三点 retargeting：
+`--source bvh` 是本地文件回放输入源。manager 直接读取 `--bvh-file`，换文件需要重启 manager。完整说明见 [Sony mocopi / `--source bvh` 本地 BVH 文件回放](mocopi_source_bvh_file.md)。
+
+它适合在没有 mocopi 硬件时验证后续链路，也适合调试三点 retargeting：
 
 ```bash
 .venv_teleop/bin/python gear_sonic/scripts/mocap_manager_server.py \
@@ -142,7 +146,11 @@ BVH 回放适合在没有 mocopi 硬件时验证后续链路，也适合调试�
   --visualize-vr3pt
 ```
 
-如果要验证 BVH full-body POSE 流，推荐使用 `bvh_stream`。先启动 manager：
+## 启动 BVH 在线流：`--source bvh_stream`
+
+`--source bvh_stream` 是在线 UDP skeleton stream 输入源。manager 只监听 UDP，不绑定具体 BVH 文件；换动作只重启 sender。完整说明见 [Sony mocopi / `--source bvh_stream` 在线 BVH UDP 流](mocopi_source_bvh_stream.md)。
+
+如果要验证 BVH-G1 full-body POSE v1，推荐使用 `bvh_stream`。先启动 manager：
 
 ```bash
 .venv_teleop/bin/python -u gear_sonic/scripts/mocap_manager_server.py \

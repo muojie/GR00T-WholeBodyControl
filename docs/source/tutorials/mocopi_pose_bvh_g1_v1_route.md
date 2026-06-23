@@ -19,7 +19,7 @@ BVH 或 mocopi 原始数据不会直接交给 deploy；deploy 收到的是已经
 
 ## 在线 BVH stream
 
-当前推荐把输入源和 manager 拆成两个进程：
+当前推荐把输入源和 manager 拆成两个进程。这里使用的是 [`--source bvh_stream`](mocopi_source_bvh_stream.md)，不是 [`--source bvh`](mocopi_source_bvh_file.md)：
 
 ```text
 BVH file

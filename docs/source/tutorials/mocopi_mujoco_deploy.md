@@ -8,6 +8,8 @@
 
 本文只记录当前跑通的 BVH-G1 POSE v1 部署流程。SMPL / protocol v3 是另一条研究路线，见 [Sony mocopi / SMPL POSE v3 路线](mocopi_pose_smpl_v3_route.md)；两条路线不要互相覆盖。
 
+本文使用 [`--source bvh_stream`](mocopi_source_bvh_stream.md)。如果要看 manager 直接读取本地 BVH 文件的 [`--source bvh`](mocopi_source_bvh_file.md)，请使用单独页面，不要把两个输入源的命令混在同一流程里。
+
 当前推荐验证链路：
 
 ```text
@@ -243,22 +245,7 @@ LowState is not available, waiting for robot to be ready
 
 `Lost LowState data connection from robot` 如果出现在手动停止 MuJoCo 仿真端或 deploy 控制端之后，通常只是进程停止后的副作用；如果出现在运行中，则表示 deploy 的 LowState 时间戳超过安全阈值，会触发 `Safety check failed` 并停止控制。
 
-可选的旧 planner/VR3PT 调试命令：
-
-```bash
-.venv_teleop/bin/python gear_sonic/scripts/mocap_manager_server.py \
-  --source bvh \
-  --bvh-file /home/nolo/RAYNOS_Motion1.bvh \
-  --bvh-loop \
-  --bvh-fps 25 \
-  --target-fps 25 \
-  --zmq-port 5556 \
-  --visualize-vr3pt \
-  --visualize-g1 \
-  --enable-upper-body-ik
-```
-
-这个开关会额外发布 deploy 侧已有的 `upper_body_position` / `upper_body_velocity`。它不改变腿部控制；腿部仍由 locomotion planner 根据 `mode/movement/facing/speed/height` 生成。
+旧 planner/VR3PT 的 `--source bvh` 调试命令不放在本文，见 [Sony mocopi / `--source bvh` 本地 BVH 文件回放](mocopi_source_bvh_file.md)。
 
 ## 预期日志
 
@@ -339,32 +326,6 @@ ik=1 ik_err=0.057m ik_dq=2.955rad ik_active=17 ik_v=3.81rad/s ik_margin=0.000rad
 这些是 mocap manager 侧的目标量化指标，能回答“加不加 `--enable-upper-body-ik` 是否生成了不同目标”。deploy 侧没有 PICO 专用逻辑，只按通用 `planner` 消息字段消费 `upper_body_position` / `upper_body_velocity`，因此不把 deploy 作为 PICO / mocopi / BVH 输入源差异的量化对象。如果 `ik_dq`、`ik_active` 已经明显变化但 MuJoCo 里看不出来，优先按通用 planner 消费链路和配置排查，不把它记作输入源量化指标。
 
 ## 当前样例解释
-
-旧单进程 `--source bvh` / planner 回放中，如果运行：
-
-```bash
-.venv_teleop/bin/python gear_sonic/scripts/mocap_manager_server.py \
-  --source bvh \
-  --bvh-file /home/nolo/RAYNOS_Motion1.bvh \
-  --bvh-loop \
-  --bvh-fps 30 \
-  --zmq-port 5556
-```
-
-日志中出现：
-
-```text
-playing BVH /home/nolo/RAYNOS_Motion1.bvh at 25.0 Hz (source_fps=50.0, stride=2, loop=True)
-```
-
-解释：
-
-- BVH 原始 FPS 是 `50`。
-- 目标 `--bvh-fps 30` 低于源 FPS。
-- 当前实现按整数 stride 降采样，`stride=2`。
-- 实际播放 FPS 因此是 `50 / 2 = 25 Hz`。
-
-这不是错误。如果需要更接近 30 Hz，后续要实现插值重采样，而不是整数 stride 跳帧。
 
 做动作自然度评估时，当前优先使用 `bvh_stream` 路径：
 
