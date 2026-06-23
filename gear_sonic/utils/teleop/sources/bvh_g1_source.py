@@ -180,7 +180,7 @@ class BvhG1RetargetConfig:
     skeleton_axis_mapping: str = "bvh_y_forward"
     ik_mode: str = "numeric"
     root_mode: str = "yaw"
-    max_root_angular_velocity_radps: float = 3.0
+    max_root_angular_velocity_radps: float = 0.0
     root_tilt_limit_rad: float = 0.25
     min_root_height_m: float = 0.74
     enable_body_fk: bool = True

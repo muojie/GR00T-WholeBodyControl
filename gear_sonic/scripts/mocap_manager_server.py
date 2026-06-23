@@ -919,8 +919,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--bvh-g1-root-max-angular-velocity",
         type=float,
-        default=3.0,
-        help="Clamp realtime BVH-to-G1 root angular velocity in rad/s. Use <=0 to disable.",
+        default=0.0,
+        help=(
+            "Clamp realtime BVH-to-G1 root angular velocity in rad/s. "
+            "Defaults to 0 to match bvh_stream single-frame retargeting; use >0 to smooth root yaw."
+        ),
     )
     parser.add_argument(
         "--bvh-g1-root-tilt-limit",
