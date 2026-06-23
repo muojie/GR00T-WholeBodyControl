@@ -1,10 +1,12 @@
-# Sony mocopi / BVH 的 MuJoCo 验证部署流程
+# Sony mocopi / BVH-G1 POSE v1 的 MuJoCo 验证部署流程
 
 本文记录如何把 `mocap_manager_server.py` 的输入链路接到 MuJoCo sim2sim 中验证。适用场景：
 
 - BVH 文件回放验证。
 - Sony mocopi bridge 已输出 `vr_position` / `vr_orientation` 后的闭环验证。
 - 后续 mocopi FK / retargeting 完成后的仿真侧安全验证。
+
+本文只记录当前跑通的 BVH-G1 POSE v1 部署流程。SMPL / protocol v3 是另一条研究路线，见 [Sony mocopi / SMPL POSE v3 路线](mocopi_pose_smpl_v3_route.md)；两条路线不要互相覆盖。
 
 当前推荐验证链路：
 
@@ -491,7 +493,7 @@ BVH 默认路径仍是三点 retarget，但已经加入第一阶段优化：
 3. 如果启用 IK，先看 `ik_dq/ik_active/ik_v` 判断 manager 是否生成了不同上肢目标，再看 `ik_err` 和 `ik_margin`。`ik_margin` 长期为 `0` 时，不要继续加大动作幅度，先调目标尺度或补 elbow pole vector。
 4. 三点窗口合理但 MuJoCo 不自然，优先调 deploy / planner / compliance。
 5. 三点窗口本身就飘、抖或左右手方向明显不对，优先改 `VR3PointRetargeter`。
-6. 如果目标是完整复原 BVH 或利用腿部 tracker/full-body 信息，不要只依赖 `PLANNER_VR_3PT`，应使用 `--control-mode pose` 验证 `pose` topic / reference streaming。后续用 [Sony mocopi / BVH POSE 流支持追踪](mocopi_pose_stream.md) 单独记录。
+6. 如果目标是完整复原 BVH 或利用腿部 tracker/full-body 信息，不要只依赖 `PLANNER_VR_3PT`，应先选择 POSE 路线。路线对比见 [Sony mocopi / BVH POSE 路线总览](mocopi_pose_stream.md)。
 
 调参建议：
 

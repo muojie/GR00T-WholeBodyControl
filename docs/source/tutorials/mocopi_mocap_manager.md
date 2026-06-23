@@ -4,6 +4,8 @@
 
 当前有两条稳定验证链路：`planner` topic 的 VR3PT 三点验证，以及 `pose` topic 的 BVH-G1 joint reference 验证。BVH-G1 主线推荐使用 `bvh_stream_sender.py -> --source bvh_stream -> POSE v1 + encoder_mode=g1`，这样 MuJoCo、deploy、manager 可以常驻，只重启 sender 就能换 BVH。
 
+POSE 路线不要混写：当前主线见 [Sony mocopi / BVH-G1 POSE v1 路线](mocopi_pose_bvh_g1_v1_route.md)；更接近 SONIC 原生人体 pose encoder 的研究线见 [Sony mocopi / SMPL POSE v3 路线](mocopi_pose_smpl_v3_route.md)。
+
 当前实现刻意独立于 `pico_manager_thread_server.py`。这样可以先验证非 PICO 输入链路，而不影响已有 PICO/XR 遥操作流程。
 
 ```{admonition} 当前状态
@@ -73,9 +75,9 @@ Sony mocopi app / mocopi bridge / BVH file
 
 deploy 侧继续消费现有 ZMQ schema。第一版集成不需要在 deploy 侧新增 topic。
 
-注意：这张图描述的是 `planner` topic 的三点实时验证链路，不是 PICO full-body `pose` topic。PICO 的下肢 tracker 数据会融入 full-body / SMPL 数据；mocopi / BVH 要对齐这条能力，需要新增 POSE 流支持，而不是继续扩展 `PLANNER_VR_3PT`。
+注意：这张图描述的是 `planner` topic 的三点实时验证链路，不是 PICO full-body `pose` topic。PICO 的下肢 tracker 数据会融入 full-body / SMPL 数据；mocopi / BVH 要对齐这条能力，需要选择单独的 POSE 路线，而不是继续扩展 `PLANNER_VR_3PT`。路线总览见 [Sony mocopi / BVH POSE 路线总览](mocopi_pose_stream.md)。
 
-BVH-G1 full-body 验证走 `pose` topic：
+BVH-G1 full-body 验证走 `pose` topic，详细设计见 [Sony mocopi / BVH-G1 POSE v1 路线](mocopi_pose_bvh_g1_v1_route.md)：
 
 ```text
 BVH file

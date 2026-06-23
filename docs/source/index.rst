@@ -94,6 +94,8 @@ Documentation
    tutorials/mocopi_mocap_manager
    tutorials/mocopi_mujoco_deploy
    tutorials/mocopi_pose_stream
+   tutorials/mocopi_pose_bvh_g1_v1_route
+   tutorials/mocopi_pose_smpl_v3_route
    tutorials/data_collection
    tutorials/vla_workflow
    tutorials/vla_inference
