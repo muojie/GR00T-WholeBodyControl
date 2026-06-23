@@ -2,13 +2,13 @@
 
 本文档说明如何使用 Sony mocopi、基于 mocopi 的桥接程序，或者 BVH 文件回放，作为 SONIC 现有 ZMQ 部署链路的输入源。
 
-当前主线先以 `planner` topic 的 VR3PT 三点验证为主。PICO 的腿部 tracker 数据主要通过 full-body `pose` topic / SMPL reference 路径进入 deploy，后续 mocopi / BVH 的 POSE 流支持单独在 [Sony mocopi / BVH POSE 流支持追踪](mocopi_pose_stream.md) 中记录。
+当前有两条稳定验证链路：`planner` topic 的 VR3PT 三点验证，以及 `pose` topic 的 BVH-G1 joint reference 验证。BVH-G1 主线推荐使用 `bvh_stream_sender.py -> --source bvh_stream -> POSE v1 + encoder_mode=g1`，这样 MuJoCo、deploy、manager 可以常驻，只重启 sender 就能换 BVH。
 
 当前实现刻意独立于 `pico_manager_thread_server.py`。这样可以先验证非 PICO 输入链路，而不影响已有 PICO/XR 遥操作流程。
 
 ```{admonition} 当前状态
 :class: warning
-这是第一版输入源集成层。它可以接收 mocopi UDP 数据、回放 BVH 文件，并发布现有 `command`、`planner`、`manager_state` ZMQ topic。真正可直接闭环控制机器人的 mocopi 路径目前依赖上游桥接程序提供 `vr_position` 和 `vr_orientation`；完整的 mocopi 骨架 FK 与标定层仍是后续工作。
+这是非 PICO 输入源集成层。它可以接收 mocopi UDP 数据、回放 BVH 文件、监听 BVH UDP stream，并发布现有 `command`、`planner`、`pose`、`manager_state` ZMQ topic。真正直接使用官方 mocopi 27 bone 的完整 FK / 标定层仍是后续工作；当前效果最好的 full-body 验证路径是 BVH stream 到 G1 joint reference。
 ```
 
 ```{admonition} 默认不会弹出窗口
@@ -24,8 +24,14 @@ mocopi 输入链路由以下文件实现：
 gear_sonic/scripts/mocap_manager_server.py
 gear_sonic/utils/teleop/sources/base.py
 gear_sonic/utils/teleop/sources/bvh_source.py
+gear_sonic/utils/teleop/sources/bvh_g1_source.py
+gear_sonic/utils/teleop/sources/bvh_stream_source.py
 gear_sonic/utils/teleop/sources/mocopi_source.py
+gear_sonic/utils/teleop/sources/g1_body_fk.py
+gear_sonic/utils/teleop/sources/robot_pkl_source.py
+gear_sonic/utils/teleop/sources/joint_probe_source.py
 gear_sonic/utils/teleop/sources/__init__.py
+gear_sonic/scripts/bvh_stream_sender.py
 gear_sonic/utils/teleop/controls/keyboard_control.py
 gear_sonic/utils/teleop/controls/__init__.py
 gear_sonic/utils/teleop/retarget/vr3pt_retargeter.py
@@ -40,10 +46,14 @@ gear_sonic/utils/teleop/zmq/zmq_pose_sender.py
 - `base.py`：定义 `Pose7D`、`MocapFrame`、`MocapSource` 等通用数据结构。
 - `mocopi_source.py`：实现 UDP 接收、官方 mocopi 二进制包解析、JSON bridge 包解析。
 - `bvh_source.py`：实现 BVH hierarchy/motion 解析、FK、循环回放，并输出 `MocapFrame`。
+- `bvh_g1_source.py`：把 BVH skeleton frame 重定向成 G1 29 维 `joint_pos/joint_vel`，支持 `online` 与 `precompute`。
+- `bvh_stream_source.py`：监听 `bvh_stream_v1` UDP packet，缓存最新骨架帧，并在 manager 主循环中执行 BVH-to-G1 retarget。
+- `bvh_stream_sender.py`：把本地 BVH 文件按 FPS 逐帧发送成 UDP skeleton stream，用于模拟实时动捕输入。
+- `g1_body_fk.py`：根据 G1 MJCF 计算 POSE v1 需要的 14 个 body position reference。
 - `keyboard_control.py`：提供基于 stdin 的行命令控制，用来替代 PICO 手柄按键。
 - `vr3pt_retargeter.py`：把标准化后的动捕帧转换为 deploy 侧需要的 `vr_position` / `vr_orientation`。
 - `upper_body_ik.py`：实验性可选模块，把 VR3PT wrist 目标求解成 deploy 侧 17 维 `upper_body_position` / `upper_body_velocity`。
-- `zmq_pose_sender.py`：维护 POSE 滑动窗口，并按 deploy protocol v3 发布 `pose` topic。
+- `zmq_pose_sender.py`：维护 POSE 滑动窗口，并按 deploy protocol v1/v3 发布 `pose` topic；当前 BVH-G1 主线使用 v1。
 
 ## 数据流
 
@@ -65,15 +75,19 @@ deploy 侧继续消费现有 ZMQ schema。第一版集成不需要在 deploy 侧
 
 注意：这张图描述的是 `planner` topic 的三点实时验证链路，不是 PICO full-body `pose` topic。PICO 的下肢 tracker 数据会融入 full-body / SMPL 数据；mocopi / BVH 要对齐这条能力，需要新增 POSE 流支持，而不是继续扩展 `PLANNER_VR_3PT`。
 
-BVH / JSON bridge 提供 full-body reference 时，也可以走 `pose` topic：
+BVH-G1 full-body 验证走 `pose` topic：
 
 ```text
-BVH file / SMPL-like JSON bridge
-  -> MocapFrame.full_body
+BVH file
+  -> bvh_stream_sender.py
+  -> UDP bvh_stream_v1
+  -> BvhStreamUdpSource
+  -> manager 侧 BVH-to-G1 retarget
+  -> MocapFrame.full_body(joint_pos/joint_vel/body_pos/body_quat)
   -> PoseStreamPublisher
   -> ZMQ PUB，默认端口 5556
       - command，planner=false 时切到 streamed-motion
-      - pose，protocol v3: smpl_joints / smpl_pose / body_quat_w / joint_pos / joint_vel / frame_index
+      - pose，protocol v1: joint_pos / joint_vel / body_pos / body_quat_w / frame_index / encoder_mode=g1
       - manager_state
   -> deploy 侧 ZMQManager
   -> streamed motion / POSE reference
@@ -126,25 +140,34 @@ BVH 回放适合在没有 mocopi 硬件时验证后续链路，也适合调试�
   --visualize-vr3pt
 ```
 
-如果要验证 BVH full-body POSE 流，使用 `--control-mode pose`。这个模式会在 `command` topic 中发送 `planner=false`，让 deploy 的 `ZMQManager` 切到 streamed-motion / POSE：
+如果要验证 BVH full-body POSE 流，推荐使用 `bvh_stream`。先启动 manager：
 
 ```bash
-.venv_teleop/bin/python gear_sonic/scripts/mocap_manager_server.py \
-  --source bvh \
-  --bvh-file /path/to/motion.bvh \
-  --bvh-loop \
-  --bvh-fps 50 \
-  --target-fps 50 \
+.venv_teleop/bin/python -u gear_sonic/scripts/mocap_manager_server.py \
+  --source bvh_stream \
+  --bvh-stream-port 12352 \
   --control-mode pose \
   --pose-window-size 80 \
+  --pose-encoder-mode g1 \
+  --pose-protocol-version 1 \
   --zmq-port 5556
 ```
 
-`pose` 模式默认使用 `--pose-protocol-version 3`。v3 会补齐 deploy release SMPL mode 需要的 `joint_pos/joint_vel`。如果输入源没有显式提供 `joint_pos`，manager 会先填入 G1 默认站姿，再用 PICO manager 同源的 SMPL elbow/wrist 映射覆盖 wrist 6 维；下肢 G1 关节不会在这一步被 BVH 强行 IK。这样可以保留 SMPL 下肢参考，同时避免 29 维全 0 给策略造成不稳定站姿。如果只做抓包或协议兼容调试，可以显式指定 `--pose-protocol-version 2`，但 v2 不适合作为当前 MuJoCo release policy 的主验证路径。
+再启动 sender：
 
-MuJoCo release policy 的 SMPL mode 还会读取未来帧 observation。不要用早期 `--pose-window-size 5` 做主验证，当前 `--control-mode pose` 不显式设置窗口时默认使用 80 帧；推荐命令里仍保留 `--pose-window-size 80`，否则旧脚本或手工命令容易复现 `Motion streamed completed and waiting following motion`。
+```bash
+.venv_teleop/bin/python -u gear_sonic/scripts/bvh_stream_sender.py \
+  --bvh-file /path/to/motion.bvh \
+  --host 127.0.0.1 \
+  --port 12352 \
+  --loop
+```
 
-BVH loop 回放时，`frame_index` 使用播放流单调编号，源 BVH 帧号写入日志的 `source_frame`。因此 loop 后应看到类似 `frame=1013 ... source_frame=87`，而不是 `frame` 回到 0。
+当前推荐路径使用 `--pose-protocol-version 1 --pose-encoder-mode g1`。manager 侧先把 BVH skeleton frame 重定向成 G1 29 维 `joint_pos/joint_vel`，再交给 deploy 的 streamed-motion merger。它不是把 BVH 或 mocopi 原始数据直接交给 deploy。
+
+MuJoCo release policy 会读取未来帧 observation。不要用早期 `--pose-window-size 5` 做主验证，当前 `--control-mode pose` 不显式设置窗口时默认使用 80 帧；推荐命令里仍保留 `--pose-window-size 80`，否则旧脚本或手工命令容易复现 `Motion streamed completed and waiting following motion`。
+
+换 BVH 文件时只需要重启 sender；MuJoCo、deploy、manager 都可以常驻。新的 sender 从 `frame_index=0` 开始时，deploy 会通过 catch-up reset 切到新 streamed motion 窗口。
 
 POSE 日志会额外输出参考姿态诊断，例如：
 
@@ -152,7 +175,7 @@ POSE 日志会额外输出参考姿态诊断，例如：
 pose=sent:24 q=[-1.15,0.98] dq_abs=0.00 lower_dq=0.00 smpl_lz=[-0.76,0.00] smpl_lspan=0.90m smpl_lpose=0.53rad root_tilt=0.53rad
 ```
 
-其中 `lower_dq` 是下肢 12 个 G1 关节相对默认站姿的最大偏差。当前 BVH 默认路径下它应接近 `0`，这说明腿部跟随主要来自 `smpl_joints/smpl_pose` reference，而不是 manager 手写 G1 下肢关节角。`smpl_lspan`、`smpl_lpose`、`root_tilt` 用来判断 BVH 下肢尺度、姿态幅度和根姿态是否异常。
+其中 `lower_dq` 是下肢 12 个 G1 关节相对默认站姿的最大偏差。当前 `bvh_stream` / `bvh_g1` 主线会显式生成 G1 下肢关节参考，所以它不应长期接近 `0`；如果仍接近 `0`，通常说明没有进入 BVH-G1 retarget 主线，或输入骨架没有足够下肢信息。`smpl_lspan`、`smpl_lpose`、`root_tilt` 用来判断 BVH 下肢尺度、姿态幅度和根姿态是否异常。
 
 如果只想在原来的 planner/VR3PT 模式下同时发布 `pose` topic 做抓包或数据检查，可以保持 `--control-mode planner` 并添加：
 
@@ -188,10 +211,13 @@ BVH source 会解析 hierarchy 和 motion 数据，执行 FK，并尽量保留 t
 
 | 参数 | 默认值 | 作用 |
 |------|--------|------|
-| `--source` | `mocopi` | 输入源，可选 `mocopi` 或 `bvh` |
+| `--source` | `mocopi` | 输入源，可选 `mocopi`、`bvh`、`bvh_g1`、`bvh_stream`、`pkl`、`joint_probe` |
 | `--mocopi-host` | `0.0.0.0` | UDP 绑定地址 |
 | `--mocopi-port` | `12351` | UDP 绑定端口 |
 | `--mocopi-format` | `auto` | 输入包格式，可选 `auto`、`binary`、`json` |
+| `--bvh-stream-host` | `0.0.0.0` | `--source bvh_stream` 的 UDP 绑定地址 |
+| `--bvh-stream-port` | `12352` | `--source bvh_stream` 的 UDP 绑定端口 |
+| `--bvh-stream-format` | `auto` | BVH stream 输入包格式，可选 `auto`、`msgpack`、`json` |
 | `--bvh-file` | 无 | `--source bvh` 时要回放的 BVH 文件 |
 | `--bvh-loop` | 关闭 | BVH 播放到末尾后循环 |
 | `--bvh-fps` | BVH 原始 FPS | BVH 目标回放 FPS；低于原始 FPS 时按 stride 跳帧 |
@@ -203,6 +229,10 @@ BVH source 会解析 hierarchy 和 motion 数据，执行 FK，并尽量保留 t
 | `--control-mode` | `planner` | 通过 command topic 选择 deploy 控制模式；`planner` 使用 PLANNER/VR3PT，`pose` 使用 streamed-motion / POSE |
 | `--enable-pose-stream` | 关闭 | 当输入源有 `full_body` 时额外发布 `pose` topic；`--control-mode pose` 会自动开启 |
 | `--pose-window-size` | `pose` 模式为 `80`；planner/debug 为 `5` | 每条 POSE 消息包含的 full-body 帧数；MuJoCo release policy 验证建议显式设为 `80` |
+| `--pose-protocol-version` | `3` | POSE 协议版本；BVH-G1 / PKL / bvh_stream 主线必须显式使用 `1` |
+| `--pose-encoder-mode` | `smpl` | deploy encoder 模式；BVH-G1 / PKL / bvh_stream 主线必须显式使用 `g1` |
+| `--bvh-g1-runtime-mode` | `online` | `--source bvh_g1` 的逐帧 retarget 模式；`precompute` 用作慢速参考 |
+| `--bvh-g1-ik-mode` | `auto` | `online` 下解析为 `analytic`，避免启动时整段 numeric IK |
 | `--mocap-timeout-s` | `0.5` | 最新动捕帧超过该时间后停止发布 VR 三点目标 |
 | `--start-paused` | 关闭 | 启动时不立即启用控制 |
 | `--allow-bone-translation-vr` | 关闭 | 调试用途：把 bone translation 当作 VR 三点位置 |

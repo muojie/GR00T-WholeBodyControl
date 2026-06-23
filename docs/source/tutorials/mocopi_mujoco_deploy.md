@@ -6,7 +6,20 @@
 - Sony mocopi bridge 已输出 `vr_position` / `vr_orientation` 后的闭环验证。
 - 后续 mocopi FK / retargeting 完成后的仿真侧安全验证。
 
-当前验证链路：
+当前推荐验证链路：
+
+```text
+BVH file
+  -> bvh_stream_sender.py
+  -> UDP bvh_stream_v1, 默认端口 12352
+  -> mocap_manager_server.py --source bvh_stream
+  -> BVH skeleton -> G1 29DOF retarget
+  -> pose topic, protocol v1, encoder_mode=g1, ZMQ 5556
+  -> deploy zmq_manager / streamed motion
+  -> MuJoCo sim loop
+```
+
+保留的三点 planner 验证链路：
 
 ```text
 BVH / mocopi source
@@ -17,25 +30,19 @@ BVH / mocopi source
   -> MuJoCo sim loop
 ```
 
-BVH POSE 验证链路：
-
-```text
-BVH source
-  -> MocapFrame.full_body
-  -> pose topic, protocol v3, ZMQ 5556
-  -> deploy zmq_manager，command planner=false
-  -> streamed motion / POSE reference
-  -> MuJoCo sim loop
-```
-
 ```{admonition} 关键点
 :class: note
 `mocap_manager_server.py` 默认只是 ZMQ publisher，不会自动显示机器人窗口。MuJoCo 机器人窗口由 `gear_sonic/scripts/run_sim_loop.py` 打开；VR 三点调试窗口由 `mocap_manager_server.py --visualize-vr3pt` 打开。
 ```
 
+```{admonition} 热切换建议
+:class: tip
+当前 BVH-G1 POSE v1 路径不需要每次换动作都重启 MuJoCo 和 deploy。推荐让 MuJoCo、deploy、`mocap_manager_server.py --source bvh_stream` 三个进程常驻；换 BVH 时只停止并重启 `bvh_stream_sender.py`。MuJoCo 中机器人状态需要清空时，在 viewer 里按 `Backspace` reset。
+```
+
 ## 日志目录
 
-调试时统一把三端日志保存到：
+调试时统一把多端日志保存到：
 
 ```text
 /home/nolo/GR00T-WholeBodyControl/logs/mocopi_pose/latest/
@@ -49,7 +56,7 @@ mkdir -p logs/mocopi_pose/latest
 rm -f logs/mocopi_pose/latest/*.log
 ```
 
-下面的命令都使用 `2>&1 | tee ...` 保存日志，不要再用 `script -c`。`script` 的最后一个参数是输出文件，写错路径会覆盖源码文件；`tee` 更直观，适合当前三端调试。
+下面的命令都使用 `2>&1 | tee ...` 保存日志，不要再用 `script -c`。`script` 的最后一个参数是输出文件，写错路径会覆盖源码文件；`tee` 更直观，适合当前多端调试。
 
 ## 终端 1：启动 MuJoCo 仿真
 
@@ -100,84 +107,89 @@ manager_state
 
 BVH POSE 链路不要在终端 3 启动前提前按 `]`。POSE 模式由终端 3 的 `command.start=true` 自动触发 streamed-motion 控制；如果需要手动按键，也等终端 3 出现 `pose=sent:N` 之后再按。
 
-## 终端 3：启动 BVH 回放输入
+## 终端 3：启动 BVH stream manager
 
 在仓库根目录运行：
 
 ```bash
 cd /home/nolo/GR00T-WholeBodyControl
 
-bash -lc 'cd /home/nolo/GR00T-WholeBodyControl && PYTHONUNBUFFERED=1 .venv_teleop/bin/python -u gear_sonic/scripts/mocap_manager_server.py --source bvh --bvh-file /home/nolo/RAYNOS_Motion1.bvh --bvh-loop --bvh-fps 30 --zmq-port 5556' \
+bash -lc 'cd /home/nolo/GR00T-WholeBodyControl && PYTHONUNBUFFERED=1 .venv_teleop/bin/python -u gear_sonic/scripts/mocap_manager_server.py --source bvh_stream --bvh-stream-port 12352 --control-mode pose --pose-window-size 80 --pose-encoder-mode g1 --pose-protocol-version 1 --zmq-port 5556 --log-interval-s 1.0' \
   2>&1 | tee /home/nolo/GR00T-WholeBodyControl/logs/mocopi_pose/latest/terminal3_mocap_manager.log
 ```
 
-如果需要本地三点可视化窗口，加：
-
-```bash
---visualize-vr3pt
-```
-
-完整命令：
-
-```bash
-bash -lc 'cd /home/nolo/GR00T-WholeBodyControl && PYTHONUNBUFFERED=1 .venv_teleop/bin/python -u gear_sonic/scripts/mocap_manager_server.py --source bvh --bvh-file /home/nolo/RAYNOS_Motion1.bvh --bvh-loop --bvh-fps 30 --zmq-port 5556 --visualize-vr3pt' \
-  2>&1 | tee /home/nolo/GR00T-WholeBodyControl/logs/mocopi_pose/latest/terminal3_mocap_manager.log
-```
-
-如果还想在三点窗口中显示 G1 模型，加：
-
-```bash
---visualize-g1
-```
-
-如果要验证实验性上肢 IK，再加：
-
-```bash
---enable-upper-body-ik
-```
-
-### BVH POSE 模式
-
-如果目标是验证 full-body `pose` topic，而不是默认三点 planner 链路，终端 3 使用：
-
-```bash
-bash -lc 'cd /home/nolo/GR00T-WholeBodyControl && PYTHONUNBUFFERED=1 .venv_teleop/bin/python -u gear_sonic/scripts/mocap_manager_server.py --source bvh --bvh-file /home/nolo/RAYNOS_Motion1.bvh --bvh-loop --bvh-fps 50 --target-fps 50 --control-mode pose --pose-window-size 80 --zmq-port 5556' \
-  2>&1 | tee /home/nolo/GR00T-WholeBodyControl/logs/mocopi_pose/latest/terminal3_mocap_manager.log
-```
-
-这个命令会发送 `command.planner=false`，让 `zmq_manager` 进入 streamed-motion / POSE。日志中应能看到：
+预期日志：
 
 ```text
-pose_protocol=v3
+control_mode=pose pose_stream=1 pose_protocol=v1 pose_window=80 pose_encoder=g1
+listening for BVH stream UDP on 0.0.0.0:12352
+pose=sent:1
+recv_fps≈50 dropped=0
+```
+
+这个 manager 进程可以常驻。它只监听 BVH stream UDP 并向 deploy 发布 G1 joint reference，不绑定某一个 BVH 文件。
+
+## 终端 4：发送 BVH stream
+
+另开一个终端发送 BVH：
+
+```bash
+cd /home/nolo/GR00T-WholeBodyControl
+
+bash -lc 'cd /home/nolo/GR00T-WholeBodyControl && PYTHONUNBUFFERED=1 .venv_teleop/bin/python -u gear_sonic/scripts/bvh_stream_sender.py --bvh-file /home/nolo/RAYNOS_Motion1.bvh --host 127.0.0.1 --port 12352 --loop' \
+  2>&1 | tee /home/nolo/GR00T-WholeBodyControl/logs/mocopi_pose/latest/terminal4_bvh_stream_sender.log
+```
+
+预期日志：
+
+```text
+[BvhStreamSender] streaming /home/nolo/RAYNOS_Motion1.bvh to udp://127.0.0.1:12352 format=msgpack fps=50.0
+```
+
+换 BVH 文件时，只停止终端 4，然后用新的 `--bvh-file` 重新启动 sender。终端 1/2/3 不需要重启。新的 sender 从 `frame_index=0` 开始时，deploy 的 `StreamedMotionMerger` 会触发 catch-up reset，把 streamed motion 窗口切到新动作。
+
+如果终端 4 启动得太早，UDP 前几帧可能在 manager 完成 bind 前丢失。实际操作时先等终端 3 出现 `listening for BVH stream UDP...`，再启动 sender。
+
+### 旧的单进程 BVH POSE 模式
+
+如果不需要热切换，也可以让 manager 自己读 BVH 文件并逐帧在线 retarget：
+
+```bash
+bash -lc 'cd /home/nolo/GR00T-WholeBodyControl && PYTHONUNBUFFERED=1 .venv_teleop/bin/python -u gear_sonic/scripts/mocap_manager_server.py --source bvh_g1 --bvh-file /home/nolo/RAYNOS_Motion1.bvh --bvh-loop --control-mode pose --pose-window-size 80 --pose-encoder-mode g1 --pose-protocol-version 1 --zmq-port 5556' \
+  2>&1 | tee /home/nolo/GR00T-WholeBodyControl/logs/mocopi_pose/latest/terminal3_mocap_manager.log
+```
+
+这个路径仍然需要换文件时重启 manager，因此现在只作为回归对照或单文件验证使用。日志中应能看到：
+
+```text
+runtime=online, ik=analytic
+pose_protocol=v1
+pose_encoder=g1
 pose=sent:N
 ```
 
-POSE 模式下 manager 会等第一条 pose 窗口发出后再发送 `start=True`，避免 deploy 先进入控制但还没有 reference motion。当前默认 v3 消息包含 `smpl_joints`、`smpl_pose`、`body_pos`、`body_quat_w`、`joint_pos`、`joint_vel`、`frame_index`；release policy 的 SMPL mode 需要 `joint_pos` 里的 wrist observation，因此不要把 `--pose-protocol-version 2` 当作 MuJoCo 主验证路径。
+POSE 模式下 manager 会等第一条 pose 窗口发出后再发送 `start=True`，避免 deploy 先进入控制但还没有 reference motion。当前推荐路径发送的是 protocol v1 + `encoder_mode=g1`，主要字段是 `joint_pos`、`joint_vel`、`body_pos`、`body_quat_w`、`frame_index`，不是把 BVH 或 mocopi 原始数据直接交给 deploy。
 
-`--pose-window-size` 不要沿用早期的 `5`。release policy 的 SMPL mode 会读取类似 `10frame_step5` 的未来 observation，5 帧窗口太短，deploy 会频繁打印 `Motion streamed completed and waiting following motion`。当前 `--control-mode pose` 在不显式设置窗口时默认使用 80 帧；命令里保留 `--pose-window-size 80` 是为了让验证参数更清楚。日志中应出现 `Processing 80 frames`、`Merged streamed data: 80+ current-rate frames`，表示 streamed-motion 窗口足够长。
+`--pose-window-size` 不要沿用早期的 `5`。release policy 会读取未来帧 observation，5 帧窗口太短，deploy 会频繁打印 `Motion streamed completed and waiting following motion`。当前命令保留 `--pose-window-size 80`，deploy 日志中应出现 `Processing 80 frames`、`Merged streamed data: 80+ current-rate frames`。
 
-非 PICO 输入源没有显式 `joint_pos` 时，manager 现在使用 G1 默认站姿作为 29 维 `joint_pos` 基线，再覆盖 wrist 6 维。下肢 G1 关节不会在这一步被 BVH 直接 IK，所以如果 MuJoCo 中腿部已经在动，主要表示 `smpl_joints/smpl_pose` 下肢 reference 已进入 policy；这不等于已经完成 G1 hip/knee/ankle 关节级下肢重定向。
-
-BVH 循环回放时，manager 发给 deploy 的 `frame_index` 必须保持单调递增。当前实现已经把 ZMQ `frame_index` 改成播放流编号，并在日志里额外打印原始 BVH 帧号：
+BVH 循环或新 sender 重启时，manager 发给 deploy 的 `frame_index` 应保持当前会话内单调递增；源 BVH 帧号写入日志的 `source_frame`：
 
 ```text
 frame=1013 ... source_frame=87
 ```
 
-这表示 BVH 文件已经 loop 回源帧 87，但 deploy 看到的全局帧仍是 1013。正常情况下 loop 边界后仍应继续看到 `pose=sent:N`，不应重新进入 `pose=buf:x/80`。
-
-如果之前跑过 protocol v2，建议重启终端 2 的 deploy，再重启终端 3 的 manager。deploy 侧会记录 active protocol version，混用旧 v2 和新 v3 容易触发协议状态不一致。
+这表示 BVH 文件已经 loop 回源帧 87，但 deploy 看到的全局帧仍是 1013。正常情况下 loop 边界后仍应继续看到 `pose=sent:N`，不应长时间回到 `pose=buf:x/80`。
 
 ### POSE 模式没有动作或机器人倒下
 
 优先检查：
 
-1. 终端 3 是否显示 `pose_protocol=v3` 和持续增长的 `pose=sent:N`。
+1. 终端 3 是否显示 `pose_protocol=v1`、`pose_encoder=g1` 和持续增长的 `pose=sent:N`。
 2. 终端 2 是否使用 `--input-type zmq_manager`，而不是普通 `--input-type zmq --zmq-topic pose`。
-3. 是否重启过 deploy，避免残留旧 protocol v2 状态。
-4. deploy 日志是否出现 `Version 3 missing required field 'joint_pos'`、`motion has no joints`、`Failed to gather encoder observations` 等错误。
+3. 终端 4 sender 是否持续输出，终端 3 是否 `recv_fps≈50` 且 `dropped=0`。
+4. deploy 日志是否出现 `missing required field 'joint_pos'`、`motion has no joints`、`Failed to gather encoder observations` 等错误。
 
-第一版 v2 只发 `smpl_*` 和 `body_quat`，没有 `joint_pos/joint_vel`，会导致 release SMPL mode 的 `motion_joint_positions_wrists_10frame_step1` 缺失。这是“manager 有 pose 日志但 MuJoCo 没动作”的主要原因。
+历史 v2/v3 SMPL 路线只发或主要依赖 `smpl_*` 和 `body_quat`，容易遇到字段契约、骨架比例、root base rotation 和下肢稳定性问题。当前跑通的路径是 v1/G1 joint reference，先在 manager 侧把 BVH retarget 成 G1 `joint_pos/joint_vel`，再交给 deploy。
 
 第二个会导致“完全没反应”的问题是 streamed-motion 的启动转发。`zmq_manager` 初始在 planner mode，如果在终端 3 启动前就按 `]`，这个按键不会传给内部 POSE 接口；同时第一版 `ZMQManager` 没有把 `command.start=true` 转发到 streamed-motion 控制启动逻辑。当前已在 `ZMQManager` 中补齐：切到 streamed-motion 后收到 `command.start=true` 会设置 `operator_state.start=true`。修改后需要重新编译 deploy，并重启终端 2。
 
@@ -186,8 +198,8 @@ frame=1013 ... source_frame=87
 | 字段 | 判断重点 |
 |------|----------|
 | `q=[min,max]` | 29 维 `joint_pos` 范围是否异常放大 |
-| `dq_abs` | `joint_vel` 是否有速度尖峰；当前默认路径通常应接近 `0` |
-| `lower_dq` | 下肢 12 个 G1 关节相对默认站姿的偏差；当前 BVH 默认路径应接近 `0` |
+| `dq_abs` | `joint_vel` 是否有速度尖峰；若频繁顶到限幅，需要优先看输入帧跳变或 retarget 速度限幅 |
+| `lower_dq` | 下肢 12 个 G1 关节相对默认站姿的偏差；当前 BVH-G1 主线会显式生成下肢参考，不应长期接近 `0` |
 | `smpl_lz` | SMPL 下肢在 root-local 坐标里的 z 范围是否明显反向或尺度异常 |
 | `smpl_lspan` | 下肢包围盒尺度是否接近人体比例 |
 | `smpl_lpose` | SMPL 下肢 local pose 幅度是否过大 |
@@ -200,7 +212,7 @@ frame=1013 ... source_frame=87
 pose=sent:24 q=[-1.15,0.98] dq_abs=0.00 lower_dq=0.00 smpl_lz=[-0.76,0.00] smpl_lspan=0.90m smpl_lpose=0.53rad root_z=0.793m root_tilt=0.53rad
 ```
 
-这类日志表示下肢 G1 `joint_pos` 仍保持默认站姿，但 SMPL 下肢和 root 姿态已经在变化。此前 streamed motion 未携带 `BodyPositions`，deploy 侧的 `motion_root_z_position` / `base_trans_target` 可能读到 `z=0`；当前已补 `body_pos` 字段，并在 deploy merger 中为旧消息加入 `{0,0,0.793}` 的 root 高度保底。如果仍会倒，下一步优先看 root 倾斜、SMPL 下肢姿态是否过激，以及启动切入瞬间是否和当前机器人状态差太大。
+如果当前跑的是 `bvh_stream` / `bvh_g1`，这类日志不应长期保持 `lower_dq=0.00`，否则说明没有进入 G1 retarget 主线。此前 streamed motion 未携带 `BodyPositions`，deploy 侧的 `motion_root_z_position` / `base_trans_target` 可能读到 `z=0`；当前已补 `body_pos` 字段，并在 deploy merger 中为旧消息加入 `{0,0,0.793}` 的 root 高度保底。如果仍会倒，下一步优先看 root 倾斜、G1 下肢关节幅度/速度是否过激，以及启动切入瞬间是否和当前机器人状态差太大。
 
 重新编译：
 
@@ -229,7 +241,7 @@ LowState is not available, waiting for robot to be ready
 
 `Lost LowState data connection from robot` 如果出现在手动停止 MuJoCo 仿真端或 deploy 控制端之后，通常只是进程停止后的副作用；如果出现在运行中，则表示 deploy 的 LowState 时间戳超过安全阈值，会触发 `Safety check failed` 并停止控制。
 
-完整验证命令：
+可选的旧 planner/VR3PT 调试命令：
 
 ```bash
 .venv_teleop/bin/python gear_sonic/scripts/mocap_manager_server.py \
@@ -254,6 +266,7 @@ LowState is not available, waiting for robot to be ready
 logs/mocopi_pose/latest/terminal1_mujoco.log
 logs/mocopi_pose/latest/terminal2_deploy.log
 logs/mocopi_pose/latest/terminal3_mocap_manager.log
+logs/mocopi_pose/latest/terminal4_bvh_stream_sender.log
 ```
 
 快速定位命令：
@@ -274,24 +287,27 @@ tar -czf logs/mocopi_pose/latest.tar.gz -C logs/mocopi_pose latest
 终端 3 应出现类似：
 
 ```text
-[MocapManager] publishing planner data on tcp://*:5556; playing BVH ...
-[MocapManager] recv_fps=25.0 recv=56 vr_3pt=yes span=0.371m head_z=0.398m max_v=1.350m/s lag=0.169m fk=1 dropped=0 frame=110 ... joints=12 ...
+[MocapManager] publishing on tcp://*:5556; control_mode=pose pose_stream=1 pose_protocol=v1 pose_window=80 pose_encoder=g1 ...
+[MocapManager] listening for BVH stream UDP on 0.0.0.0:12352
+[MocapManager] recv_fps=50.0 recv=120 pose=sent:N dropped=0 ...
 ```
 
 重点看：
 
 ```text
-vr_3pt=yes
+pose_protocol=v1
+pose_encoder=g1
+pose=sent:N
+recv_fps≈50 dropped=0
 ```
 
 含义：
 
-- BVH 已被解析。
-- 左腕、右腕、头部三点已提取。
-- `VR3PointRetargeter` 已生成 `vr_position` / `vr_orientation`。
-- manager 正在向 `planner` topic 发布三点目标。
+- manager 已经进入 POSE v1 + G1 encoder 主线。
+- BVH stream UDP 已被接收并转为 G1 reference。
+- manager 正在向 `pose` topic 发布 streamed-motion 窗口。
 
-同一行里的质量指标用于判断动作是否合理：
+如果切回旧 planner/VR3PT 调试路径，同一行里的质量指标用于判断三点目标是否合理：
 
 | 字段 | 含义 | 判断方式 |
 |------|------|----------|
@@ -301,7 +317,7 @@ vr_3pt=yes
 | `lag` | 滤波前后三点最大偏差 | 越大越稳但越滞后，越小越跟手但可能抖 |
 | `fk` | G1 FK 参考标定状态 | `1` 是正常优化路径，`0` 说明回退到了旧标定 |
 
-如果启用了 `--enable-upper-body-ik`，还会出现：
+如果旧 planner/VR3PT 路径启用了 `--enable-upper-body-ik`，还会出现：
 
 ```text
 ik=1 ik_err=0.057m ik_dq=2.955rad ik_active=17 ik_v=3.81rad/s ik_margin=0.000rad
@@ -322,7 +338,7 @@ ik=1 ik_err=0.057m ik_dq=2.955rad ik_active=17 ik_v=3.81rad/s ik_margin=0.000rad
 
 ## 当前样例解释
 
-如果运行：
+旧单进程 `--source bvh` / planner 回放中，如果运行：
 
 ```bash
 .venv_teleop/bin/python gear_sonic/scripts/mocap_manager_server.py \
@@ -348,24 +364,27 @@ playing BVH /home/nolo/RAYNOS_Motion1.bvh at 25.0 Hz (source_fps=50.0, stride=2,
 
 这不是错误。如果需要更接近 30 Hz，后续要实现插值重采样，而不是整数 stride 跳帧。
 
-做动作自然度评估时，建议先让回放频率和 manager 发布频率一致：
+做动作自然度评估时，当前优先使用 `bvh_stream` 路径：
 
 ```bash
 .venv_teleop/bin/python gear_sonic/scripts/mocap_manager_server.py \
-  --source bvh \
-  --bvh-file /home/nolo/RAYNOS_Motion1.bvh \
-  --bvh-loop \
-  --bvh-fps 50 \
-  --target-fps 50 \
-  --zmq-port 5556 \
-  --visualize-vr3pt \
-  --visualize-g1
+  --source bvh_stream \
+  --bvh-stream-port 12352 \
+  --control-mode pose \
+  --pose-window-size 80 \
+  --pose-encoder-mode g1 \
+  --pose-protocol-version 1 \
+  --zmq-port 5556
 ```
 
-如果 50 Hz 负载较高，可以统一降到：
+另开 sender：
 
 ```bash
---bvh-fps 25 --target-fps 25
+.venv_teleop/bin/python gear_sonic/scripts/bvh_stream_sender.py \
+  --bvh-file /home/nolo/RAYNOS_Motion1.bvh \
+  --host 127.0.0.1 \
+  --port 12352 \
+  --loop
 ```
 
 不要使用 `BVH 实际 25 Hz + manager 20 Hz` 这类不一致组合来判断复原质量，因为它会叠加采样抖动。
@@ -375,15 +394,16 @@ playing BVH /home/nolo/RAYNOS_Motion1.bvh at 25.0 Hz (source_fps=50.0, stride=2,
 基础成功：
 
 - 终端 1 MuJoCo 窗口正常。
-- 终端 2 deploy 正常启动，并按过 `]`。
+- 终端 2 deploy 正常启动，使用 `--input-type zmq_manager`。
 - MuJoCo 窗口按过 `9`。
-- 终端 3 显示 `vr_3pt=yes`。
+- 终端 3 显示 `pose_protocol=v1`、`pose_encoder=g1`、`pose=sent:N`。
+- 终端 4 sender 持续发送，终端 3 显示 `recv_fps≈50` 且 `dropped=0`。
 
 进一步成功：
 
 - MuJoCo 中机器人进入 policy 控制。
-- 机器人上半身、手腕或 head target 对 BVH 三点输入有响应。
-- 如果开启 `--visualize-vr3pt`，本地三点窗口能看到三点坐标系在更新。
+- 机器人全身动作对 BVH stream 有响应，且不需要每次换 BVH 重启 MuJoCo / deploy / manager。
+- 如果开启 planner/VR3PT 调试路径，本地三点窗口能看到三点坐标系在更新。
 
 ## 常见问题
 
@@ -410,9 +430,9 @@ echo $DISPLAY
 优先检查：
 
 1. 终端 2 是否使用了 `--input-type zmq_manager`。
-2. 终端 2 是否按过 `]`。
-3. MuJoCo 窗口是否按过 `9`。
-4. 终端 3 是否显示 `vr_3pt=yes`。
+2. 终端 3 是否显示 `pose=sent:N`，而不是一直停在 `pose=buf:x/80`。
+3. 终端 4 是否在向 `127.0.0.1:12352` 发送 BVH stream。
+4. MuJoCo 窗口是否按过 `9`。
 5. 端口 `5556` 是否被旧进程占用。
 
 ### ZMQ input 类型选择
@@ -448,7 +468,7 @@ BVH 默认路径仍是三点 retarget，但已经加入第一阶段优化：
 - 如果 G1 FK 依赖不可用，默认回退到旧的首帧位置平移标定。
 - shoulder / elbow / torso 信息已经进入 `MocapFrame`；当前 IK 先用 wrist 目标，尚未把 BVH elbow pole vector 纳入目标函数。
 - 手部关节当前仍发送零值。
-- 当前 `PLANNER_VR_3PT` 不携带完整下肢 tracker 信息。PICO 的腿部 tracker 数据主要通过 full-body `pose` topic / SMPL reference 路径进入 deploy；BVH 已新增第一版 `pose` topic 支持，mocopi 官方二进制包还需要补 27 bone -> SMPL 映射或由 bridge 直接输出 SMPL-like 字段。
+- 当前 `PLANNER_VR_3PT` 不携带完整下肢 tracker 信息。PICO 的腿部 tracker 数据主要通过 full-body `pose` topic / SMPL reference 路径进入 deploy；BVH-G1 已新增稳定的 `POSE v1 + encoder_mode=g1` 主线，mocopi 官方二进制包还需要补 27 bone -> canonical skeleton / G1 retarget，或由 bridge 直接输出可重定向的骨架帧。
 
 对应工程提交：
 

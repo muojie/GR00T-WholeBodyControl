@@ -12,7 +12,14 @@ from typing import Any
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from gear_sonic.utils.teleop.sources.base import FullBodyReference, MocapFrame, Pose7D
+from gear_sonic.utils.teleop.sources.base import (
+    FullBodyReference,
+    G1_DEFAULT_JOINT_POS_ISAACLAB,
+    G1_LOWER_BODY_JOINT_IDX_ISAACLAB,
+    MocapFrame,
+    Pose7D,
+    smpl_pose_to_g1_wrist_joint_pos,
+)
 
 
 BVH_DEFAULT_JOINT_ALIASES = {
@@ -86,6 +93,7 @@ BVH_DEFAULT_JOINT_ALIASES = {
         "LeftThigh",
         "L_UpLeg",
         "L_Hip",
+        "l_up_leg",
         "left_upper_leg",
         "mixamorig:LeftUpLeg",
     ),
@@ -95,6 +103,7 @@ BVH_DEFAULT_JOINT_ALIASES = {
         "RightThigh",
         "R_UpLeg",
         "R_Hip",
+        "r_up_leg",
         "right_upper_leg",
         "mixamorig:RightUpLeg",
     ),
@@ -104,6 +113,7 @@ BVH_DEFAULT_JOINT_ALIASES = {
         "LeftKnee",
         "L_Leg",
         "L_LowerLeg",
+        "l_low_leg",
         "left_lower_leg",
         "mixamorig:LeftLeg",
     ),
@@ -113,6 +123,7 @@ BVH_DEFAULT_JOINT_ALIASES = {
         "RightKnee",
         "R_Leg",
         "R_LowerLeg",
+        "r_low_leg",
         "right_lower_leg",
         "mixamorig:RightLeg",
     ),
@@ -120,6 +131,7 @@ BVH_DEFAULT_JOINT_ALIASES = {
         "LeftFoot",
         "LeftAnkle",
         "L_Foot",
+        "l_foot",
         "left_foot",
         "mixamorig:LeftFoot",
     ),
@@ -127,6 +139,7 @@ BVH_DEFAULT_JOINT_ALIASES = {
         "RightFoot",
         "RightAnkle",
         "R_Foot",
+        "r_foot",
         "right_foot",
         "mixamorig:RightFoot",
     ),
@@ -134,6 +147,7 @@ BVH_DEFAULT_JOINT_ALIASES = {
         "LeftToeBase",
         "LeftToe",
         "LeftToe_End",
+        "l_toes",
         "left_toes",
         "mixamorig:LeftToeBase",
     ),
@@ -141,6 +155,7 @@ BVH_DEFAULT_JOINT_ALIASES = {
         "RightToeBase",
         "RightToe",
         "RightToe_End",
+        "r_toes",
         "right_toes",
         "mixamorig:RightToeBase",
     ),
@@ -213,6 +228,7 @@ class BvhMotion:
     playback_fps: float
     selected_indices: dict[str, int]
     smpl_source_indices: list[int | None]
+    lower_body_retarget_scale: float = 0.0
 
     @property
     def frame_count(self) -> int:
@@ -230,6 +246,7 @@ class BvhPlaybackSource:
         unit_scale: float = 0.01,
         y_up_to_z_up: bool = True,
         body_local: bool = True,
+        lower_body_retarget_scale: float = 0.0,
     ):
         self.bvh_file = bvh_file
         self.target_fps = target_fps
@@ -237,6 +254,7 @@ class BvhPlaybackSource:
         self.unit_scale = float(unit_scale)
         self.y_up_to_z_up = bool(y_up_to_z_up)
         self.body_local = bool(body_local)
+        self.lower_body_retarget_scale = max(0.0, float(lower_body_retarget_scale))
 
         self.motion = load_bvh_motion(
             bvh_file,
@@ -244,6 +262,7 @@ class BvhPlaybackSource:
             unit_scale=unit_scale,
             y_up_to_z_up=y_up_to_z_up,
             body_local=body_local,
+            lower_body_retarget_scale=self.lower_body_retarget_scale,
         )
         self._thread: threading.Thread | None = None
         self._running = threading.Event()
@@ -252,6 +271,9 @@ class BvhPlaybackSource:
         self._last_error: str | None = None
         self._frames_emitted = 0
         self._stopped_at_end = False
+        self._last_joint_pos: np.ndarray | None = None
+        self._last_stream_frame_idx: int | None = None
+        self._last_source_frame_idx: int | None = None
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -281,6 +303,7 @@ class BvhPlaybackSource:
                 "last_error": self._last_error,
                 "has_frame": self._latest is not None,
                 "stopped_at_end": self._stopped_at_end,
+                "lower_body_retarget_scale": self.motion.lower_body_retarget_scale,
             }
 
     def _run(self) -> None:
@@ -326,6 +349,25 @@ class BvhPlaybackSource:
                 position=self.motion.world_positions[frame_idx, joint_idx],
                 quat_wxyz=self.motion.world_quat_wxyz[frame_idx, joint_idx],
             )
+        full_body = _build_full_body_reference(self.motion, frame_idx)
+        if self.motion.lower_body_retarget_scale > 0.0:
+            joint_vel = np.zeros_like(full_body.joint_pos, dtype=np.float32)
+            if (
+                self._last_joint_pos is not None
+                and self._last_stream_frame_idx is not None
+                and self._last_source_frame_idx is not None
+                and frame_idx > self._last_source_frame_idx
+            ):
+                dt_s = max(
+                    1e-3,
+                    float(stream_frame_idx - self._last_stream_frame_idx)
+                    / max(1.0, self.motion.playback_fps),
+                )
+                joint_vel = ((full_body.joint_pos - self._last_joint_pos) / dt_s).astype(np.float32)
+            full_body.joint_vel = joint_vel
+            self._last_joint_pos = full_body.joint_pos.copy()
+            self._last_stream_frame_idx = int(stream_frame_idx)
+            self._last_source_frame_idx = int(frame_idx)
 
         return MocapFrame(
             source="bvh",
@@ -333,7 +375,7 @@ class BvhPlaybackSource:
             frame_index=int(stream_frame_idx),
             fps=float(self.motion.playback_fps),
             joints=joints,
-            full_body=_build_full_body_reference(self.motion, frame_idx),
+            full_body=full_body,
             metadata={
                 "format": "bvh",
                 "path": self.motion.path,
@@ -351,6 +393,7 @@ def load_bvh_motion(
     unit_scale: float = 0.01,
     y_up_to_z_up: bool = True,
     body_local: bool = True,
+    lower_body_retarget_scale: float = 0.0,
 ) -> BvhMotion:
     joints, channel_order, motion_data, _, source_frame_time_s = parse_bvh_file(bvh_file)
     source_fps = 1.0 / source_frame_time_s if source_frame_time_s > 0.0 else 30.0
@@ -397,6 +440,7 @@ def load_bvh_motion(
         smpl_source_indices=[
             selected_indices.get(source_key) for source_key in SMPL_JOINT_SOURCE_KEYS
         ],
+        lower_body_retarget_scale=max(0.0, float(lower_body_retarget_scale)),
     )
 
 
@@ -446,12 +490,66 @@ def _build_full_body_reference(motion: BvhMotion, frame_idx: int) -> FullBodyRef
             local_rot = root_inv * child_rot
         smpl_pose[smpl_idx - 1] = local_rot.as_rotvec().astype(np.float32)
 
+    joint_pos = smpl_pose_to_g1_wrist_joint_pos(smpl_pose)
+    if motion.lower_body_retarget_scale > 0.0:
+        _apply_smpl_lower_body_to_g1_joint_pos(
+            joint_pos,
+            smpl_pose,
+            motion.lower_body_retarget_scale,
+        )
+
     return FullBodyReference(
         smpl_joints=smpl_joints,
         smpl_pose=smpl_pose,
         body_quat_w=root_quat_wxyz,
+        joint_pos=joint_pos,
         frame_index=int(frame_idx),
     )
+
+
+def _apply_smpl_lower_body_to_g1_joint_pos(
+    joint_pos: np.ndarray,
+    smpl_pose: np.ndarray,
+    scale: float,
+) -> None:
+    scale = max(0.0, float(scale))
+    if scale <= 0.0:
+        return
+
+    body_pose = np.asarray(smpl_pose, dtype=np.float32).reshape(21, 3)
+    default = G1_DEFAULT_JOINT_POS_ISAACLAB
+    lower = G1_LOWER_BODY_JOINT_IDX_ISAACLAB
+
+    left_hip = body_pose[0]
+    right_hip = body_pose[1]
+    left_knee = body_pose[3]
+    right_knee = body_pose[4]
+    left_ankle = body_pose[6]
+    right_ankle = body_pose[7]
+
+    def delta(value: float, gain: float, limit: float) -> float:
+        return float(np.clip(value * gain * scale, -limit, limit))
+
+    def knee_delta(rotvec: np.ndarray) -> float:
+        flexion = float(np.linalg.norm(rotvec))
+        return float(np.clip(flexion * 0.45 * scale, -0.10, 0.50))
+
+    # Match deploy's lower_body_joint_mujoco_order_in_isaaclab_index sampling order.
+    # The policy observes these 12 slots as L hip pitch/roll/yaw, L knee,
+    # L ankle pitch/roll, then the right side.
+    joint_pos[lower[0]] = default[lower[0]] + delta(-left_hip[0], 0.35, 0.35)
+    joint_pos[lower[1]] = default[lower[1]] + delta(left_hip[1], 0.25, 0.25)
+    joint_pos[lower[2]] = default[lower[2]] + delta(left_hip[2], 0.20, 0.25)
+    joint_pos[lower[3]] = default[lower[3]] + knee_delta(left_knee)
+    joint_pos[lower[4]] = default[lower[4]] + delta(-left_ankle[0], 0.25, 0.25)
+    joint_pos[lower[5]] = default[lower[5]] + delta(left_ankle[1], 0.20, 0.20)
+
+    joint_pos[lower[6]] = default[lower[6]] + delta(-right_hip[0], 0.35, 0.35)
+    joint_pos[lower[7]] = default[lower[7]] + delta(-right_hip[1], 0.25, 0.25)
+    joint_pos[lower[8]] = default[lower[8]] + delta(-right_hip[2], 0.20, 0.25)
+    joint_pos[lower[9]] = default[lower[9]] + knee_delta(right_knee)
+    joint_pos[lower[10]] = default[lower[10]] + delta(-right_ankle[0], 0.25, 0.25)
+    joint_pos[lower[11]] = default[lower[11]] + delta(-right_ankle[1], 0.20, 0.20)
 
 
 def parse_bvh_file(filepath: str):

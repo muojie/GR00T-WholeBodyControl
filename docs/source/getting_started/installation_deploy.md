@@ -36,6 +36,30 @@ Move the unzipped TensorRT to `~/TensorRT` (or similar) and add to your `~/.bash
 export TensorRT_ROOT=$HOME/TensorRT
 ```
 
+```{note}
+**Verified reference environment (x86_64 desktop)**
+
+The following setup has been verified to build and run correctly:
+
+| Component | Value |
+|---|---|
+| OS | Ubuntu 24.04 |
+| GPU | NVIDIA RTX 4070 Ti |
+| TensorRT | **10.13.3.9** |
+| `TensorRT_ROOT` | `~/TensorRT` |
+
+This matches the required **10.13** major version. To check your own version, read the macros in `$TensorRT_ROOT/include/NvInferVersion.h` (`TRT_MAJOR_ENTERPRISE` / `TRT_MINOR_ENTERPRISE` / `TRT_PATCH_ENTERPRISE` / `TRT_BUILD_ENTERPRISE`), or inspect the installed `.so`:
+
+```sh
+grep -E "TRT_(MAJOR|MINOR|PATCH|BUILD)_ENTERPRISE" $TensorRT_ROOT/include/NvInferVersion.h
+ls -l $TensorRT_ROOT/lib/libnvinfer.so.10   # check where the runtime library resolves to
+```
+```
+
+```{tip}
+**Alternative: reuse a pip/conda TensorRT.** If you already have a matching `tensorrt` wheel in a Python/conda env (e.g. `pip install tensorrt==10.13.3.9`), you can point `TensorRT_ROOT` at a directory whose `include/` holds the headers and whose `lib/libnvinfer.so.10` symlinks into the wheel's `tensorrt_libs/`. This works, but the deploy binary then depends on that env being available at runtime — make sure the env's `tensorrt_libs` directory is on `LD_LIBRARY_PATH` (or the env is activated) when you run it. For a self-contained deployment, prefer extracting the official TAR package instead.
+```
+
 ## Clone the Repository
 
 ```bash

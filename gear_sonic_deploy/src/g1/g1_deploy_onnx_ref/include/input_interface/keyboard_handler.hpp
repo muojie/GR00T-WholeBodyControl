@@ -303,7 +303,7 @@ class SimpleKeyboard : public InputInterface {
             case 'T': play_motion = true; break; // Play motion to end
             case 'r':
             case 'R': motion_restart = true; break; // Restart motion
-            case ']': start_control = true; break; // Start control system
+            case ']': start_control = true; std::cout << "[Keyboard] ] received, start_control=true" << std::endl; break; // Start control system
             case 'o':
             case 'O': stop_control = true; break; // Stop/Exit
             case 'q':
@@ -434,7 +434,7 @@ class SimpleKeyboard : public InputInterface {
 
       if (this->report_temperature) { report_temperature = true; }
 
-      if (this->start_control) { operator_state.start = true; }
+      if (this->start_control) { operator_state.start = true; std::cout << "[Keyboard] operator_state.start set to true" << std::endl; }
 
       // Handle delta heading controls
       if (this->delta_left) {

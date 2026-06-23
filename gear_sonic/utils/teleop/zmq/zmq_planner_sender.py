@@ -164,7 +164,7 @@ def pack_pose_message(pose_data: dict, topic: str = "pose", version: int = 3) ->
     [topic_prefix][1024-byte JSON header][concatenated binary fields]
 
     This is a general-purpose function for packing numpy arrays into ZMQ messages.
-    Supports protocol versions 2, 3, and 4.
+    Supports protocol versions 1, 2, 3, and 4.
 
     Args:
         pose_data: Dictionary containing numpy arrays to send

@@ -42,6 +42,7 @@
  *   - `vr_compliance` (3 doubles) – **IGNORED** (compliance is keyboard-controlled).
  *   - `catch_up` (bool, default true) – controls gap tolerance for motion sync.
  *   - `heading_increment` (scalar) – incremental heading adjustment per message.
+ *   - `encoder_mode` (scalar int, optional) – overrides protocol default encoder mode.
  *
  * ## Streaming Architecture
  *
@@ -649,6 +650,7 @@ private:
         // Find expected fields by name (including frame_index for alignment)
         int joint_pos_idx = -1, joint_vel_idx = -1, body_pos_idx = -1, body_quat_idx = -1, frame_index_idx = -1, smpl_joints_idx = -1, smpl_pose_idx = -1;
         int left_hand_joints_idx = -1, right_hand_joints_idx = -1, catch_up_idx = -1;
+        int encoder_mode_idx = -1;
         int token_state_idx = -1;  // Protocol v4: token-only streaming
         int heading_increment_idx = -1;
         int timestamp_monotonic_idx = -1;
@@ -667,6 +669,7 @@ private:
             else if (f.name == "left_hand_joints") left_hand_joints_idx = static_cast<int>(i);
             else if (f.name == "right_hand_joints") right_hand_joints_idx = static_cast<int>(i);
             else if (f.name == "catch_up") catch_up_idx = static_cast<int>(i);
+            else if (f.name == "encoder_mode" || f.name == "pose_encoder_mode") encoder_mode_idx = static_cast<int>(i);
             else if (f.name == "token_state") token_state_idx = static_cast<int>(i);
             else if (f.name == "heading_increment") heading_increment_idx = static_cast<int>(i);
             else if (f.name == "timestamp_monotonic") timestamp_monotonic_idx = static_cast<int>(i);
@@ -1002,6 +1005,57 @@ private:
         }
         
         bool needs_swap = buffered_header_.NeedsByteSwap();
+
+        bool has_requested_encoder_mode = false;
+        int requested_encoder_mode = 0;
+        if (encoder_mode_idx >= 0) {
+            const auto& encoder_mode_field = buffered_header_.fields[static_cast<size_t>(encoder_mode_idx)];
+            const auto& encoder_mode_buf = buffered_buffers_[static_cast<size_t>(encoder_mode_idx)];
+            if (encoder_mode_field.dtype == "i32" && encoder_mode_buf.size() >= sizeof(int32_t)) {
+                int32_t val = 0;
+                std::memcpy(&val, encoder_mode_buf.data(), sizeof(int32_t));
+                if (needs_swap) val = byte_swap(val);
+                requested_encoder_mode = static_cast<int>(val);
+                has_requested_encoder_mode = true;
+            } else if (encoder_mode_field.dtype == "i64" && encoder_mode_buf.size() >= sizeof(int64_t)) {
+                int64_t val = 0;
+                std::memcpy(&val, encoder_mode_buf.data(), sizeof(int64_t));
+                if (needs_swap) val = byte_swap(val);
+                if (val >= std::numeric_limits<int>::min() && val <= std::numeric_limits<int>::max()) {
+                    requested_encoder_mode = static_cast<int>(val);
+                    has_requested_encoder_mode = true;
+                }
+            } else if (encoder_mode_field.dtype == "f32" && encoder_mode_buf.size() >= sizeof(float)) {
+                float val = 0.0f;
+                std::memcpy(&val, encoder_mode_buf.data(), sizeof(float));
+                if (needs_swap) val = byte_swap(val);
+                requested_encoder_mode = static_cast<int>(val);
+                has_requested_encoder_mode = true;
+            } else if (encoder_mode_field.dtype == "f64" && encoder_mode_buf.size() >= sizeof(double)) {
+                double val = 0.0;
+                std::memcpy(&val, encoder_mode_buf.data(), sizeof(double));
+                if (needs_swap) val = byte_swap(val);
+                requested_encoder_mode = static_cast<int>(val);
+                has_requested_encoder_mode = true;
+            } else {
+                std::cerr << "[ZMQEndpointInterface] Unsupported encoder_mode dtype or empty field: "
+                          << encoder_mode_field.dtype << std::endl;
+            }
+
+            if (has_requested_encoder_mode &&
+                (requested_encoder_mode < 0 || requested_encoder_mode > 3)) {
+                std::cerr << "[ZMQEndpointInterface] Ignoring out-of-range encoder_mode: "
+                          << requested_encoder_mode << std::endl;
+                has_requested_encoder_mode = false;
+            }
+
+            if constexpr (DEBUG_LOGGING) {
+                if (has_requested_encoder_mode) {
+                    std::cout << "[ZMQEndpointInterface] Requested encoder_mode: "
+                              << requested_encoder_mode << std::endl;
+                }
+            }
+        }
         
         // ===== STEP 1: Decode all incoming data into temporary buffers =====
         
@@ -1787,12 +1841,16 @@ private:
         }
         
         // Convert MergeResult to DecodeResult
+        int encoder_mode = -2;
         if (active_protocol_version_ == 1) {
-            merge_result.motion->SetEncodeMode(0);  // Protocol 1: joint-based
+            encoder_mode = 0;  // Protocol 1: joint-based
         } else if (active_protocol_version_ == 2 || active_protocol_version_ == 3) {
-            // Protocol versions 2 and 3 both use encoder mode 2 (SMPL-based)
-            merge_result.motion->SetEncodeMode(2);
+            encoder_mode = 2;  // Protocol default: SMPL-based
         }
+        if (has_requested_encoder_mode) {
+            encoder_mode = requested_encoder_mode;
+        }
+        merge_result.motion->SetEncodeMode(encoder_mode);
         result.motion = merge_result.motion;
         result.window_start = merge_result.window_start;
         result.frame_offset_adjustment = merge_result.frame_offset_adjustment;

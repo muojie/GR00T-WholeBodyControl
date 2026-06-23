@@ -21,42 +21,44 @@ G1_R_WRIST_PITCH_IDX = 26
 G1_L_WRIST_YAW_IDX = 27
 G1_R_WRIST_YAW_IDX = 28
 
-# Values copied from deploy's policy_parameters.hpp. The C++ array is named
-# isaaclab_to_mujoco, but its use maps MuJoCo/hardware index -> IsaacLab index.
+# Values copied from deploy's policy_parameters.hpp.
+# Despite the C++ name `isaaclab_to_mujoco`, deploy uses this table as
+# MuJoCo/hardware index -> IsaacLab motion index.
 G1_MUJOCO_TO_ISAACLAB_IDX = np.array(
     [
         0,
-        6,
-        12,
-        1,
-        7,
-        13,
-        2,
-        8,
-        14,
         3,
+        6,
         9,
-        15,
-        22,
-        4,
-        10,
-        16,
-        23,
-        5,
-        11,
+        13,
         17,
-        24,
+        1,
+        4,
+        7,
+        10,
+        14,
         18,
-        25,
+        2,
+        5,
+        8,
+        11,
+        15,
         19,
-        26,
-        20,
-        27,
         21,
+        23,
+        25,
+        27,
+        12,
+        16,
+        20,
+        22,
+        24,
+        26,
         28,
     ],
     dtype=np.int64,
 )
+G1_ISAACLAB_TO_MUJOCO_IDX = np.argsort(G1_MUJOCO_TO_ISAACLAB_IDX).astype(np.int64)
 
 G1_DEFAULT_JOINT_POS_MUJOCO = np.array(
     [
@@ -99,6 +101,25 @@ G1_DEFAULT_ROOT_POS_W = np.array([0.0, 0.0, 0.793], dtype=np.float32)
 G1_LOWER_BODY_JOINT_IDX_ISAACLAB = np.array(
     [0, 3, 6, 9, 13, 17, 1, 4, 7, 10, 14, 18],
     dtype=np.int64,
+)
+G1_WRIST_JOINT_IDX_ISAACLAB = np.array(
+    [
+        G1_L_WRIST_ROLL_IDX,
+        G1_R_WRIST_ROLL_IDX,
+        G1_L_WRIST_PITCH_IDX,
+        G1_R_WRIST_PITCH_IDX,
+        G1_L_WRIST_YAW_IDX,
+        G1_R_WRIST_YAW_IDX,
+    ],
+    dtype=np.int64,
+)
+G1_WRIST_JOINT_LOWER_LIMIT_ISAACLAB = np.array(
+    [-1.97222, -1.97222, -1.61443, -1.61443, -1.61443, -1.61443],
+    dtype=np.float32,
+)
+G1_WRIST_JOINT_UPPER_LIMIT_ISAACLAB = np.array(
+    [1.97222, 1.97222, 1.61443, 1.61443, 1.61443, 1.61443],
+    dtype=np.float32,
 )
 
 
@@ -196,6 +217,11 @@ def smpl_pose_to_g1_wrist_joint_pos(smpl_pose: Any) -> np.ndarray:
     joint_pos[G1_R_WRIST_ROLL_IDX] = g1_r_wrist_roll[0]
     joint_pos[G1_R_WRIST_PITCH_IDX] = g1_r_wrist_pitch[0]
     joint_pos[G1_R_WRIST_YAW_IDX] = g1_r_wrist_yaw[0]
+    joint_pos[G1_WRIST_JOINT_IDX_ISAACLAB] = np.clip(
+        joint_pos[G1_WRIST_JOINT_IDX_ISAACLAB],
+        G1_WRIST_JOINT_LOWER_LIMIT_ISAACLAB,
+        G1_WRIST_JOINT_UPPER_LIMIT_ISAACLAB,
+    )
     return joint_pos.astype(np.float32)
 
 
@@ -222,6 +248,7 @@ class FullBodyReference:
     smpl_pose: np.ndarray
     body_quat_w: np.ndarray
     body_pos_w: np.ndarray | None = None
+    body_pos: np.ndarray | None = None
     joint_pos: np.ndarray | None = None
     joint_vel: np.ndarray | None = None
     frame_index: int | None = None
@@ -240,6 +267,13 @@ class FullBodyReference:
             self.body_pos_w = G1_DEFAULT_ROOT_POS_W.copy()
         else:
             self.body_pos_w = _vector("body_pos_w", self.body_pos_w, 3)
+
+        if self.body_pos is not None:
+            self.body_pos = np.asarray(self.body_pos, dtype=np.float32)
+            if self.body_pos.ndim != 2 or self.body_pos.shape[1] != 3:
+                raise ValueError(
+                    f"body_pos must have shape (B, 3), got {self.body_pos.shape}"
+                )
 
         if self.joint_pos is None:
             self.joint_pos = smpl_pose_to_g1_wrist_joint_pos(self.smpl_pose)
