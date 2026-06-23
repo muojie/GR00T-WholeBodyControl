@@ -2,11 +2,11 @@
 
 本文档说明如何使用 Sony mocopi、基于 mocopi 的桥接程序，或者 BVH 文件回放，作为 SONIC 现有 ZMQ 部署链路的输入源。
 
-当前有两条稳定验证链路：`planner` topic 的 VR3PT 三点验证，以及 `pose` topic 的 BVH-G1 joint reference 验证。BVH-G1 主线推荐使用 `bvh_stream_sender.py -> --source bvh_stream -> POSE v1 + encoder_mode=g1`，这样 MuJoCo、deploy、manager 可以常驻，只重启 sender 就能换 BVH。
+当前有两条稳定验证链路：`planner` topic 的 VR3PT 三点验证，以及 `pose` topic 的 BVH-G1 joint reference 验证。BVH-G1 主线推荐使用 `bvh_stream_sender.py -> --source bvh_stream -> POSE v1 + encoder_mode=g1`，这样 MuJoCo、deploy、manager 可以常驻，只重启 sender 就能换 BVH；单进程回归用 `--source bvh_g1`。
 
 POSE 路线不要混写：当前主线见 [Sony mocopi / BVH-G1 POSE v1 路线](mocopi_pose_bvh_g1_v1_route.md)；更接近 SONIC 原生人体 pose encoder 的研究线见 [Sony mocopi / SMPL POSE v3 路线](mocopi_pose_smpl_v3_route.md)。
 
-BVH 输入源也不要混写：`--source bvh` 是 manager 直接读本地 BVH 文件；`--source bvh_stream` 是 manager 监听 UDP skeleton stream，由 `bvh_stream_sender.py` 负责读文件和发送。两者统一归入 [Sony mocopi / BVH-G1 POSE v1 路线](mocopi_pose_bvh_g1_v1_route.md) 的 BVH 输入源章节。
+BVH 输入源也不要混写：`--source bvh` 是老的本地 BVH 文件回放/VR3PT/SMPL 调试入口；`--source bvh_g1` 是 manager 直接读本地 BVH 并输出 G1 joint reference；`--source bvh_stream` 是 manager 监听 UDP skeleton stream，由 `bvh_stream_sender.py` 负责读文件和发送。三者统一归入 [Sony mocopi / BVH-G1 POSE v1 路线](mocopi_pose_bvh_g1_v1_route.md) 的 BVH 输入源章节。
 
 当前实现刻意独立于 `pico_manager_thread_server.py`。这样可以先验证非 PICO 输入链路，而不影响已有 PICO/XR 遥操作流程。
 
@@ -145,6 +145,24 @@ BVH file
   --zmq-port 5556 \
   --visualize-vr3pt
 ```
+
+## 启动 BVH-G1 本地回放：`--source bvh_g1`
+
+`--source bvh_g1` 是单进程 BVH-G1 POSE v1 回归路径。manager 直接读取 `--bvh-file`，但使用 `bvh_g1_source.py` 生成 G1 29 维 `joint_pos/joint_vel/body_pos`，再通过 POSE protocol v1 发给 deploy。
+
+```bash
+.venv_teleop/bin/python -u gear_sonic/scripts/mocap_manager_server.py \
+  --source bvh_g1 \
+  --bvh-file /path/to/motion.bvh \
+  --bvh-loop \
+  --control-mode pose \
+  --pose-window-size 80 \
+  --pose-encoder-mode g1 \
+  --pose-protocol-version 1 \
+  --zmq-port 5556
+```
+
+它适合调参和与 `bvh_stream` 做同算法对照；换 BVH 文件仍需要重启 manager。如果目标是模拟实时外部动捕输入或热切换动作，优先使用 `--source bvh_stream`。
 
 ## 启动 BVH 在线流：`--source bvh_stream`
 

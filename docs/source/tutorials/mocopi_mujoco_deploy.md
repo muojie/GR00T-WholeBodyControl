@@ -8,7 +8,7 @@
 
 本文只记录当前跑通的 BVH-G1 POSE v1 部署流程。SMPL / protocol v3 是另一条研究路线，见 [Sony mocopi / SMPL POSE v3 路线](mocopi_pose_smpl_v3_route.md)；两条路线不要互相覆盖。
 
-本文使用 [BVH-G1 POSE v1 路线](mocopi_pose_bvh_g1_v1_route.md) 中的 `--source bvh_stream`。如果要看 manager 直接读取本地 BVH 文件的 `--source bvh`，见同一路线页中的 BVH 输入源章节；不要把两个输入源的命令混在同一流程里。
+本文主流程使用 [BVH-G1 POSE v1 路线](mocopi_pose_bvh_g1_v1_route.md) 中的 `--source bvh_stream`。如果只想做单进程回归，可用同一路线页中的 `--source bvh_g1`；如果要看旧的本地 BVH 文件回放/VR3PT/SMPL 调试入口，才使用 `--source bvh`。不要把三种输入源的命令混在同一流程里。
 
 当前推荐验证链路：
 
