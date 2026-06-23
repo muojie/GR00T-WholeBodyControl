@@ -94,8 +94,7 @@ Documentation
    tutorials/mocopi_mocap_manager
    tutorials/mocopi_mujoco_deploy
    tutorials/mocopi_pose_stream
-   tutorials/mocopi_source_bvh_file
-   tutorials/mocopi_source_bvh_stream
+   tutorials/mocopi_bvh_sources
    tutorials/mocopi_pose_bvh_g1_v1_route
    tutorials/mocopi_pose_smpl_v3_route
    tutorials/data_collection

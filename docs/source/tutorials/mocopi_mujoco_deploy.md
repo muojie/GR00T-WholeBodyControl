@@ -8,7 +8,7 @@
 
 本文只记录当前跑通的 BVH-G1 POSE v1 部署流程。SMPL / protocol v3 是另一条研究路线，见 [Sony mocopi / SMPL POSE v3 路线](mocopi_pose_smpl_v3_route.md)；两条路线不要互相覆盖。
 
-本文使用 [`--source bvh_stream`](mocopi_source_bvh_stream.md)。如果要看 manager 直接读取本地 BVH 文件的 [`--source bvh`](mocopi_source_bvh_file.md)，请使用单独页面，不要把两个输入源的命令混在同一流程里。
+本文使用 [`--source bvh_stream`](mocopi_bvh_sources.md)。如果要看 manager 直接读取本地 BVH 文件的 `--source bvh`，见 [Sony mocopi / BVH 输入源](mocopi_bvh_sources.md) 中对应章节；不要把两个输入源的命令混在同一流程里。
 
 当前推荐验证链路：
 
@@ -245,7 +245,7 @@ LowState is not available, waiting for robot to be ready
 
 `Lost LowState data connection from robot` 如果出现在手动停止 MuJoCo 仿真端或 deploy 控制端之后，通常只是进程停止后的副作用；如果出现在运行中，则表示 deploy 的 LowState 时间戳超过安全阈值，会触发 `Safety check failed` 并停止控制。
 
-旧 planner/VR3PT 的 `--source bvh` 调试命令不放在本文，见 [Sony mocopi / `--source bvh` 本地 BVH 文件回放](mocopi_source_bvh_file.md)。
+旧 planner/VR3PT 的 `--source bvh` 调试命令不放在本文，见 [Sony mocopi / BVH 输入源](mocopi_bvh_sources.md) 中的 `--source bvh` 章节。
 
 ## 预期日志
 

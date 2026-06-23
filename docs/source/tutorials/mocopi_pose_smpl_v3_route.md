@@ -25,7 +25,7 @@ BVH / mocopi skeleton
 
 ## 历史实现
 
-早期 [`--source bvh`](mocopi_source_bvh_file.md) `--control-mode pose` 会生成 SMPL-like full-body reference，并按 protocol v3 发送：
+早期 [`--source bvh`](mocopi_bvh_sources.md) `--control-mode pose` 会生成 SMPL-like full-body reference，并按 protocol v3 发送：
 
 ```text
 smpl_joints
