@@ -185,6 +185,7 @@ class BvhG1RetargetConfig:
     root_tilt_limit_rad: float = 0.25
     min_root_height_m: float = 0.74
     enable_body_fk: bool = True
+    smpl_joints_source: str = "g1_fk"
 
 
 @dataclass
@@ -222,6 +223,29 @@ class BvhG1RetargetContext:
     @property
     def motion_name(self) -> str:
         return osp.splitext(osp.basename(self.bvh_motion.path))[0]
+
+
+G1_BODY14_TO_SMPL_JOINT_IDX = {
+    0: (0,),
+    1: (1,),
+    2: (4,),
+    3: (7, 10),
+    4: (2,),
+    5: (5,),
+    6: (8, 11),
+    7: (6, 9, 12, 15),
+    8: (13, 16),
+    9: (18,),
+    10: (20, 22),
+    11: (14, 17),
+    12: (19,),
+    13: (21, 23),
+}
+
+G1_BODY14_COMPARE_SMPL_IDX = np.array(
+    [0, 1, 4, 7, 2, 5, 8, 6, 16, 18, 20, 17, 19, 21],
+    dtype=np.int64,
+)
 
 
 BVH_G1_SOURCE_ALIASES = {
@@ -669,17 +693,76 @@ class BvhG1PlaybackSource:
                 frame_index=int(stream_frame_idx),
             )
 
+        smpl_joints = _smpl_joints_for_sony_v3(
+            source=self.retarget_config.smpl_joints_source,
+            body_pos=body_pos,
+            body_pos_w=body_pos_w,
+            body_quat_w=body_quat_w,
+        )
         return build_full_body_reference_from_skeleton_frame(
             motion.joint_names,
             motion.world_positions[source_frame_idx],
             motion.world_quat_wxyz[source_frame_idx],
             frame_index=int(stream_frame_idx),
+            smpl_joints=smpl_joints,
             body_quat_w=body_quat_w,
             body_pos_w=body_pos_w,
             body_pos=body_pos,
             joint_pos=joint_pos,
             joint_vel=joint_vel,
         )
+
+
+def g1_body_pos14_pelvis_to_smpl_joints(body_pos14_pelvis: np.ndarray) -> np.ndarray:
+    """Project SONIC's 14 G1 FK keypoints into the 24-joint SMPL slots used by deploy."""
+    body_pos = np.asarray(body_pos14_pelvis, dtype=np.float32)
+    if body_pos.shape != (14, 3):
+        raise ValueError(f"body_pos14_pelvis must have shape (14, 3), got {body_pos.shape}")
+
+    smpl_joints = np.zeros((24, 3), dtype=np.float32)
+    for g1_idx, smpl_indices in G1_BODY14_TO_SMPL_JOINT_IDX.items():
+        for smpl_idx in smpl_indices:
+            smpl_joints[smpl_idx] = body_pos[g1_idx]
+
+    torso = body_pos[7]
+    pelvis = body_pos[0]
+    smpl_joints[3] = pelvis + 0.45 * (torso - pelvis)
+    smpl_joints[12] = torso + np.array([0.0, 0.0, 0.18], dtype=np.float32)
+    smpl_joints[15] = torso + np.array([0.0, 0.0, 0.35], dtype=np.float32)
+    return smpl_joints.astype(np.float32)
+
+
+def g1_body_pos14_world_to_smpl_joints(
+    body_pos14_world: np.ndarray,
+    root_pos_w: np.ndarray,
+    root_quat_wxyz: np.ndarray,
+) -> np.ndarray:
+    """Convert world-space G1 FK keypoints to deploy's root-local SMPL joint slots."""
+    body_pos = np.asarray(body_pos14_world, dtype=np.float32)
+    if body_pos.shape != (14, 3):
+        raise ValueError(f"body_pos14_world must have shape (14, 3), got {body_pos.shape}")
+    root_pos = np.asarray(root_pos_w, dtype=np.float32).reshape(3)
+    root_quat = normalize_quat_wxyz(np.asarray(root_quat_wxyz, dtype=np.float32).reshape(4))
+    root_inv = Rotation.from_quat(root_quat[[1, 2, 3, 0]]).inv()
+    body_pos_pelvis = root_inv.apply(body_pos - root_pos).astype(np.float32)
+    return g1_body_pos14_pelvis_to_smpl_joints(body_pos_pelvis)
+
+
+def _smpl_joints_for_sony_v3(
+    *,
+    source: str,
+    body_pos: np.ndarray | None,
+    body_pos_w: np.ndarray,
+    body_quat_w: np.ndarray,
+) -> np.ndarray | None:
+    mode = str(source or "skeleton").strip().lower()
+    if mode == "skeleton":
+        return None
+    if mode != "g1_fk":
+        raise ValueError(f"unsupported smpl_joints_source {source!r}; expected 'g1_fk' or 'skeleton'")
+    if body_pos is None:
+        return None
+    return g1_body_pos14_world_to_smpl_joints(body_pos, body_pos_w, body_quat_w)
 
 
 def load_bvh_g1_motion(

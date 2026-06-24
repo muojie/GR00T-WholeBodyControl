@@ -457,6 +457,7 @@ def build_full_body_reference_from_skeleton_frame(
     *,
     frame_index: int | None = None,
     lower_body_retarget_scale: float = 0.0,
+    smpl_joints: np.ndarray | None = None,
     body_quat_w: np.ndarray | None = None,
     body_pos_w: np.ndarray | None = None,
     body_pos: np.ndarray | None = None,
@@ -491,8 +492,9 @@ def build_full_body_reference_from_skeleton_frame(
         lower_body_retarget_scale=max(0.0, float(lower_body_retarget_scale)),
     )
     reference = _build_full_body_reference(motion, 0)
+    smpl_joints_np = reference.smpl_joints if smpl_joints is None else smpl_joints
     return FullBodyReference(
-        smpl_joints=reference.smpl_joints,
+        smpl_joints=smpl_joints_np,
         smpl_pose=reference.smpl_pose,
         body_quat_w=reference.body_quat_w if body_quat_w is None else body_quat_w,
         body_pos_w=reference.body_pos_w if body_pos_w is None else body_pos_w,

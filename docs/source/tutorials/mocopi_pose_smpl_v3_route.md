@@ -50,13 +50,42 @@ frame_index
 
 - `mocopi_source.py`：官方 mocopi binary 27 bone、只带 `joints/bones` 的 mocopi JSON、以及已带 `smpl_*` 的 JSON 都可以进入 `FullBodyReference`。
 - `bvh_source.py`：新增统一的命名 skeleton frame -> SMPL-like `FullBodyReference` 构造入口。
-- `bvh_g1_source.py`：继续输出原来的 G1 `joint_pos/joint_vel/body_pos/body_quat_w`，同时用同一 BVH skeleton 填充非零 `smpl_joints/smpl_pose`。
-- `bvh_stream_source.py`：每个 UDP `bvh_stream_v1` frame 既做 BVH-to-G1 retarget，也同步构造 SMPL-like `smpl_joints/smpl_pose`。
+- `bvh_g1_source.py`：继续输出原来的 G1 `joint_pos/joint_vel/body_pos/body_quat_w`，同时为 v3 构造非零 `smpl_joints/smpl_pose`。当前默认 `--bvh-g1-smpl-joints-source g1_fk`，即把 v1 已验证的 G1 FK 14 个关键点投影到 24 个 SMPL 槽位；`skeleton` 只作为旧 V3 原始 BVH skeleton 的 A/B 回退。
+- `bvh_stream_source.py`：每个 UDP `bvh_stream_v1` frame 既做 BVH-to-G1 retarget，也按同一 `--bvh-g1-smpl-joints-source` 规则构造 SMPL-like `smpl_joints/smpl_pose`。
 - `mocap_manager_server.py`：`pkl` 仍只允许 v1/g1；`bvh_g1` 和 `bvh_stream` 支持两条显式线：
   - v1 主线：`--pose-protocol-version 1 --pose-encoder-mode g1`
   - v3 实验线：`--pose-protocol-version 3 --pose-encoder-mode smpl --allow-sony-pose-v3`
 
 这样 v1/G1 的稳定路径不被覆盖；v3 需要显式选择，避免误把主验证命令切到 SMPL encoder。
+
+## 评估方法
+
+不要直接进闭环盲调 v3。先离线用同一个 BVH 同时生成：
+
+- v1 参考：BVH-G1 retarget 后的 G1 `joint_pos`，再用 G1 MJCF FK 算 14 个 body keypoints；
+- v3 skeleton 旧线：BVH skeleton 直接填到 `smpl_joints`；
+- v3 g1_fk 新线：把 v1 G1 FK keypoints 投影到 SMPL 24 joint 槽位。
+
+评估脚本：
+
+```bash
+.venv_teleop/bin/python -u gear_sonic/scripts/evaluate_sony_pose_v3.py \
+  --bvh-file /home/nolo/RAYNOS_Motion1.bvh \
+  --json-out /tmp/sony_pose_v3_eval.json
+```
+
+脚本会输出关键点 RMSE、最佳 yaw/scale 对齐误差、肢段方向角、左右侧符号错位率、root 高度/姿态统计。`RAYNOS_Motion1.bvh` 全量 926 帧的当前结果：
+
+| 方案 | direct RMSE | yaw+scale RMSE | 肢段角均值 | 左右侧错位 |
+|------|-------------|----------------|------------|------------|
+| `skeleton` | 0.195 m | 0.092 m | 45.2 deg | 98.5% |
+| `g1_fk` | 0.000 m | 0.000 m | 0.006 deg | 0.0% |
+
+这说明旧 v3 的主要问题不是几个 gain，而是原始 BVH skeleton 相对 v1 G1 参考有约 90 deg yaw/轴差和左右侧几何错位。默认改成 `g1_fk` 后，v3 的 `smpl_joints` 至少在 deploy 当前 release 实际使用的关键点几何上和 v1 对齐；如果要验证旧行为，显式加：
+
+```bash
+--bvh-g1-smpl-joints-source skeleton
+```
 
 ## 为什么暂停为独立研究线
 
@@ -97,6 +126,7 @@ frame_index
   --pose-encoder-mode smpl \
   --pose-protocol-version 3 \
   --allow-sony-pose-v3 \
+  --bvh-g1-smpl-joints-source g1_fk \
   --zmq-port 5556
 
 .venv_teleop/bin/python -u gear_sonic/scripts/bvh_stream_sender.py \
@@ -118,6 +148,7 @@ frame_index
   --pose-encoder-mode smpl \
   --pose-protocol-version 3 \
   --allow-sony-pose-v3 \
+  --bvh-g1-smpl-joints-source g1_fk \
   --zmq-port 5556
 ```
 
@@ -139,5 +170,5 @@ SMPL v3 路线重新推进时，应单独验收：
 
 1. `smpl_joints/smpl_pose/body_quat_w/body_pos` 的 shape、dtype、坐标系与 deploy 解析一致。
 2. deploy 当前 `observation_config.yaml` 的 SMPL mode 实际消费项明确。
-3. root 高度、root heading、下肢 local pose 和 wrist joint observation 都能独立量化。
+3. `evaluate_sony_pose_v3.py` 对同一段 BVH 的 skeleton/g1_fk 指标可复现，且解释任何进入闭环前的姿态相似度差异。
 4. 同一段 BVH 与 BVH-G1 POSE v1 做 A/B，对比动作保真度、稳定性和延迟。

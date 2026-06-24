@@ -164,3 +164,22 @@ def test_bvh_stream_accepts_explicit_sony_pose_v3_line():
 
     assert args.pose_filter_profile == "stable"
     assert args.target_fps == 50.0
+    assert args.bvh_g1_smpl_joints_source == "g1_fk"
+
+
+def test_bvh_stream_rejects_g1_fk_smpl_joints_without_body_fk():
+    with pytest.raises(SystemExit):
+        _parse_and_validate(
+            [
+                "--source",
+                "bvh_stream",
+                "--control-mode",
+                "pose",
+                "--pose-protocol-version",
+                "3",
+                "--pose-encoder-mode",
+                "smpl",
+                "--allow-sony-pose-v3",
+                "--bvh-g1-no-body-fk",
+            ]
+        )

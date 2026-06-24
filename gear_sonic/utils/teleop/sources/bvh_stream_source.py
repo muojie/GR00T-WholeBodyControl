@@ -19,6 +19,7 @@ from gear_sonic.utils.teleop.sources.base import (
 )
 from gear_sonic.utils.teleop.sources.bvh_g1_source import (
     BvhG1RetargetConfig,
+    g1_body_pos14_world_to_smpl_joints,
     prepare_bvh_g1_retarget_context_from_motion,
     retarget_bvh_g1_frame,
     update_bvh_g1_retarget_context_frame,
@@ -290,11 +291,25 @@ class BvhStreamUdpSource:
             position=self._context.root_pos[0],
             quat_wxyz=self._context.root_quat[0],
         )
+        smpl_joints = None
+        smpl_joints_source = str(self.retarget_config.smpl_joints_source or "skeleton").lower()
+        if smpl_joints_source == "g1_fk" and body_pos is not None:
+            smpl_joints = g1_body_pos14_world_to_smpl_joints(
+                body_pos,
+                self._context.root_pos[0],
+                self._context.root_quat[0],
+            )
+        elif smpl_joints_source != "skeleton":
+            raise ValueError(
+                f"unsupported smpl_joints_source {self.retarget_config.smpl_joints_source!r}; "
+                "expected 'g1_fk' or 'skeleton'"
+            )
         full_body = build_full_body_reference_from_skeleton_frame(
             self._context.bvh_motion.joint_names,
             self._context.bvh_motion.world_positions[0],
             self._context.bvh_motion.world_quat_wxyz[0],
             frame_index=stream_frame_idx,
+            smpl_joints=smpl_joints,
             body_quat_w=self._context.root_quat[0],
             body_pos_w=self._context.root_pos[0],
             body_pos=body_pos,

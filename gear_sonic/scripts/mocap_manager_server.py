@@ -189,6 +189,7 @@ def _build_bvh_g1_retarget_config(
         root_tilt_limit_rad=args.bvh_g1_root_tilt_limit,
         min_root_height_m=args.bvh_g1_min_root_height,
         enable_body_fk=not args.bvh_g1_no_body_fk,
+        smpl_joints_source=args.bvh_g1_smpl_joints_source,
     )
 
 
@@ -303,6 +304,7 @@ def _create_source(args: argparse.Namespace):
             f"root_tilt={args.bvh_g1_root_tilt_limit:.2f}rad, "
             f"root_min_z={args.bvh_g1_min_root_height:.2f}m, "
             f"body_fk={int(not args.bvh_g1_no_body_fk)}, "
+            f"smpl_joints={args.bvh_g1_smpl_joints_source}, "
             f"align_root={int(not args.bvh_g1_no_align_root)})"
         )
         return source, description
@@ -327,6 +329,7 @@ def _create_source(args: argparse.Namespace):
             f"(ik={bvh_g1_ik_mode}, scale={args.bvh_g1_retarget_scale:.2f}, "
             f"lower={args.bvh_g1_lower_scale:.2f}, upper={args.bvh_g1_upper_scale:.2f}, "
             f"axis_map={args.bvh_g1_axis_map}, body_fk={int(not args.bvh_g1_no_body_fk)}, "
+            f"smpl_joints={args.bvh_g1_smpl_joints_source}, "
             f"align_root={int(not args.bvh_g1_no_align_root)})"
         )
         return source, description
@@ -952,6 +955,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable MJCF FK body_pos14 generation for realtime BVH-to-G1 playback.",
     )
+    parser.add_argument(
+        "--bvh-g1-smpl-joints-source",
+        choices=("g1_fk", "skeleton"),
+        default="g1_fk",
+        help=(
+            "SMPL joints sent in Sony/BVH POSE v3. g1_fk projects the validated v1 G1 FK "
+            "keypoints into SMPL slots; skeleton keeps the raw BVH/mocopi skeleton joints."
+        ),
+    )
     parser.add_argument("--pkl-file", help="Robot-filtered G1 PKL file to replay when --source pkl")
     parser.add_argument("--pkl-loop", action="store_true", help="Loop robot PKL playback")
     parser.add_argument(
@@ -1272,6 +1284,11 @@ def _validate_args(
                 parser.error(
                     f"--source {args.source} with POSE v3/smpl is experimental; "
                     "add --allow-sony-pose-v3 to keep the Sony v1 and v3 lines explicit"
+                )
+            if args.bvh_g1_smpl_joints_source == "g1_fk" and args.bvh_g1_no_body_fk:
+                parser.error(
+                    "--bvh-g1-smpl-joints-source g1_fk requires body FK; remove "
+                    "--bvh-g1-no-body-fk or use --bvh-g1-smpl-joints-source skeleton"
                 )
         else:
             parser.error(
