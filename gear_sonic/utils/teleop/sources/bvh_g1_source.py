@@ -33,6 +33,7 @@ from gear_sonic.utils.teleop.sources.bvh_source import (
     _build_full_body_reference,
     _find_first_joint_index,
     _rotation_from_wxyz,
+    build_full_body_reference_from_skeleton_frame,
     load_bvh_motion,
 )
 from gear_sonic.utils.teleop.sources.g1_body_fk import G1BodyFk
@@ -401,6 +402,7 @@ class BvhG1PlaybackSource:
             )
 
         self.motion: RobotPklMotion | None = None
+        self._smpl_motion = None
         self.retarget_context: BvhG1RetargetContext | None = None
         if self.runtime_mode == "precompute":
             self.motion = load_bvh_g1_motion(
@@ -411,6 +413,14 @@ class BvhG1PlaybackSource:
                 local_root=local_root,
                 align_root=align_root,
                 retarget_config=self.retarget_config,
+            )
+            self._smpl_motion = load_bvh_motion(
+                bvh_file,
+                target_fps=target_fps,
+                unit_scale=unit_scale,
+                y_up_to_z_up=y_up_to_z_up,
+                body_local=local_root,
+                lower_body_retarget_scale=0.0,
             )
         else:
             self.retarget_context = prepare_bvh_g1_retarget_context(
@@ -524,15 +534,15 @@ class BvhG1PlaybackSource:
         if self.motion is None:
             return self._build_online_frame(frame_idx, stream_frame_idx)
 
-        full_body = FullBodyReference(
-            smpl_joints=np.zeros((24, 3), dtype=np.float32),
-            smpl_pose=np.zeros((21, 3), dtype=np.float32),
+        body_pos = self.motion.body_pos[frame_idx] if self.motion.body_pos is not None else None
+        full_body = self._build_smpl_g1_full_body(
+            frame_idx=frame_idx,
+            stream_frame_idx=stream_frame_idx,
             body_quat_w=self.motion.root_quat_wxyz[frame_idx],
             body_pos_w=self.motion.root_pos_w[frame_idx],
-            body_pos=self.motion.body_pos[frame_idx] if self.motion.body_pos is not None else None,
+            body_pos=body_pos,
             joint_pos=self.motion.joint_pos_isaaclab[frame_idx],
             joint_vel=self.motion.joint_vel_isaaclab[frame_idx],
-            frame_index=int(stream_frame_idx),
         )
         root_pose = Pose7D(
             position=self.motion.root_pos_w[frame_idx],
@@ -597,15 +607,14 @@ class BvhG1PlaybackSource:
                 context.root_quat[frame_idx].reshape(1, 4),
             )[0]
 
-        full_body = FullBodyReference(
-            smpl_joints=np.zeros((24, 3), dtype=np.float32),
-            smpl_pose=np.zeros((21, 3), dtype=np.float32),
+        full_body = self._build_smpl_g1_full_body(
+            frame_idx=frame_idx,
+            stream_frame_idx=stream_frame_idx,
             body_quat_w=context.root_quat[frame_idx],
             body_pos_w=context.root_pos[frame_idx],
             body_pos=body_pos,
             joint_pos=joint_pos,
             joint_vel=joint_vel,
-            frame_index=int(stream_frame_idx),
         )
         root_pose = Pose7D(
             position=context.root_pos[frame_idx],
@@ -626,6 +635,50 @@ class BvhG1PlaybackSource:
                 "source_frame_index": source_frame_idx,
                 "source_fps": context.source_fps,
             },
+        )
+
+    def _build_smpl_g1_full_body(
+        self,
+        *,
+        frame_idx: int,
+        stream_frame_idx: int,
+        body_quat_w: np.ndarray,
+        body_pos_w: np.ndarray,
+        body_pos: np.ndarray | None,
+        joint_pos: np.ndarray,
+        joint_vel: np.ndarray,
+    ) -> FullBodyReference:
+        if self.retarget_context is not None:
+            motion = self.retarget_context.bvh_motion
+            source_frame_idx = int(self.retarget_context.frame_indices[frame_idx])
+        elif self._smpl_motion is not None:
+            motion = self._smpl_motion
+            source_frame_idx = min(
+                int(frame_idx) * int(motion.frame_stride),
+                int(motion.frame_count) - 1,
+            )
+        else:
+            return FullBodyReference(
+                smpl_joints=np.zeros((24, 3), dtype=np.float32),
+                smpl_pose=np.zeros((21, 3), dtype=np.float32),
+                body_quat_w=body_quat_w,
+                body_pos_w=body_pos_w,
+                body_pos=body_pos,
+                joint_pos=joint_pos,
+                joint_vel=joint_vel,
+                frame_index=int(stream_frame_idx),
+            )
+
+        return build_full_body_reference_from_skeleton_frame(
+            motion.joint_names,
+            motion.world_positions[source_frame_idx],
+            motion.world_quat_wxyz[source_frame_idx],
+            frame_index=int(stream_frame_idx),
+            body_quat_w=body_quat_w,
+            body_pos_w=body_pos_w,
+            body_pos=body_pos,
+            joint_pos=joint_pos,
+            joint_vel=joint_vel,
         )
 
 

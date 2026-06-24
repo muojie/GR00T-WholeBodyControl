@@ -23,6 +23,9 @@ from gear_sonic.utils.teleop.sources.base import (
     Pose7D,
     normalize_quat_wxyz,
 )
+from gear_sonic.utils.teleop.sources.bvh_source import (
+    build_full_body_reference_from_skeleton_frame,
+)
 
 
 MOCOPI_DEFAULT_PORT = 12351
@@ -174,6 +177,7 @@ def parse_mocopi_binary_packet(packet: bytes) -> MocapFrame:
         joint_name = MOCOPI_BONE_NAMES.get(int(bone_id))
         if joint_name is not None:
             joints[joint_name] = pose
+    full_body = _full_body_from_named_poses(joints, metadata.get("fnum"))
 
     return MocapFrame(
         source="sony_mocopi",
@@ -182,6 +186,7 @@ def parse_mocopi_binary_packet(packet: bytes) -> MocapFrame:
         frame_index=metadata.get("fnum"),
         joints=joints,
         bones=bones,
+        full_body=full_body,
         metadata=metadata,
     )
 
@@ -245,6 +250,8 @@ def parse_mocopi_json_packet(packet: bytes) -> MocapFrame:
         direct_vr_orientation = vr_pose[:, 3:7].reshape(-1)
 
     full_body = _full_body_from_json_payload(payload)
+    if full_body is None:
+        full_body = _full_body_from_named_poses(joints, payload.get("frame_index"))
 
     return MocapFrame(
         source=str(payload.get("source", "sony_mocopi_json")),
@@ -259,6 +266,27 @@ def parse_mocopi_json_packet(packet: bytes) -> MocapFrame:
         full_body=full_body,
         metadata={"format": "json", **payload.get("metadata", {})},
     )
+
+
+def _full_body_from_named_poses(
+    joints: dict[str, Pose7D],
+    frame_index: int | None,
+) -> FullBodyReference | None:
+    if not joints:
+        return None
+
+    joint_names = list(joints.keys())
+    world_positions = np.stack([joints[name].position for name in joint_names], axis=0)
+    world_quat_wxyz = np.stack([joints[name].quat_wxyz for name in joint_names], axis=0)
+    try:
+        return build_full_body_reference_from_skeleton_frame(
+            joint_names,
+            world_positions,
+            world_quat_wxyz,
+            frame_index=frame_index,
+        )
+    except ValueError:
+        return None
 
 
 def _full_body_from_json_payload(payload: dict[str, Any]) -> FullBodyReference | None:

@@ -48,6 +48,8 @@ BVH_DEFAULT_JOINT_ALIASES = {
     "neck": ("Neck", "Neck1", "neck_1", "neck_2", "mixamorig:Neck"),
     "head": ("Head", "HeadTop_End", "HeadEnd", "mixamorig:Head"),
     "left_shoulder": (
+        "left_shoulder",
+        "left_upper_arm",
         "LeftShoulder",
         "LeftArm",
         "L_Shoulder",
@@ -58,6 +60,7 @@ BVH_DEFAULT_JOINT_ALIASES = {
         "mixamorig:LeftArm",
     ),
     "left_elbow": (
+        "left_lower_arm",
         "LeftForeArm",
         "LeftLowerArm",
         "LeftElbow",
@@ -66,8 +69,10 @@ BVH_DEFAULT_JOINT_ALIASES = {
         "l_low_arm",
         "mixamorig:LeftForeArm",
     ),
-    "left_wrist": ("LeftHand", "LeftWrist", "L_Hand", "mixamorig:LeftHand"),
+    "left_wrist": ("left_wrist", "LeftHand", "LeftWrist", "L_Hand", "mixamorig:LeftHand"),
     "right_shoulder": (
+        "right_shoulder",
+        "right_upper_arm",
         "RightShoulder",
         "RightArm",
         "R_Shoulder",
@@ -78,6 +83,7 @@ BVH_DEFAULT_JOINT_ALIASES = {
         "mixamorig:RightArm",
     ),
     "right_elbow": (
+        "right_lower_arm",
         "RightForeArm",
         "RightLowerArm",
         "RightElbow",
@@ -86,7 +92,7 @@ BVH_DEFAULT_JOINT_ALIASES = {
         "r_low_arm",
         "mixamorig:RightForeArm",
     ),
-    "right_wrist": ("RightHand", "RightWrist", "R_Hand", "mixamorig:RightHand"),
+    "right_wrist": ("right_wrist", "RightHand", "RightWrist", "R_Hand", "mixamorig:RightHand"),
     "left_hip": (
         "LeftUpLeg",
         "LeftUpperLeg",
@@ -441,6 +447,59 @@ def load_bvh_motion(
             selected_indices.get(source_key) for source_key in SMPL_JOINT_SOURCE_KEYS
         ],
         lower_body_retarget_scale=max(0.0, float(lower_body_retarget_scale)),
+    )
+
+
+def build_full_body_reference_from_skeleton_frame(
+    joint_names: list[str] | tuple[str, ...],
+    world_positions: np.ndarray,
+    world_quat_wxyz: np.ndarray,
+    *,
+    frame_index: int | None = None,
+    lower_body_retarget_scale: float = 0.0,
+    body_quat_w: np.ndarray | None = None,
+    body_pos_w: np.ndarray | None = None,
+    body_pos: np.ndarray | None = None,
+    joint_pos: np.ndarray | None = None,
+    joint_vel: np.ndarray | None = None,
+) -> FullBodyReference:
+    """Build one SMPL-like reference from a named world-space skeleton frame."""
+    names = [str(name) for name in joint_names]
+    positions = np.asarray(world_positions, dtype=np.float32)
+    quats = np.asarray(world_quat_wxyz, dtype=np.float32)
+    if positions.shape != (len(names), 3):
+        raise ValueError(
+            f"world_positions must have shape ({len(names)}, 3), got {positions.shape}"
+        )
+    if quats.shape != (len(names), 4):
+        raise ValueError(f"world_quat_wxyz must have shape ({len(names)}, 4), got {quats.shape}")
+
+    selected_indices = _resolve_selected_indices(names)
+    motion = BvhMotion(
+        path="skeleton_frame",
+        joint_names=names,
+        world_positions=positions.reshape(1, len(names), 3),
+        world_quat_wxyz=quats.reshape(1, len(names), 4),
+        source_fps=0.0,
+        source_frame_time_s=0.0,
+        frame_stride=1,
+        playback_fps=0.0,
+        selected_indices=selected_indices,
+        smpl_source_indices=[
+            selected_indices.get(source_key) for source_key in SMPL_JOINT_SOURCE_KEYS
+        ],
+        lower_body_retarget_scale=max(0.0, float(lower_body_retarget_scale)),
+    )
+    reference = _build_full_body_reference(motion, 0)
+    return FullBodyReference(
+        smpl_joints=reference.smpl_joints,
+        smpl_pose=reference.smpl_pose,
+        body_quat_w=reference.body_quat_w if body_quat_w is None else body_quat_w,
+        body_pos_w=reference.body_pos_w if body_pos_w is None else body_pos_w,
+        body_pos=body_pos,
+        joint_pos=reference.joint_pos if joint_pos is None else joint_pos,
+        joint_vel=reference.joint_vel if joint_vel is None else joint_vel,
+        frame_index=frame_index,
     )
 
 

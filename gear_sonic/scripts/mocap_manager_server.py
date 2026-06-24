@@ -1013,6 +1013,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--allow-sony-pose-v3",
+        action="store_true",
+        help=(
+            "Allow Sony/BVH G1 sources (--source bvh_g1 or bvh_stream) to publish the "
+            "experimental SMPL POSE v3 line. Without this flag those sources stay on "
+            "the validated POSE v1 + encoder_mode=g1 line."
+        ),
+    )
+    parser.add_argument(
         "--pose-encoder-mode",
         choices=["g1", "smpl", "teleop"],
         default="smpl",
@@ -1216,13 +1225,28 @@ def main() -> None:
     args = parser.parse_args()
     user_set_target_fps = _has_cli_option("--target-fps")
     user_set_pose_filter_profile = _has_cli_option("--pose-filter-profile")
+    _validate_args(
+        parser,
+        args,
+        user_set_target_fps=user_set_target_fps,
+        user_set_pose_filter_profile=user_set_pose_filter_profile,
+    )
+    try:
+        run_mocap_manager(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+
+def _validate_args(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    *,
+    user_set_target_fps: bool,
+    user_set_pose_filter_profile: bool,
+) -> None:
     if args.source in {"pkl", "bvh_g1", "bvh_stream"}:
         if args.control_mode != "pose":
             parser.error(f"--source {args.source} requires --control-mode pose")
-        if args.pose_protocol_version != 1:
-            parser.error(f"--source {args.source} requires --pose-protocol-version 1")
-        if args.pose_encoder_mode != "g1":
-            parser.error(f"--source {args.source} requires --pose-encoder-mode g1")
         if not user_set_target_fps:
             if args.source == "pkl":
                 args.target_fps = args.pkl_fps
@@ -1230,8 +1254,31 @@ def main() -> None:
                 args.target_fps = args.bvh_fps or 50.0
             else:
                 args.target_fps = 50.0
+    if args.source == "pkl":
+        if args.pose_protocol_version != 1:
+            parser.error("--source pkl requires --pose-protocol-version 1")
+        if args.pose_encoder_mode != "g1":
+            parser.error("--source pkl requires --pose-encoder-mode g1")
         if not user_set_pose_filter_profile:
             args.pose_filter_profile = "off"
+    if args.source in {"bvh_g1", "bvh_stream"}:
+        uses_g1_v1 = args.pose_protocol_version == 1 and args.pose_encoder_mode == "g1"
+        uses_smpl_v3 = args.pose_protocol_version == 3 and args.pose_encoder_mode == "smpl"
+        if uses_g1_v1:
+            if not user_set_pose_filter_profile:
+                args.pose_filter_profile = "off"
+        elif uses_smpl_v3:
+            if not args.allow_sony_pose_v3:
+                parser.error(
+                    f"--source {args.source} with POSE v3/smpl is experimental; "
+                    "add --allow-sony-pose-v3 to keep the Sony v1 and v3 lines explicit"
+                )
+        else:
+            parser.error(
+                f"--source {args.source} supports either "
+                "--pose-protocol-version 1 --pose-encoder-mode g1, or "
+                "--pose-protocol-version 3 --pose-encoder-mode smpl --allow-sony-pose-v3"
+            )
     if args.pose_encoder_mode == "teleop" and args.pose_protocol_version != 3:
         parser.error("--pose-encoder-mode teleop requires --pose-protocol-version 3")
     if args.pose_encoder_mode == "teleop" and not args.allow_teleop_pose_experiment:
@@ -1241,10 +1288,6 @@ def main() -> None:
         )
     if args.pose_encoder_mode == "g1" and args.pose_protocol_version != 1:
         parser.error("--pose-encoder-mode g1 requires --pose-protocol-version 1")
-    try:
-        run_mocap_manager(args)
-    except ValueError as exc:
-        parser.error(str(exc))
 
 
 def _has_cli_option(option: str) -> bool:

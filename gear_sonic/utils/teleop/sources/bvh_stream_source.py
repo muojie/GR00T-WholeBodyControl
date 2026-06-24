@@ -27,6 +27,7 @@ from gear_sonic.utils.teleop.sources.bvh_g1_source import (
 from gear_sonic.utils.teleop.sources.bvh_source import (
     BvhMotion,
     SMPL_JOINT_SOURCE_KEYS,
+    build_full_body_reference_from_skeleton_frame,
     _resolve_selected_indices,
 )
 
@@ -289,15 +290,16 @@ class BvhStreamUdpSource:
             position=self._context.root_pos[0],
             quat_wxyz=self._context.root_quat[0],
         )
-        full_body = FullBodyReference(
-            smpl_joints=np.zeros((24, 3), dtype=np.float32),
-            smpl_pose=np.zeros((21, 3), dtype=np.float32),
+        full_body = build_full_body_reference_from_skeleton_frame(
+            self._context.bvh_motion.joint_names,
+            self._context.bvh_motion.world_positions[0],
+            self._context.bvh_motion.world_quat_wxyz[0],
+            frame_index=stream_frame_idx,
             body_quat_w=self._context.root_quat[0],
             body_pos_w=self._context.root_pos[0],
             body_pos=body_pos,
             joint_pos=joint_pos,
             joint_vel=joint_vel,
-            frame_index=stream_frame_idx,
         )
 
         return MocapFrame(

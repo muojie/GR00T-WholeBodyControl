@@ -21,7 +21,11 @@ from gear_sonic.utils.teleop.sources.bvh_g1_source import (
     load_bvh_g1_motion,
     save_bvh_g1_motion_lib_pkl,
 )
-from gear_sonic.utils.teleop.sources.bvh_source import BvhPlaybackSource, load_bvh_motion
+from gear_sonic.utils.teleop.sources.bvh_source import (
+    BvhPlaybackSource,
+    build_full_body_reference_from_skeleton_frame,
+    load_bvh_motion,
+)
 from gear_sonic.utils.teleop.sources.bvh_stream_source import (
     BVH_STREAM_DEFAULT_PORT,
     BvhStreamUdpSource,
@@ -48,6 +52,7 @@ from gear_sonic.utils.teleop.sources.robot_pkl_source import (
 
 __all__ = [
     "BvhPlaybackSource",
+    "build_full_body_reference_from_skeleton_frame",
     "BvhG1PlaybackSource",
     "BvhG1RetargetConfig",
     "BVH_STREAM_DEFAULT_PORT",

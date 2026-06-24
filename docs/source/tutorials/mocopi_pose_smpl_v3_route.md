@@ -44,6 +44,20 @@ frame_index
 - streamed motion 需要 `body_pos`，否则 root 高度可能退化到 `z=0`；
 - POSE 模式应等第一条 window 发出后再发送 `start=True`。
 
+## 当前实现
+
+当前保留 BVH-G1 POSE v1 主线，同时新增 Sony/BVH SMPL POSE v3 实验线：
+
+- `mocopi_source.py`：官方 mocopi binary 27 bone、只带 `joints/bones` 的 mocopi JSON、以及已带 `smpl_*` 的 JSON 都可以进入 `FullBodyReference`。
+- `bvh_source.py`：新增统一的命名 skeleton frame -> SMPL-like `FullBodyReference` 构造入口。
+- `bvh_g1_source.py`：继续输出原来的 G1 `joint_pos/joint_vel/body_pos/body_quat_w`，同时用同一 BVH skeleton 填充非零 `smpl_joints/smpl_pose`。
+- `bvh_stream_source.py`：每个 UDP `bvh_stream_v1` frame 既做 BVH-to-G1 retarget，也同步构造 SMPL-like `smpl_joints/smpl_pose`。
+- `mocap_manager_server.py`：`pkl` 仍只允许 v1/g1；`bvh_g1` 和 `bvh_stream` 支持两条显式线：
+  - v1 主线：`--pose-protocol-version 1 --pose-encoder-mode g1`
+  - v3 实验线：`--pose-protocol-version 3 --pose-encoder-mode smpl --allow-sony-pose-v3`
+
+这样 v1/G1 的稳定路径不被覆盖；v3 需要显式选择，避免误把主验证命令切到 SMPL encoder。
+
 ## 为什么暂停为独立研究线
 
 这条路线不是无效，而是待解决问题更多：
@@ -58,7 +72,7 @@ frame_index
 
 ## 研究命令模板
 
-这条路线只作为协议和语义研究模板，不作为当前 MuJoCo 主验证命令：
+`--source bvh` 是本地 SMPL debug 入口：
 
 ```bash
 .venv_teleop/bin/python -u gear_sonic/scripts/mocap_manager_server.py \
@@ -72,7 +86,52 @@ frame_index
   --zmq-port 5556
 ```
 
-使用前需要确认当前代码和 deploy 的 protocol v3 字段契约完全一致；如果只是验证当前效果，优先使用 BVH-G1 POSE v1 路线。
+`bvh_stream` 的 v3 实验入口：
+
+```bash
+.venv_teleop/bin/python -u gear_sonic/scripts/mocap_manager_server.py \
+  --source bvh_stream \
+  --bvh-stream-port 12352 \
+  --control-mode pose \
+  --pose-window-size 80 \
+  --pose-encoder-mode smpl \
+  --pose-protocol-version 3 \
+  --allow-sony-pose-v3 \
+  --zmq-port 5556
+
+.venv_teleop/bin/python -u gear_sonic/scripts/bvh_stream_sender.py \
+  --bvh-file /home/nolo/RAYNOS_Motion1.bvh \
+  --host 127.0.0.1 \
+  --port 12352 \
+  --loop
+```
+
+`bvh_g1` 的 v3 实验入口：
+
+```bash
+.venv_teleop/bin/python -u gear_sonic/scripts/mocap_manager_server.py \
+  --source bvh_g1 \
+  --bvh-file /home/nolo/RAYNOS_Motion1.bvh \
+  --bvh-loop \
+  --control-mode pose \
+  --pose-window-size 80 \
+  --pose-encoder-mode smpl \
+  --pose-protocol-version 3 \
+  --allow-sony-pose-v3 \
+  --zmq-port 5556
+```
+
+外置 tmux 启动工具等价写法：
+
+```bash
+~/tools/sony-isaaclab-sonic-launcher/launch_sony_isaaclab_closed_loop.py \
+  --backend isaaclab \
+  --input-source sony \
+  --bvh-source bvh_stream \
+  --sony-pose-line v3
+```
+
+使用前需要确认当前 deploy 的 protocol v3 字段契约和 observation 配置完全一致；如果只是验证当前效果，优先使用 BVH-G1 POSE v1 路线。
 
 ## 成功标准
 
