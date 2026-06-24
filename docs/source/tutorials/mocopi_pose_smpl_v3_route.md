@@ -87,6 +87,50 @@ frame_index
 --bvh-g1-smpl-joints-source skeleton
 ```
 
+### release V3 observation check
+
+当前 deploy release 的 SMPL mode 实际消费：
+
+```text
+smpl_joints_10frame_step1
+smpl_anchor_orientation_10frame_step1
+motion_joint_positions_wrists_10frame_step1
+```
+
+`evaluate_sony_pose_v3.py` 现在会额外输出 `release_observations`，对这三项做离线近似评估：
+
+- `smpl_joints_10frame_step1`：10 帧窗口内 keypoint 速度和 horizon delta；
+- `smpl_anchor_orientation_10frame_step1`：按 deploy 的 first-frame heading removal 近似生成 6D anchor，并统计 root/anchor 角速度、10 帧 horizon 和 filter lag；
+- `motion_joint_positions_wrists_10frame_step1`：统计 Sony 实际发出的 wrist `joint_pos[23..28]`，并和 SMPL pose 投影出的 PICO-like wrist joint 做差；
+- `raw` / `filtered`：同一段 reference 在进入 `PoseStreamPublisher` filter 前后的对比。
+
+离线 anchor 评估假设 reset 时机器人 base 为 identity；真实闭环还会叠加 deploy 当前 `base_quat`，因此它用于排查 reference 方向和时序风险，不等价于闭环稳定性结论。
+
+`RAYNOS_Motion1.bvh` 926 帧结果显示：
+
+- root tilt p95/max 为 `0/0 deg`，这段动作的 root/anchor 风险主要不是 roll/pitch，而是 yaw 速度和 filter lag。
+- raw anchor 速度 p95/max 为 `401.5/581.7 deg/s`，10 帧 horizon p95/max 为 `72.7/100.0 deg`。
+- `stable` profile 会把 anchor 速度压到 `50.1/50.2 deg/s`，10 帧 horizon 压到 `9.0/9.0 deg`，但 p95 anchor lag 达 `71.97 deg`。
+- `responsive` profile 的 SMPL/wrist lag 很小（SMPL p95 `0.009 m`，wrist p95 `0.040 rad`），但快速 yaw 段仍会出现约 `72 deg` 的 p95 anchor lag。
+- `off` 没有 filter lag，但 raw anchor/wrist 速度直接进入 deploy。
+- Sony 当前 wrist `joint_pos` 与 SMPL pose 投影 wrist 的差异很大：总体 p95/max `2.254/2.692 rad`，roll 维 p95 约 `2.69 rad`，yaw 维 p95 约 `2.13 rad`。这是 Sony V3 与 PICO 之间仍需重点 A/B 的字段语义差异。
+
+对比 filter profile：
+
+```bash
+.venv_teleop/bin/python -u gear_sonic/scripts/evaluate_sony_pose_v3.py \
+  --bvh-file /home/nolo/RAYNOS_Motion1.bvh \
+  --pose-filter-profile responsive \
+  --json-out /tmp/sony_pose_v3_release_eval_responsive.json
+
+.venv_teleop/bin/python -u gear_sonic/scripts/evaluate_sony_pose_v3.py \
+  --bvh-file /home/nolo/RAYNOS_Motion1.bvh \
+  --pose-filter-profile off \
+  --json-out /tmp/sony_pose_v3_release_eval_off.json
+```
+
+当前建议：闭环 A/B 时不要只用默认 `stable`；至少并行测试 `responsive` 和 `off`。腕部差异需要等 PICO pose window 抓取后再决定是否让 Sony V3 runtime 使用 SMPL pose 投影 wrist 来替代 BVH->G1 retarget wrist。
+
 ## 为什么暂停为独立研究线
 
 这条路线不是无效，而是待解决问题更多：
@@ -171,4 +215,5 @@ SMPL v3 路线重新推进时，应单独验收：
 1. `smpl_joints/smpl_pose/body_quat_w/body_pos` 的 shape、dtype、坐标系与 deploy 解析一致。
 2. deploy 当前 `observation_config.yaml` 的 SMPL mode 实际消费项明确。
 3. `evaluate_sony_pose_v3.py` 对同一段 BVH 的 skeleton/g1_fk 指标可复现，且解释任何进入闭环前的姿态相似度差异。
-4. 同一段 BVH 与 BVH-G1 POSE v1 做 A/B，对比动作保真度、稳定性和延迟。
+4. root/anchor、wrist `joint_pos` 和时序平滑能用 `release_observations` 独立量化。
+5. 同一段 BVH 与 BVH-G1 POSE v1、PICO V3 做 A/B，对比动作保真度、稳定性和延迟。
