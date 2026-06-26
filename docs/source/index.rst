@@ -95,6 +95,8 @@ Documentation
    tutorials/mocopi_mujoco_deploy
    tutorials/mocopi_pose_stream
    tutorials/mocopi_pose_bvh_g1_v1_route
+   tutorials/bvh_stream_sender_app_protocol
+   tutorials/windows_isaaclab_deploy_bridge
    tutorials/mocopi_pose_smpl_v3_route
    tutorials/data_collection
    tutorials/vla_workflow
