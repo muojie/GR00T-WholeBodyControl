@@ -211,6 +211,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wait-after-isaaclab", type=float, default=2.0)
     parser.add_argument("--wait-after-proxy", type=float, default=1.0)
     parser.add_argument("--wait-after-deploy", type=float, default=1.0)
+
+    parser.add_argument("--no-metrics", action="store_true", help="do not launch the metrics collector window")
+    parser.add_argument("--metrics-duration-s", type=float, default=60.0)
+    parser.add_argument("--metrics-startup-timeout-s", type=float, default=240.0)
+    parser.add_argument("--metrics-sample-hz", type=float, default=20.0)
+    parser.add_argument("--metrics-report-interval-s", type=float, default=2.0)
+    parser.add_argument("--metrics-min-samples", type=int, default=30)
+    parser.add_argument("--metrics-min-deploy-fps", type=float, default=15.0)
+    parser.add_argument("--metrics-min-isaac-fps", type=float, default=15.0)
+    parser.add_argument("--metrics-summary-json", type=Path)
+    parser.add_argument("--metrics-samples-jsonl", type=Path)
     return parser
 
 
@@ -233,6 +244,10 @@ def _resolve_defaults(args: argparse.Namespace) -> None:
     if args.sdk_root is None:
         args.sdk_root = args.repo_root / "gear_sonic_deploy" / "thirdparty" / "unitree_sdk2"
     args.sdk_root = args.sdk_root.expanduser().resolve()
+    if args.metrics_summary_json is not None:
+        args.metrics_summary_json = args.metrics_summary_json.expanduser().resolve()
+    if args.metrics_samples_jsonl is not None:
+        args.metrics_samples_jsonl = args.metrics_samples_jsonl.expanduser().resolve()
 
 
 def _preflight(args: argparse.Namespace) -> None:
@@ -527,6 +542,52 @@ def _bvh_sender_command(args: argparse.Namespace) -> str:
     return _with_log(command, "bvh_sender")
 
 
+def _metrics_command(args: argparse.Namespace) -> str:
+    python = args.repo_root / ".venv_teleop" / "bin" / "python"
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    summary_json = args.metrics_summary_json or Path(f"/tmp/sonic_local_metrics_summary_{stamp}.json")
+    samples_jsonl = args.metrics_samples_jsonl or Path(f"/tmp/sonic_local_metrics_samples_{stamp}.jsonl")
+    metrics_args: list[str | Path] = [
+        python,
+        "-u",
+        "gear_sonic/scripts/collect_sonic_isaaclab_metrics.py",
+        "--deploy-endpoint",
+        f"tcp://127.0.0.1:{args.debug_port}",
+        "--deploy-topic",
+        args.debug_topic,
+        "--isaac-endpoint",
+        _isaac_state_endpoint(args),
+        "--isaac-topic",
+        args.state_topic,
+        "--duration-s",
+        str(args.metrics_duration_s),
+        "--startup-timeout-s",
+        str(args.metrics_startup_timeout_s),
+        "--sample-hz",
+        str(args.metrics_sample_hz),
+        "--report-interval-s",
+        str(args.metrics_report_interval_s),
+        "--min-samples",
+        str(args.metrics_min_samples),
+        "--min-deploy-fps",
+        str(args.metrics_min_deploy_fps),
+        "--min-isaac-fps",
+        str(args.metrics_min_isaac_fps),
+        "--summary-json",
+        summary_json,
+        "--samples-jsonl",
+        samples_jsonl,
+    ]
+    command = " && ".join(
+        [
+            f"cd {_quote(args.repo_root)}",
+            "export PYTHONUNBUFFERED=1",
+            " ".join(_quote(part) for part in metrics_args),
+        ]
+    )
+    return _with_log(command, "metrics")
+
+
 def _build_window_commands(args: argparse.Namespace) -> list[WindowCommand]:
     commands = [WindowCommand("input", _mocap_manager_command(args))]
     if not args.no_isaaclab:
@@ -539,6 +600,8 @@ def _build_window_commands(args: argparse.Namespace) -> list[WindowCommand]:
     )
     if _launches_bvh_stream_sender(args):
         commands.append(WindowCommand("bvh_sender", _bvh_sender_command(args)))
+    if not args.no_metrics:
+        commands.append(WindowCommand("metrics", _metrics_command(args)))
     return commands
 
 
