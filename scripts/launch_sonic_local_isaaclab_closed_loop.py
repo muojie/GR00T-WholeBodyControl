@@ -158,12 +158,25 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--enable-pinocchio", action="store_true")
     parser.add_argument("--kit-arg", dest="extra_kit_args", action="append", default=[])
+    parser.add_argument(
+        "--isaac-env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="extra IsaacLab environment export; can be repeated and overrides launcher defaults",
+    )
 
     parser.add_argument("--physics-mode", type=int, choices=[0, 1], default=1)
     parser.add_argument("--visual-servo-mode", type=int, choices=[0, 1], default=0)
     parser.add_argument("--self-collisions", type=int, choices=[0, 1], default=0)
     parser.add_argument("--stabilize-root", type=int, choices=[0, 1], default=1)
     parser.add_argument("--target-rate-limit", type=float, default=0.04)
+    parser.add_argument(
+        "--auto-unlock-after-packets",
+        type=int,
+        default=100,
+        help="auto-run IsaacLab's U/unlock callback after this many valid deploy target packets; 0 disables",
+    )
 
     parser.add_argument("--zmq-port", type=int, default=5556, help="mocap manager -> deploy port")
     parser.add_argument("--debug-port", type=int, default=5557, help="deploy g1_debug ZMQ port")
@@ -384,30 +397,37 @@ def _isaaclab_command(args: argparse.Namespace) -> str:
     if args.enable_pinocchio:
         isaac_args.append("--enable_pinocchio")
 
-    command = " && ".join(
-        [
-            f"cd {_quote(args.isaaclab_root)}",
-            f"source {_quote(args.conda_sh)}",
-            f"conda activate {_quote(args.conda_env)}",
-            "export PYTHONUNBUFFERED=1",
-            f"export UNITREE_DDS_INTERFACE={_quote(args.interface)}",
-            f"export UNITREE_DDS_DOMAIN_ID={_quote(args.domain_id)}",
-            "export SONIC_DEPLOY_TRANSPORT=zmq",
-            f"export SONIC_DEPLOY_ENDPOINT={_quote(f'tcp://127.0.0.1:{args.debug_port}')}",
-            f"export SONIC_DEPLOY_TOPIC={_quote(args.debug_topic)}",
-            "export SONIC_DEPLOY_TARGET_FIELD=last_action",
-            "export SONIC_DEPLOY_REFERENCE_TARGET_FIELD=body_q_target",
-            "export SONIC_PUBLISH_STATE_ZMQ=1",
-            f"export SONIC_STATE_ZMQ_BIND={_quote(f'tcp://*:{args.state_port}')}",
-            f"export SONIC_STATE_ZMQ_TOPIC={_quote(args.state_topic)}",
-            f"export SONIC_G1_PHYSICS_MODE={_quote(args.physics_mode)}",
-            f"export SONIC_G1_VISUAL_SERVO_MODE={_quote(args.visual_servo_mode)}",
-            f"export SONIC_G1_SELF_COLLISIONS={_quote(args.self_collisions)}",
-            f"export SONIC_DEPLOY_STABILIZE_ROOT={_quote(args.stabilize_root)}",
-            f"export SONIC_DEPLOY_TARGET_RATE_LIMIT={_quote(args.target_rate_limit)}",
-            " ".join(_quote(part) for part in isaac_args),
-        ]
-    )
+    commands = [
+        f"cd {_quote(args.isaaclab_root)}",
+        f"source {_quote(args.conda_sh)}",
+        f"conda activate {_quote(args.conda_env)}",
+        "export PYTHONUNBUFFERED=1",
+        f"export UNITREE_DDS_INTERFACE={_quote(args.interface)}",
+        f"export UNITREE_DDS_DOMAIN_ID={_quote(args.domain_id)}",
+        "export SONIC_DEPLOY_TRANSPORT=zmq",
+        f"export SONIC_DEPLOY_ENDPOINT={_quote(f'tcp://127.0.0.1:{args.debug_port}')}",
+        f"export SONIC_DEPLOY_TOPIC={_quote(args.debug_topic)}",
+        "export SONIC_DEPLOY_TARGET_FIELD=last_action",
+        "export SONIC_DEPLOY_REFERENCE_TARGET_FIELD=body_q_target",
+        "export SONIC_PUBLISH_STATE_ZMQ=1",
+        f"export SONIC_STATE_ZMQ_BIND={_quote(f'tcp://*:{args.state_port}')}",
+        f"export SONIC_STATE_ZMQ_TOPIC={_quote(args.state_topic)}",
+        f"export SONIC_G1_PHYSICS_MODE={_quote(args.physics_mode)}",
+        f"export SONIC_G1_VISUAL_SERVO_MODE={_quote(args.visual_servo_mode)}",
+        f"export SONIC_G1_SELF_COLLISIONS={_quote(args.self_collisions)}",
+        f"export SONIC_DEPLOY_STABILIZE_ROOT={_quote(args.stabilize_root)}",
+        f"export SONIC_DEPLOY_TARGET_RATE_LIMIT={_quote(args.target_rate_limit)}",
+        f"export SONIC_DEPLOY_AUTO_UNLOCK_AFTER_PACKETS={_quote(args.auto_unlock_after_packets)}",
+    ]
+    for env_item in args.isaac_env:
+        if "=" not in env_item:
+            raise ValueError(f"--isaac-env must be KEY=VALUE, got {env_item!r}")
+        key, value = env_item.split("=", 1)
+        if not key.replace("_", "").isalnum() or key[0].isdigit():
+            raise ValueError(f"--isaac-env key must be shell-safe, got {key!r}")
+        commands.append(f"export {key}={_quote(value)}")
+    commands.append(" ".join(_quote(part) for part in isaac_args))
+    command = " && ".join(commands)
     return _with_log(command, "isaaclab")
 
 
