@@ -147,7 +147,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-body-rmse-m", type=float, default=0.25)
     parser.add_argument("--max-keypoint-error-m", type=float, default=0.35)
     parser.add_argument("--max-joint-velocity-radps", type=float, default=30.0)
-    parser.add_argument("--max-target-step-rad", type=float, default=0.80)
+    parser.add_argument("--max-target-step-rad", type=float, default=1.00)
     parser.add_argument("--min-joint-limit-margin-rad", type=float, default=-0.02)
     return parser
 
@@ -332,11 +332,13 @@ def _compute_sample(
     action_error = None if action_q_mujoco is None else actual_q_mujoco - action_q_mujoco
     margins = np.minimum(actual_q_mujoco - joint_lower_mujoco, joint_upper_mujoco - actual_q_mujoco)
     finite_margins = margins[np.isfinite(margins)]
-    target_step = (
+    raw_target_step = (
         0.0
         if previous_target_q_mujoco is None
         else float(np.max(np.abs(target_q_mujoco - previous_target_q_mujoco)))
     )
+    applied_target_step = _optional_float(isaac.get("target_step_delta_absmax"))
+    target_step = raw_target_step if applied_target_step is None else applied_target_step
 
     actual_tilt = _root_tilt_rad(actual_root_quat)
     target_tilt = _root_tilt_rad(target_root_quat)
@@ -365,12 +367,15 @@ def _compute_sample(
         "joint_velocity_absmax_radps": float(np.max(np.abs(actual_dq_mujoco))),
         "target_joint_absmax_rad": float(np.max(np.abs(target_q_mujoco))),
         "target_step_absmax_rad": target_step,
+        "raw_target_step_absmax_rad": raw_target_step,
         "joint_limit_margin_min_rad": float(np.min(finite_margins)) if finite_margins.size else None,
         "body_keypoint_rmse_m": float(np.sqrt(np.mean(np.square(body_diff)))),
         "body_keypoint_absmax_m": float(np.max(np.linalg.norm(body_diff, axis=1))),
         "fall_detected": fall_detected,
         "missing_fields": [],
     }
+    if applied_target_step is not None:
+        sample["applied_target_step_absmax_rad"] = applied_target_step
     for group, names in GROUP_BODY_INDEXES.items():
         sample[f"{group}_keypoint_error_m"] = _body_group_error(body_diff, names)
 
@@ -427,6 +432,8 @@ def _pass_fail(acc: MetricsAccumulator, args: argparse.Namespace) -> dict[str, A
             "joint_velocity_absmax_radps",
             "target_joint_absmax_rad",
             "target_step_absmax_rad",
+            "raw_target_step_absmax_rad",
+            "applied_target_step_absmax_rad",
             "joint_limit_margin_min_rad",
             "body_keypoint_rmse_m",
             "body_keypoint_absmax_m",

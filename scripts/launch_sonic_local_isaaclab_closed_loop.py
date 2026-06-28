@@ -206,6 +206,23 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-bvh-loop", action="store_true")
     parser.add_argument("--bvh-fps", type=float)
+    parser.add_argument(
+        "--no-bvh-wait-for-debug",
+        action="store_true",
+        help="start bvh_stream_sender immediately instead of waiting for deploy debug port",
+    )
+    parser.add_argument(
+        "--bvh-wait-timeout-s",
+        type=float,
+        default=240.0,
+        help="timeout while waiting for deploy debug port before starting bvh_stream_sender",
+    )
+    parser.add_argument(
+        "--bvh-start-delay-s",
+        type=float,
+        default=1.0,
+        help="extra delay after deploy debug port is reachable before starting bvh_stream_sender",
+    )
     parser.add_argument("--pose-window-size", type=int, default=80)
     parser.add_argument("--mocap-log-interval-s", type=float, default=1.0)
 
@@ -360,6 +377,21 @@ def _configure_isaaclab_mode(args: argparse.Namespace) -> None:
 
 def _launches_bvh_stream_sender(args: argparse.Namespace) -> bool:
     return not args.no_bvh_stream_sender and not args.manual_bvh_stream_sender
+
+
+def _wait_for_tcp_port_command(host: str, port: int, timeout_s: float, label: str) -> str:
+    timeout_i = max(1, int(timeout_s + 0.999))
+    return (
+        f"echo {_quote(f'[sonic-local] waiting for {label} {host}:{port}')}"
+        f" && deadline=$((SECONDS+{timeout_i}))"
+        f" && until (echo >/dev/tcp/{host}/{int(port)}) >/dev/null 2>&1; do"
+        f" if [ \"$SECONDS\" -ge \"$deadline\" ]; then"
+        f" echo {_quote(f'[sonic-local] timeout waiting for {label} {host}:{port}')} >&2; exit 2;"
+        f" fi;"
+        f" sleep 0.5;"
+        f" done"
+        f" && echo {_quote(f'[sonic-local] {label} ready')}"
+    )
 
 
 def _isaac_state_endpoint(args: argparse.Namespace) -> str:
@@ -552,13 +584,23 @@ def _bvh_sender_command(args: argparse.Namespace) -> str:
     if args.bvh_fps is not None:
         sender_args.extend(["--fps", str(args.bvh_fps)])
 
-    command = " && ".join(
-        [
-            f"cd {_quote(args.repo_root)}",
-            "export PYTHONUNBUFFERED=1",
-            " ".join(_quote(part) for part in sender_args),
-        ]
-    )
+    command_parts = [
+        f"cd {_quote(args.repo_root)}",
+        "export PYTHONUNBUFFERED=1",
+    ]
+    if not args.no_bvh_wait_for_debug:
+        command_parts.append(
+            _wait_for_tcp_port_command(
+                "127.0.0.1",
+                args.debug_port,
+                args.bvh_wait_timeout_s,
+                "deploy debug port",
+            )
+        )
+    if args.bvh_start_delay_s > 0.0:
+        command_parts.append(f"sleep {float(args.bvh_start_delay_s):.3f}")
+    command_parts.append(" ".join(_quote(part) for part in sender_args))
+    command = " && ".join(command_parts)
     return _with_log(command, "bvh_sender")
 
 
