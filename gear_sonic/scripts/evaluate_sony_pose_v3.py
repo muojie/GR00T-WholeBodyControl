@@ -77,7 +77,7 @@ def parse_args() -> argparse.Namespace:
             "Compare Sony/BVH POSE v3 SMPL joints with the validated v1 G1 FK body reference."
         )
     )
-    parser.add_argument("--bvh-file", default="/home/nolo/RAYNOS_Motion1.bvh")
+    parser.add_argument("--bvh-file", default="/home/nolo/MCPM_20260526_190029.BVH")
     parser.add_argument("--target-fps", type=float, default=50.0)
     parser.add_argument("--unit-scale", type=float, default=0.01)
     parser.add_argument("--max-frames", type=int, default=0, help="0 means all frames")

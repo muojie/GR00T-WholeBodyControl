@@ -33,7 +33,7 @@ from pathlib import Path
 DEFAULT_SESSION = "sonic_local_isaaclab"
 DEFAULT_REPO_ROOT = Path.home() / "GR00T-WholeBodyControl"
 DEFAULT_ISAACLAB_ROOT = Path.home() / "xiaoyang_IssacLab" / "IsaacLab"
-DEFAULT_BVH_FILE = Path.home() / "RAYNOS_Motion1.bvh"
+DEFAULT_BVH_FILE = Path.home() / "MCPM_20260526_190029.BVH"
 DEFAULT_TASK = "Isaac-SonicSolo-Locomanipulation-G1-v0"
 
 
