@@ -535,6 +535,16 @@ def _pass_fail(acc: MetricsAccumulator, args: argparse.Namespace) -> dict[str, A
         ]
     }
     fall_frames = sum(1 for sample in samples if sample.get("fall_detected"))
+    first_fall_time_s = None
+    if samples:
+        first_sample_time = _optional_float(samples[0].get("monotonic_time"))
+        for sample in samples:
+            if not sample.get("fall_detected"):
+                continue
+            sample_time = _optional_float(sample.get("monotonic_time"))
+            if first_sample_time is not None and sample_time is not None:
+                first_fall_time_s = max(0.0, sample_time - first_sample_time)
+            break
     missing_field_samples = sum(1 for sample in samples if sample.get("missing_fields"))
 
     ignore_root_yaw_error = bool(args.ignore_root_yaw_error)
@@ -583,6 +593,7 @@ def _pass_fail(acc: MetricsAccumulator, args: argparse.Namespace) -> dict[str, A
         "deploy_fps": deploy_fps,
         "isaac_fps": isaac_fps,
         "fall_frames": fall_frames,
+        "first_fall_time_s": first_fall_time_s,
         "nonfinite_samples": acc.nonfinite_samples,
         "missing_field_samples": missing_field_samples,
         "stats": stats,
@@ -663,6 +674,7 @@ def _print_summary(label: str, summary: dict[str, Any]) -> None:
         "deploy_fps": round(float(summary["deploy_fps"]), 2),
         "isaac_fps": round(float(summary["isaac_fps"]), 2),
         "fall_frames": summary["fall_frames"],
+        "first_fall_time_s": summary.get("first_fall_time_s"),
         "joint_rmse_mean": summary["stats"]["joint_tracking_rmse_rad"]["mean"],
         "body_rmse_mean": summary["stats"]["body_keypoint_rmse_m"]["mean"],
         "base_height_min": summary["stats"]["base_height_m"]["min"],

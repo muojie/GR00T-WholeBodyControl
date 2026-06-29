@@ -560,6 +560,20 @@ scripts/launch_sonic_v3_tuning_closed_loop.py \
 
 结论：`post-unlock-follow-base` 已给 v3 一个可复现的 IsaacLab 诊断/视觉 replay 档，能稳定展示解锁后的 body/keypoint 跟随效果，并且 root yaw gate 现在可以用 `base_relative` 参考自然通过。但它不是纯 free-root 动力学通过，因为 root XY/yaw 在解锁后仍被 deploy base target 写入；真正 free-root 仍会摔倒，下一步要转向 root translation release、足端支撑/平衡控制和自由根姿态稳定。
 
+#### 2026-06-29 pure free-root velocity-assist sweep
+
+follow-base yaw gate 修正后，继续只做纯 free-root 释放诊断：不写 root pose，只调 unlock blend 和 post-unlock root velocity damping。为便于比较，IsaacLab metrics summary 新增 `first_fall_time_s`，v3 wrapper 新增 `--unlock-blend-steps`，不再需要裸传 `--isaac-env SONIC_DEPLOY_UNLOCK_BLEND_STEPS=...`。
+
+| case | pass | first fall | fall frames | base height min | root tilt max / p95 | joint velocity max / p95 | joint RMSE mean / p95 | 结论 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| baseline：`target=0.003` | `false` | `3.07s` | `175 / 235` | `0.188 m` | `1.903 / 1.680 rad` | `12.44 / 3.34 rad/s` | `0.547 / 0.822 rad` | yaw gate 已过，但 root height / tilt 快速失败 |
+| `post_unlock_target_rate_limit=0.03` | `false` | `3.17s` | `173 / 235` | `0.071 m` | `2.339 / 2.037 rad` | `12.00 / 7.86 rad/s` | `0.665 / 0.887 rad` | 单纯放开 target rate 变差，方向不成立 |
+| `unlock_blend_steps=200` + `damping_steps=800` + velocity scale `0` | `false` | `7.62s` | `86 / 235` | `0.126 m` | `1.620 / 1.540 rad` | `8.67 / 2.07 rad/s` | `0.369 / 0.529 rad` | 根速度释放是主因之一，能显著推迟失稳 |
+| `unlock_blend_steps=400` + `damping_steps=1600` + velocity scale `0`，12s | `true` | none in 12s | `0 / 235` | `0.716 m` | `0.101 / 0.076 rad` | `1.13 / 0.67 rad/s` | `0.345 / 0.387 rad` | 强 velocity-assist 可通过 12s，但不代表自由根已稳定 |
+| 同上，20s | `false` | `12.79s` | `142 / 392` | `0.059 m` | `1.797 / 1.697 rad` | `12.62 / 2.38 rad/s` | `0.379 / 0.475 rad` | 辅助释放结束后仍倒，纯 free-root 还没解决 |
+
+结论：本轮把纯 free-root 失稳从“yaw/target-rate 误判”收敛到“root velocity / attitude release 后缺少真实支撑稳定”。强 velocity-assist 只是在诊断窗口内把速度压住，20s 仍会倒，所以下一项不应继续单调加大 damping，而应转向足端支撑、CoM/hip 高度约束或策略输入/动作时延对自由根平衡的影响。
+
 已知剩余缺口：
 
 - 纯 PhysX free-root unlock 仍未通过；现在已排除“post-unlock target step 从 `0.003` 突然放宽到 `0.45`”作为唯一原因，也已排除 root yaw gate 作为主因，速度阻尼单独也不够。

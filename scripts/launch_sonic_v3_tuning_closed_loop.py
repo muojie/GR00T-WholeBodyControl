@@ -82,6 +82,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="keep root locked by default; use a positive value to test free-root unlock",
     )
     parser.add_argument(
+        "--unlock-blend-steps",
+        type=int,
+        help="IsaacLab root velocity release blend steps before the root is marked unlocked",
+    )
+    parser.add_argument(
         "--check-root-yaw-error",
         action="store_true",
         help="keep the root yaw error metric active even in the default root-locked profile",
@@ -216,6 +221,8 @@ def _launcher_command(args: argparse.Namespace, extra_args: list[str]) -> list[s
         cmd.extend(["--isaac-env", "SONIC_DEPLOY_POST_UNLOCK_FOLLOW_BASE=1"])
         cmd.extend(["--isaac-env", "SONIC_DEPLOY_FOLLOW_BASE_YAW=1"])
         cmd.extend(["--isaac-env", "SONIC_DEPLOY_FOLLOW_BASE_TRANSLATION=1"])
+    if args.unlock_blend_steps is not None:
+        cmd.extend(["--isaac-env", f"SONIC_DEPLOY_UNLOCK_BLEND_STEPS={args.unlock_blend_steps}"])
     if args.post_unlock_damping_steps > 0:
         cmd.extend(["--isaac-env", f"SONIC_DEPLOY_POST_UNLOCK_DAMPING_STEPS={args.post_unlock_damping_steps}"])
     if args.post_unlock_xy_velocity_scale is not None:
