@@ -422,6 +422,19 @@ def _path_arg(path: Path, base: Path) -> str:
         return str(path)
 
 
+def _isaaclab_pythonpath(root: Path) -> str:
+    source_root = root / "source"
+    packages = (
+        "isaaclab",
+        "isaaclab_assets",
+        "isaaclab_contrib",
+        "isaaclab_mimic",
+        "isaaclab_rl",
+        "isaaclab_tasks",
+    )
+    return ":".join(str(source_root / package) for package in packages if (source_root / package).exists())
+
+
 def _isaaclab_command(args: argparse.Namespace) -> str:
     kit_args = [
         "--/app/vsync=false",
@@ -444,11 +457,24 @@ def _isaaclab_command(args: argparse.Namespace) -> str:
     if args.enable_pinocchio:
         isaac_args.append("--enable_pinocchio")
 
+    isaaclab_pythonpath = _isaaclab_pythonpath(args.isaaclab_root)
+    import_check = (
+        "python -c "
+        + _quote(
+            "import isaaclab, os; "
+            "print('[sonic-local] isaaclab import=' + str(isaaclab.__file__)); "
+            "print('[sonic-local] ISAACLAB_PATH=' + str(os.environ.get('ISAACLAB_PATH'))); "
+            "print('[sonic-local] EXP_PATH=' + str(os.environ.get('EXP_PATH')))"
+        )
+    )
     commands = [
         f"cd {_quote(args.isaaclab_root)}",
         f"source {_quote(args.conda_sh)}",
         f"conda activate {_quote(args.conda_env)}",
         "export PYTHONUNBUFFERED=1",
+        f"export ISAACLAB_PATH={_quote(args.isaaclab_root)}",
+        f"export PYTHONPATH={_quote(isaaclab_pythonpath)}${{PYTHONPATH:+:${{PYTHONPATH}}}}",
+        import_check,
         f"export UNITREE_DDS_INTERFACE={_quote(args.interface)}",
         f"export UNITREE_DDS_DOMAIN_ID={_quote(args.domain_id)}",
         "export SONIC_DEPLOY_TRANSPORT=zmq",

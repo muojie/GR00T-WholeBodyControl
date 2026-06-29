@@ -151,6 +151,151 @@ target_step_absmax_rad.p95=0.45
 
 结论：回退后的 G1 POSE v1 自由根 baseline 通路是连通的，但稳定性不合格；下一步优化必须以自由根口径为准，优先处理解锁后根姿态快速倾倒、关节跟踪 RMSE 和关节速度峰值，不再用 root 回放分数作为收益。
 
+## 2026-06-29 回退分支 B+C 解锁延后验证
+
+本轮在用户确认后只做第一组低风险 A/B：不改 deploy wire format，不启用 root 回放，只把自动解锁延后并放慢 post-unlock target limiter 释放。
+
+参数：
+
+```text
+BVH=/home/nolo/MCPM_20260526_190029.BVH
+SONIC_DEPLOY_AUTO_UNLOCK_AFTER_PACKETS=180
+SONIC_DEPLOY_TARGET_RATE_LIMIT=0.05
+SONIC_DEPLOY_POST_UNLOCK_TARGET_RATE_LIMIT=0.45
+SONIC_DEPLOY_POST_UNLOCK_RATE_LIMIT_RELEASE_STEPS=150
+pose_protocol=v1
+pose_encoder=g1
+target_field=last_action
+```
+
+### 启动路径污染修复
+
+第一次 A/B 运行使用了 `--isaaclab-root /home/nolo/xiaoyang_IssacLab/IsaacLab-v1-free-root-20260629`，但 IsaacLab 日志实际加载：
+
+```text
+[INFO][AppLauncher]: Loading experience file: /home/nolo/xiaoyang_IssacLab/IsaacLab/apps/isaaclab.python.kit
+```
+
+原因是 `env_isaaclab` 中 `isaaclab` / `isaaclab_tasks` editable install 仍指向原始仓库：
+
+```text
+Editable project location: /home/nolo/xiaoyang_IssacLab/IsaacLab/source/isaaclab
+Editable project location: /home/nolo/xiaoyang_IssacLab/IsaacLab/source/isaaclab_tasks
+```
+
+因此只 `cd <isaaclab-root>` 并不能保证实际运行回退 worktree。已修复 `scripts/launch_sonic_local_isaaclab_closed_loop.py`：
+
+- 在 IsaacLab 窗口中显式设置 `ISAACLAB_PATH=<--isaaclab-root>`。
+- 将 `<--isaaclab-root>/source/{isaaclab,isaaclab_assets,isaaclab_contrib,isaaclab_mimic,isaaclab_rl,isaaclab_tasks}` 放到 `PYTHONPATH` 最前面。
+- 启动前打印 `isaaclab.__file__`、`ISAACLAB_PATH`、`EXP_PATH`，以后从日志即可确认实际源码路径。
+
+无效污染 run 记录：
+
+```text
+/tmp/sonic_g1_v1_bc_unlock180_release150_60s_20260629_summary.json
+pass=false
+score=8.4043
+fall_frames=8
+nonfinite_samples=212
+```
+
+该 run 在自动解锁后出现运行时异常，且路径污染到原始 IsaacLab，不能作为自由根稳定性收益。
+
+### 修正路径后的有效重跑
+
+命令：
+
+```bash
+scripts/launch_sonic_local_isaaclab_closed_loop.py \
+  --session sonic_g1_v1_bc_unlock180_release150_fixedpath_20260629 \
+  --replace \
+  --no-attach \
+  --isaaclab-root /home/nolo/xiaoyang_IssacLab/IsaacLab-v1-free-root-20260629 \
+  --bvh-file ~/MCPM_20260526_190029.BVH \
+  --auto-unlock-after-packets 180 \
+  --post-unlock-rate-limit-release-steps 150 \
+  --metrics-duration-s 60 \
+  --metrics-startup-timeout-s 300 \
+  --metrics-summary-json /tmp/sonic_g1_v1_bc_unlock180_release150_fixedpath_60s_20260629_summary.json \
+  --metrics-samples-jsonl /tmp/sonic_g1_v1_bc_unlock180_release150_fixedpath_60s_20260629_samples.jsonl \
+  --zmq-port 6556 \
+  --debug-port 6557 \
+  --state-port 6560 \
+  --bvh-stream-port 12486
+```
+
+日志：
+
+```text
+/tmp/sonic_local_input_20260629_180556.log
+/tmp/sonic_local_isaaclab_20260629_180556.log
+/tmp/sonic_local_proxy_20260629_180556.log
+/tmp/sonic_local_deploy_20260629_180556.log
+/tmp/sonic_local_bvh_sender_20260629_180556.log
+/tmp/sonic_local_metrics_20260629_180556.log
+```
+
+路径与参数证据：
+
+```text
+[INFO][AppLauncher]: Loading experience file: /home/nolo/xiaoyang_IssacLab/IsaacLab-v1-free-root-20260629/apps/isaaclab.python.kit
+auto_unlock_after_packets=180
+post_unlock_target_limit=0.450
+post_unlock_release_steps=150
+field='last_action'
+```
+
+60s 结果：
+
+```text
+/tmp/sonic_g1_v1_bc_unlock180_release150_fixedpath_60s_20260629_summary.json
+pass=false
+score=17.1812
+samples=1174
+deploy_fps=50.0088
+isaac_fps=199.9685
+fall_frames=1070
+nonfinite_samples=0
+base_height_m.min=0.0629
+root_tilt_rad.max=1.8172
+root_tilt_rad.p95=1.6756
+joint_tracking_rmse_rad.mean=0.7572
+body_keypoint_rmse_m.mean=0.1345
+target_step_absmax_rad.max=0.4500
+target_step_absmax_rad.p95=0.3651
+root_yaw_error_rad.p95=1.1263
+```
+
+相对自由根 baseline：
+
+| 指标 | baseline | B+C fixedpath | 变化 |
+|---|---:|---:|---:|
+| score | `4.9499` | `17.1812` | `+12.2313` |
+| fall_frames | `1015` | `1070` | 变差 |
+| nonfinite_samples | `0` | `0` | 持平 |
+| base_height_m.min | `0.0672` | `0.0629` | 持平/略差 |
+| root_tilt_rad.max | `2.6747` | `1.8172` | 改善但仍摔倒 |
+| joint_tracking_rmse_rad.mean | `0.9119` | `0.7572` | 改善 |
+| body_keypoint_rmse_m.mean | `0.1615` | `0.1345` | 改善 |
+| target_step_absmax_rad.p95 | `0.4500` | `0.3651` | 改善 |
+| root_yaw_error_rad.p95 | `2.5068` | `1.1263` | 改善 |
+
+摔倒窗口：
+
+```text
+first_tilt>0.8: sample=100 deploy_index=255 height=0.5661 tilt=0.8394 target_step=0.1780
+first_height<0.55: sample=103 deploy_index=263 height=0.4721 tilt=0.7028 target_step=0.1967
+first_fall: sample=104 deploy_index=265 height=0.3976 tilt=0.8551 target_step=0.2020
+```
+
+结论：
+
+- 路径隔离修复是必要工程修复；否则 `--isaaclab-root` 会被 conda editable install 覆盖，回退验证不可信。
+- B+C 参数有局部收益：分数、tracking RMSE、body RMSE、root yaw、target step 均改善。
+- 但稳定性目标未达成：解锁后约 2s 内仍快速倾倒，`fall_frames=1070`。
+- 后续不应继续单纯堆 `auto_unlock_after_packets` / `post_unlock_release_steps`；需要针对解锁瞬间根姿态、支撑脚/下肢目标、自由根速度释放做新方案，并继续用自由根 metrics 做硬门槛。
+- `/tmp` 中可能并行存在旧调参日志；以后定位证据必须按端口组/session 匹配，不能只按最新 timestamp 取日志。
+
 ## 稳定性指标
 
 `collect_sonic_isaaclab_metrics.py` 订阅 `g1_debug` 和 `sonic_state`，每个样本记录：
