@@ -219,3 +219,7 @@ models/
 # Downloaded from HuggingFace (hf download)
 sample_data/
 sonic_release/
+MJDATA.TXT
+mjmodel.mjb
+MJMODEL.TXT
+mjmodel.xml

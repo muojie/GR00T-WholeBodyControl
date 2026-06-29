@@ -6,6 +6,8 @@
 
 这条路线使用 SONIC / GR00T 的 deploy、MuJoCo、ZMQ stream、MotionSequence 和 policy runtime，但不走 SONIC 原生 SMPL encoder 语义。
 
+> "不走 SONIC 原生 SMPL encoder 语义" 指不走 smpl encoder 分支（mode 2），**不等于不用 SONIC**。v1 仍跑在 SONIC 全套 deploy runtime 上：deploy 侧默认加载 `_encoder.onnx` + `_decoder.onnx`，按 `encoder_mode=g1`（mode 0）调用 SONIC **g1 encoder** 把 G1 joint 参考编码成 64 维 FSQ token，喂给 `g1_dyn` decoder policy（`token_state` 是 policy 必备观测，输入 436 维含 64 token）。v1 与 v3 的区别只是用 SONIC 的哪个 encoder——v1=g1（manager 侧 retarget 消化人体运动），v3=smpl（deploy 侧 smpl encoder 解释人体 pose）。真正能绕过 SONIC encoder 的只有 POSE protocol v4（外部直传 token），v1 用 protocol v1 不走。
+
 ```text
 BVH / canonical skeleton frame
   -> manager 侧 BVH/mocopi-to-G1 retarget
