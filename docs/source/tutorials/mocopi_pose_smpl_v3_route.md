@@ -375,6 +375,38 @@ gear_sonic/scripts/collect_sonic_mujoco_metrics.py \
 
 结论：第 3 项中的 foot/contact/slip 指标扩展完成；当前 MuJoCo 模型没有直接 floor contact pair，因此短期用 support-height 推断支撑脚做 smoke 指标。新的量化结果显示 foot slip / support drift 是下一轮自然度优化目标；多 BVH 自动回归汇总仍需单独做。
 
+### 2026-06-29 多 BVH 回归汇总脚本
+
+新增 `scripts/run_sonic_v3_mujoco_regression.py`，用于把多个 BVH 的 v3 MuJoCo 指标跑成统一 JSON/Markdown 表。默认 case 是：
+
+- `raynos_stable`：`/home/nolo/RAYNOS_Motion1.bvh`，`stable`，`12s`
+- `mcpm_stable`：`/home/nolo/MCPM_20260526_190029.BVH`，`stable`，`45s`
+
+真实运行：
+
+```bash
+scripts/run_sonic_v3_mujoco_regression.py \
+  --output-dir /tmp/sony_pose_v3_mujoco_regression
+```
+
+复用已有 summary 做聚合：
+
+```bash
+scripts/run_sonic_v3_mujoco_regression.py \
+  --from-summary raynos_stable=/tmp/sony_pose_v3_mujoco_raynos_foot_metrics_v4_summary.json \
+  --from-summary mcpm_stable=/tmp/sony_pose_v3_mujoco_mcpm_foot_metrics_45s_summary.json \
+  --output-dir /tmp/sony_pose_v3_mujoco_regression_existing
+```
+
+本次用已有 summary 验证聚合输出：
+
+| case | pass | vel max/p95 | rmse mean/p95 | tilt max | any/double support | floor L/R | slip max/p95 | drift max/p95 |
+|------|------|-------------|---------------|----------|--------------------|-----------|--------------|---------------|
+| `raynos_stable` | `true` | `29.50 / 16.42` | `0.748 / 1.076` | `0.151` | `1.00 / 0.31` | `0.00 / 0.00` | `5.18 / 3.49` | `0.557 / 0.370` |
+| `mcpm_stable` | `true` | `34.44 / 15.97` | `0.423 / 0.977` | `0.301` | `1.00 / 0.49` | `0.00 / 0.00` | `7.23 / 3.79` | `0.969 / 0.350` |
+
+结论：第 3 项量化指标和多 BVH 回归汇总入口已完成。下一项转向 IsaacLab v3 验证，重点补 MuJoCo 不能覆盖的 IsaacLab root/body state、policy 输出和场景稳定性。
+
 ### 2026-06-29 闭环启动记录
 
 以下是专用脚本落地前的手动启动记录，仅保留为排障证据；后续 v3 调优以 `scripts/launch_sonic_v3_tuning_closed_loop.py` 和 `6056/6057/6060/12403` 端口组为准。
