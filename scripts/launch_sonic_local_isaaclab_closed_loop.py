@@ -265,6 +265,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Pass --pose-root-yaw-only to mocap_manager_server.py for v3 anchor/root A/B tests.",
     )
     parser.add_argument("--mocap-log-interval-s", type=float, default=1.0)
+    parser.add_argument("--bvh-g1-max-joint-velocity", type=float, default=6.0)
+    parser.add_argument("--bvh-g1-max-joint-step", type=float, default=0.0)
+    parser.add_argument("--bvh-g1-joint-filter-alpha", type=float, default=0.45)
+    parser.add_argument("--bvh-g1-joint-delta-limit-scale", type=float, default=0.8)
 
     parser.add_argument("--lowstate-hz", type=float, default=500.0)
     parser.add_argument("--follow-alpha", type=float, default=0.35)
@@ -614,6 +618,18 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
         )
     if args.pose_filter_profile is not None:
         mocap_args.extend(["--pose-filter-profile", args.pose_filter_profile])
+    mocap_args.extend(
+        [
+            "--bvh-g1-max-joint-velocity",
+            str(args.bvh_g1_max_joint_velocity),
+            "--bvh-g1-max-joint-step",
+            str(args.bvh_g1_max_joint_step),
+            "--bvh-g1-joint-filter-alpha",
+            str(args.bvh_g1_joint_filter_alpha),
+            "--bvh-g1-joint-delta-limit-scale",
+            str(args.bvh_g1_joint_delta_limit_scale),
+        ]
+    )
     if args.pose_root_yaw_only:
         mocap_args.append("--pose-root-yaw-only")
     command = " && ".join(

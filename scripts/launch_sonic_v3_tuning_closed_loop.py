@@ -58,6 +58,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metrics-duration-s", type=float, default=60.0)
     parser.add_argument("--metrics-summary-json", type=Path)
     parser.add_argument("--metrics-samples-jsonl", type=Path)
+    parser.add_argument("--bvh-g1-max-joint-velocity", type=float, default=5.5)
+    parser.add_argument("--bvh-g1-max-joint-step", type=float, default=0.0)
+    parser.add_argument("--bvh-g1-joint-filter-alpha", type=float, default=0.45)
+    parser.add_argument("--bvh-g1-joint-delta-limit-scale", type=float, default=0.8)
     return parser
 
 
@@ -106,6 +110,14 @@ def _launcher_command(args: argparse.Namespace, extra_args: list[str]) -> list[s
         args.pose_filter_profile,
         "--bvh-g1-smpl-joints-source",
         "g1_fk",
+        "--bvh-g1-max-joint-velocity",
+        str(args.bvh_g1_max_joint_velocity),
+        "--bvh-g1-max-joint-step",
+        str(args.bvh_g1_max_joint_step),
+        "--bvh-g1-joint-filter-alpha",
+        str(args.bvh_g1_joint_filter_alpha),
+        "--bvh-g1-joint-delta-limit-scale",
+        str(args.bvh_g1_joint_delta_limit_scale),
         "--bvh-file",
         str(args.bvh_file),
         "--decoder",

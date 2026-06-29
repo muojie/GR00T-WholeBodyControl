@@ -163,7 +163,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--pose-window-size", type=int, default=80)
     parser.add_argument("--mocap-log-interval-s", type=float, default=1.0)
-    parser.add_argument("--bvh-g1-max-joint-velocity", type=float, default=6.0)
+    parser.add_argument("--bvh-g1-max-joint-velocity", type=float, default=5.5)
     parser.add_argument("--bvh-g1-max-joint-step", type=float, default=0.0)
     parser.add_argument("--bvh-g1-joint-filter-alpha", type=float, default=0.45)
     parser.add_argument("--bvh-g1-joint-delta-limit-scale", type=float, default=0.8)

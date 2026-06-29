@@ -243,6 +243,44 @@ top velocity joints：
 
 结论：指定 MCPM BVH 在 120s MuJoCo 中无 fall、无 NaN、无字段缺失，整体观感较上一轮明显更稳；剩余问题从上肢大峰值收敛为右膝单点窄峰值，超阈值约 `0.26 rad/s`。下一步可围绕 lower-body 速度峰值做小幅压制，而不是回退到 `responsive`。
 
+### 2026-06-29 MCPM lower-body 速度峰值压制
+
+对前一节 `right_knee_joint` 窄峰值做第一项优化：只把 v3 默认 `--bvh-g1-max-joint-velocity` 从 `6.0` 下调到 `5.5`，其余参数保持 `stable + root_yaw_only + g1_fk`。
+
+验证命令：
+
+```bash
+scripts/launch_sonic_v3_mujoco_closed_loop.py \
+  --replace \
+  --no-attach \
+  --onscreen \
+  --bvh-file /home/nolo/MCPM_20260526_190029.BVH \
+  --bvh-g1-max-joint-velocity 5.5 \
+  --metrics-duration-s 120 \
+  --metrics-startup-timeout-s 120 \
+  --metrics-no-per-joint-jsonl \
+  --metrics-summary-json /tmp/sony_pose_v3_mujoco_mcpm_v55_120s_summary.json \
+  --metrics-samples-jsonl /tmp/sony_pose_v3_mujoco_mcpm_v55_120s_samples.jsonl
+```
+
+| 指标 | `6.0` baseline | `5.5` optimized |
+|------|----------------|-----------------|
+| pass | `false` | `true` |
+| samples / elapsed | `5473 / 119.96 s` | `5641 / 120.00 s` |
+| deploy FPS | `50.01` | `50.00` |
+| fall frames | `0` | `0` |
+| nonfinite / missing fields | `0 / 0` | `0 / 0` |
+| root tilt max | `0.279 rad` | `0.135 rad` |
+| joint RMSE mean / p95 / max | `0.441 / 1.030 / 1.194 rad` | `0.303 / 0.364 / 0.489 rad` |
+| target step max | `0.408 rad` | `0.480 rad` |
+| target velocity max | `9.78 rad/s` | `23.22 rad/s` |
+| joint velocity max / p95 | `35.26 / 16.41 rad/s` | `14.21 / 2.72 rad/s` |
+| top velocity joint | `right_knee_joint` `35.26 rad/s` | `left_ankle_pitch_joint` `14.21 rad/s` |
+
+补充定位：`6.0` baseline 的右膝峰值帧中，右膝 target velocity 只有约 `0.144 rad/s`、target step 约 `0.003 rad`，因此它更像闭环响应尖峰，而不是输入 target 的单帧跳变。`5.5` 把该尖峰压掉后，右膝峰值降到 `4.60 rad/s`。
+
+结论：v3 专用默认值改为 `--bvh-g1-max-joint-velocity 5.5`；这一步完成了第一项 lower-body 速度峰值优化。
+
 ### 2026-06-29 闭环启动记录
 
 以下是专用脚本落地前的手动启动记录，仅保留为排障证据；后续 v3 调优以 `scripts/launch_sonic_v3_tuning_closed_loop.py` 和 `6056/6057/6060/12403` 端口组为准。
