@@ -170,7 +170,22 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--visual-servo-mode", type=int, choices=[0, 1], default=0)
     parser.add_argument("--self-collisions", type=int, choices=[0, 1], default=0)
     parser.add_argument("--stabilize-root", type=int, choices=[0, 1], default=1)
-    parser.add_argument("--target-rate-limit", type=float, default=0.04)
+    parser.add_argument("--target-rate-limit", type=float, default=0.05)
+    parser.add_argument(
+        "--post-unlock-target-rate-limit",
+        type=float,
+        default=0.45,
+        help=(
+            "optional IsaacLab target step clamp after U/auto-unlock; "
+            "0 keeps the historical fully raw post-unlock policy action release"
+        ),
+    )
+    parser.add_argument(
+        "--post-unlock-rate-limit-release-steps",
+        type=int,
+        default=50,
+        help="env control steps used to ramp from --target-rate-limit to post-unlock target limit",
+    )
     parser.add_argument(
         "--auto-unlock-after-packets",
         type=int,
@@ -449,6 +464,8 @@ def _isaaclab_command(args: argparse.Namespace) -> str:
         f"export SONIC_G1_SELF_COLLISIONS={_quote(args.self_collisions)}",
         f"export SONIC_DEPLOY_STABILIZE_ROOT={_quote(args.stabilize_root)}",
         f"export SONIC_DEPLOY_TARGET_RATE_LIMIT={_quote(args.target_rate_limit)}",
+        f"export SONIC_DEPLOY_POST_UNLOCK_TARGET_RATE_LIMIT={_quote(args.post_unlock_target_rate_limit)}",
+        f"export SONIC_DEPLOY_POST_UNLOCK_RATE_LIMIT_RELEASE_STEPS={_quote(args.post_unlock_rate_limit_release_steps)}",
         f"export SONIC_DEPLOY_AUTO_UNLOCK_AFTER_PACKETS={_quote(args.auto_unlock_after_packets)}",
     ]
     for env_item in args.isaac_env:
@@ -731,6 +748,9 @@ def main() -> None:
     if args.dry_run:
         _print_dry_run(args, commands)
         return
+
+    if args.replace and _tmux_session_exists(args.session):
+        _run(["tmux", "kill-session", "-t", args.session])
 
     _preflight(args)
     _launch_tmux(args, commands)
