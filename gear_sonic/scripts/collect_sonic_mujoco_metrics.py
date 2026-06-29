@@ -116,6 +116,7 @@ class MetricsAccumulator:
     def add(self, sample: dict[str, Any]) -> None:
         if self.started_at is None:
             self.started_at = float(sample["monotonic_time"])
+        sample["relative_time_s"] = float(sample["monotonic_time"]) - self.started_at
         self.ended_at = float(sample["monotonic_time"])
         if sample.pop("_nonfinite", False):
             self.nonfinite_samples += 1

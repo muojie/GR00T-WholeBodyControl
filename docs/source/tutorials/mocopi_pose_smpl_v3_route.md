@@ -407,6 +407,49 @@ scripts/run_sonic_v3_mujoco_regression.py \
 
 结论：第 3 项量化指标和多 BVH 回归汇总入口已完成。下一项转向 IsaacLab v3 验证，重点补 MuJoCo 不能覆盖的 IsaacLab root/body state、policy 输出和场景稳定性。
 
+### 2026-06-29 MuJoCo regression reliability and alpha=0.35 tuning
+
+按当前阶段安排，IsaacLab 暂停，先把 MuJoCo 默认线调稳。重新运行默认回归时，先暴露出两个 MuJoCo 工具层问题：
+
+- regression 脚本在连续运行 case 时，上一轮 tmux session 退出后 TCP `6156/6158` 端口可能还没完全释放，导致下一轮 preflight 假失败。
+- 当某个 case 启动失败时，Markdown 汇总读取缺失指标字段会 `KeyError`，从而掩盖真实失败原因。
+
+本轮修正：
+
+- `run_sonic_v3_mujoco_regression.py` 会在每个 case 前后等待 session 消失和 launcher 端口释放。
+- 失败 case 也能写入统一 JSON/Markdown 汇总，不再因缺失指标崩溃。
+- `collect_sonic_mujoco_metrics.py` 的 samples JSONL 新增 `relative_time_s`，便于直接定位 foot slip / support drift 峰值时间段。
+
+当前默认线复跑显示，`bvh_g1_joint_filter_alpha=0.45` 在 MCPM 45s 上有窄余量失败：
+
+| case | pass | failed checks | joint velocity max / p95 | RMSE mean / p95 | root tilt max | foot slip max / p95 | support drift max / p95 |
+|------|------|---------------|--------------------------|-----------------|---------------|---------------------|--------------------------|
+| RAYNOS default `0.45` | `true` | none | `33.36 / 18.58` | `0.512 / 0.866` | `0.209` | `6.13 / 4.50` | `0.663 / 0.498` |
+| MCPM default `0.45` | `false` | `support_foot_drift` | `27.10 / 15.33` | `0.459 / 1.017` | `0.305` | `7.29 / 3.79` | `1.016 / 0.406` |
+
+对 MCPM 45s 做小扫参：
+
+| candidate | pass | failed checks | joint velocity max / p95 | RMSE mean / p95 | root tilt max | foot slip max / p95 | support drift max / p95 | 结论 |
+|-----------|------|---------------|--------------------------|-----------------|---------------|---------------------|--------------------------|------|
+| `--bvh-g1-max-joint-velocity 5.0` | `false` | `foot_slip_speed`, `support_foot_drift` | `29.32 / 15.99` | `0.448 / 1.030` | `0.299` | `8.37 / 4.28` | `1.041 / 0.370` | 单纯压低速度上限会变差 |
+| `--bvh-g1-joint-filter-alpha 0.40` | `true` | none | `31.34 / 15.30` | `0.480 / 1.007` | `0.325` | `7.39 / 4.70` | `0.932 / 0.575` | 可过，但自然度和 RMSE 不如 `0.35` |
+| `--bvh-g1-joint-filter-alpha 0.35` | `true` | none | `26.27 / 15.03` | `0.416 / 0.929` | `0.276` | `6.42 / 3.45` | `0.906 / 0.322` | 当前最佳，默认采用 |
+
+因此 MuJoCo v3 默认 `--bvh-g1-joint-filter-alpha` 从 `0.45` 改为 `0.35`。新默认完整回归：
+
+```bash
+scripts/run_sonic_v3_mujoco_regression.py \
+  --output-dir /tmp/sony_pose_v3_mujoco_regression_mu_alpha035_default_20260629 \
+  --cleanup-timeout-s 30
+```
+
+| case | pass | joint velocity max / p95 | RMSE mean / p95 | root tilt max | any / double support | foot slip max / p95 | support drift max / p95 |
+|------|------|--------------------------|-----------------|---------------|----------------------|---------------------|--------------------------|
+| `raynos_stable` | `true` | `32.49 / 16.83` | `0.416 / 0.840` | `0.242` | `1.00 / 0.49` | `6.22 / 4.11` | `0.788 / 0.431` |
+| `mcpm_stable` | `true` | `32.98 / 16.27` | `0.436 / 0.962` | `0.335` | `1.00 / 0.50` | `7.25 / 3.84` | `0.949 / 0.359` |
+
+结论：MuJoCo 默认线恢复为两条默认 case 全通过；MCPM 的 `support_foot_drift` 从失败的 `1.016 m` 收到 `0.949 m`，且 samples 可直接用 `relative_time_s` 定位峰值。下一轮 MuJoCo 优化若继续推进，应优先扩展 BVH 覆盖和更长时长，而不是再单点压 `max_joint_velocity`。
+
 ### 2026-06-29 闭环启动记录
 
 以下是专用脚本落地前的手动启动记录，仅保留为排障证据；后续 v3 调优以 `scripts/launch_sonic_v3_tuning_closed_loop.py` 和 `6056/6057/6060/12403` 端口组为准。

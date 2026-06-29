@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
 import subprocess
 import sys
 import time
@@ -20,6 +21,11 @@ DEFAULT_CASES = [
     "name=raynos_stable,bvh=/home/nolo/RAYNOS_Motion1.bvh,duration=12,profile=stable",
     "name=mcpm_stable,bvh=/home/nolo/MCPM_20260526_190029.BVH,duration=45,profile=stable",
 ]
+DEFAULT_LAUNCHER_PORTS = {
+    "--zmq-port": 6156,
+    "--debug-port": 6157,
+    "--sim-metrics-port": 6158,
+}
 
 
 @dataclass(frozen=True)
@@ -58,6 +64,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session", default=DEFAULT_SESSION)
     parser.add_argument("--startup-timeout-s", type=float, default=120.0)
     parser.add_argument("--timeout-margin-s", type=float, default=180.0)
+    parser.add_argument("--cleanup-timeout-s", type=float, default=15.0)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--keep-sessions", action="store_true")
     return parser
@@ -101,6 +108,55 @@ def _safe_name(name: str) -> str:
 
 def _kill_session(session: str) -> None:
     subprocess.run(["tmux", "kill-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _tmux_session_exists(session: str) -> bool:
+    return (
+        subprocess.run(
+            ["tmux", "has-session", "-t", session],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode
+        == 0
+    )
+
+
+def _tcp_port_available(port: int) -> bool:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("0.0.0.0", int(port)))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def _forwarded_launcher_ports(extra_args: list[str]) -> list[int]:
+    ports = dict(DEFAULT_LAUNCHER_PORTS)
+    flags_without_metrics_port = {"--no-metrics", "--no-sim-metrics"}
+    idx = 0
+    while idx < len(extra_args):
+        item = extra_args[idx]
+        if item in ports and idx + 1 < len(extra_args):
+            try:
+                ports[item] = int(extra_args[idx + 1])
+            except ValueError:
+                pass
+            idx += 2
+            continue
+        idx += 1
+    if any(flag in extra_args for flag in flags_without_metrics_port):
+        ports.pop("--sim-metrics-port", None)
+    return sorted(set(ports.values()))
+
+
+def _wait_for_cleanup(session: str, ports: list[int], timeout_s: float) -> None:
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    while time.monotonic() < deadline:
+        if not _tmux_session_exists(session) and all(_tcp_port_available(port) for port in ports):
+            return
+        time.sleep(0.25)
 
 
 def _launch_command(
@@ -233,14 +289,14 @@ def _write_outputs(rows: list[dict[str, Any]], args: argparse.Namespace) -> None
                 [
                     str(row["name"]),
                     _fmt(row["pass"]),
-                    f"{_fmt(row['joint_velocity_max_radps'])}/{_fmt(row['joint_velocity_p95_radps'])}",
-                    f"{_fmt(row['joint_rmse_mean_rad'])}/{_fmt(row['joint_rmse_p95_rad'])}",
-                    _fmt(row["root_tilt_max_rad"]),
-                    f"{_fmt(row['any_foot_contact_ratio'])}/{_fmt(row['double_support_ratio'])}",
-                    f"{_fmt(row['left_floor_contact_ratio'])}/{_fmt(row['right_floor_contact_ratio'])}",
-                    f"{_fmt(row['foot_slip_max_mps'])}/{_fmt(row['foot_slip_p95_mps'])}",
-                    f"{_fmt(row['support_drift_max_m'])}/{_fmt(row['support_drift_p95_m'])}",
-                    ", ".join(row["failed_checks"]),
+                    f"{_fmt(row.get('joint_velocity_max_radps'))}/{_fmt(row.get('joint_velocity_p95_radps'))}",
+                    f"{_fmt(row.get('joint_rmse_mean_rad'))}/{_fmt(row.get('joint_rmse_p95_rad'))}",
+                    _fmt(row.get("root_tilt_max_rad")),
+                    f"{_fmt(row.get('any_foot_contact_ratio'))}/{_fmt(row.get('double_support_ratio'))}",
+                    f"{_fmt(row.get('left_floor_contact_ratio'))}/{_fmt(row.get('right_floor_contact_ratio'))}",
+                    f"{_fmt(row.get('foot_slip_max_mps'))}/{_fmt(row.get('foot_slip_p95_mps'))}",
+                    f"{_fmt(row.get('support_drift_max_m'))}/{_fmt(row.get('support_drift_p95_m'))}",
+                    ", ".join(row.get("failed_checks", [])),
                 ]
             )
             + " |"
@@ -265,6 +321,7 @@ def main(argv: list[str] | None = None) -> int:
             rows.append(_row_from_summary(name, path, summary))
     else:
         cases = [_parse_case(spec) for spec in (args.case or DEFAULT_CASES)]
+        launcher_ports = _forwarded_launcher_ports(extra_args)
         for case in cases:
             if not case.bvh.exists():
                 raise FileNotFoundError(f"BVH not found for case {case.name}: {case.bvh}")
@@ -276,6 +333,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.dry_run:
                 continue
             _kill_session(args.session)
+            _wait_for_cleanup(args.session, launcher_ports, args.cleanup_timeout_s)
             result = subprocess.run(cmd, cwd=REPO_ROOT, check=False)
             if result.returncode != 0:
                 rows.append(
@@ -288,6 +346,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if not args.keep_sessions:
                     _kill_session(args.session)
+                    _wait_for_cleanup(args.session, launcher_ports, args.cleanup_timeout_s)
                 continue
             try:
                 timeout_s = args.startup_timeout_s + case.duration_s + args.timeout_margin_s
@@ -296,6 +355,7 @@ def main(argv: list[str] | None = None) -> int:
             finally:
                 if not args.keep_sessions:
                     _kill_session(args.session)
+                    _wait_for_cleanup(args.session, launcher_ports, args.cleanup_timeout_s)
 
     if args.dry_run and not rows:
         return 0
