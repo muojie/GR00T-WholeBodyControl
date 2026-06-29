@@ -18,7 +18,7 @@
 
 1. 先验证数据契约：确认 `smpl_joints`、`smpl_pose`、`body_pos`、`body_quat_w`、`joint_pos`、`joint_vel` 的 shape、dtype、坐标系和 deploy parser 一致。
 2. 再验证 release observation：把 `smpl_joints_10frame_step1`、`smpl_anchor_orientation_10frame_step1`、`motion_joint_positions_wrists_10frame_step1` 单独量化，先解释离线差异。
-3. 再做闭环 A/B：同一 BVH 分别跑 v1/G1、v3 `stable`、v3 `responsive`、v3 `off`，优先用 MuJoCo 快速验证，再记录 IsaacLab 稳定性、动作保真度、root/yaw/height、wrist 差异和延迟。
+3. 再做闭环 A/B：同一 BVH 分别跑 v1/G1、v3 `stable`、v3 `balanced`、v3 `responsive`、v3 `off`，优先用 MuJoCo 快速验证，再记录 IsaacLab 稳定性、动作保真度、root/yaw/height、wrist 差异和延迟。
 4. 最后再调参数或代码：只有当前三层证据能说明瓶颈时，才改 filter profile、wrist 生成、anchor 处理或 sender/parser 逻辑。
 
 ### 验收门槛
@@ -280,6 +280,61 @@ scripts/launch_sonic_v3_mujoco_closed_loop.py \
 补充定位：`6.0` baseline 的右膝峰值帧中，右膝 target velocity 只有约 `0.144 rad/s`、target step 约 `0.003 rad`，因此它更像闭环响应尖峰，而不是输入 target 的单帧跳变。`5.5` 把该尖峰压掉后，右膝峰值降到 `4.60 rad/s`。
 
 结论：v3 专用默认值改为 `--bvh-g1-max-joint-velocity 5.5`；这一步完成了第一项 lower-body 速度峰值优化。
+
+### 2026-06-29 balanced profile 验证
+
+第二项优化新增 `balanced` profile，作为 `stable` 和 `responsive` 之间的可选响应档；默认仍保持 `stable`。第一版 balanced 过于靠近响应侧，MCPM 90s 虽然通过，但右膝峰值回到 `33.61 rad/s`、root tilt max 到 `0.289 rad`，因此收紧为：
+
+| 参数 | `stable` | `balanced` | `responsive` |
+|------|----------|------------|--------------|
+| `reference_alpha` | `0.35` | `0.45` | `0.75` |
+| `max_smpl_joint_speed_mps` | `1.2` | `1.6` | `3.5` |
+| `max_smpl_pose_speed_radps` | `3.0` | `4.0` | `10.0` |
+| `max_root_angular_speed_radps` | `2.5` | `3.2` | `7.0` |
+| `max_joint_speed_radps` | `4.0` | `5.5` | `14.0` |
+| `root_tilt_limit_rad` | `0.45` | `0.50` | `0.65` |
+
+MCPM 120s 最终验证：
+
+```bash
+scripts/launch_sonic_v3_mujoco_closed_loop.py \
+  --replace \
+  --no-attach \
+  --onscreen \
+  --bvh-file /home/nolo/MCPM_20260526_190029.BVH \
+  --pose-filter-profile balanced \
+  --metrics-duration-s 120 \
+  --metrics-startup-timeout-s 120 \
+  --metrics-no-per-joint-jsonl \
+  --metrics-summary-json /tmp/sony_pose_v3_mujoco_mcpm_balanced_v2_120s_summary.json \
+  --metrics-samples-jsonl /tmp/sony_pose_v3_mujoco_mcpm_balanced_v2_120s_samples.jsonl
+```
+
+RAYNOS 12s 响应性对照：
+
+```bash
+scripts/launch_sonic_v3_mujoco_closed_loop.py \
+  --replace \
+  --no-attach \
+  --onscreen \
+  --bvh-file /home/nolo/RAYNOS_Motion1.bvh \
+  --pose-filter-profile balanced \
+  --metrics-duration-s 12 \
+  --metrics-startup-timeout-s 120 \
+  --metrics-no-per-joint-jsonl \
+  --metrics-summary-json /tmp/sony_pose_v3_mujoco_raynos_balanced_summary.json \
+  --metrics-samples-jsonl /tmp/sony_pose_v3_mujoco_raynos_balanced_samples.jsonl
+```
+
+| case | pass | samples / elapsed | joint velocity max / p95 | target step max | target velocity max | joint RMSE mean / p95 | root tilt max | top velocity joint |
+|------|------|-------------------|--------------------------|-----------------|---------------------|-----------------------|---------------|--------------------|
+| MCPM `stable` 120s | `true` | `5641 / 120.00 s` | `14.21 / 2.72 rad/s` | `0.480 rad` | `23.22 rad/s` | `0.303 / 0.364 rad` | `0.135 rad` | `left_ankle_pitch_joint` `14.21 rad/s` |
+| MCPM `balanced` 120s | `true` | `5646 / 120.00 s` | `34.23 / 16.76 rad/s` | `0.272 rad` | `12.93 rad/s` | `0.456 / 1.036 rad` | `0.295 rad` | `left_ankle_pitch_joint` `34.23 rad/s` |
+| RAYNOS `stable` 12s | `true` | `571 / 12.00 s` | `28.77 / 15.52 rad/s` | `0.057 rad` | `2.71 rad/s` | `0.490 / 0.857 rad` | `0.174 rad` | `left_ankle_pitch_joint` `28.77 rad/s` |
+| RAYNOS `balanced` 12s | `true` | `575 / 11.99 s` | `26.44 / 16.94 rad/s` | `0.539 rad` | `25.93 rad/s` | `0.554 / 0.949 rad` | `0.290 rad` | `waist_yaw_joint` `26.44 rad/s` |
+| RAYNOS `responsive` 12s | `false` | `563 / 11.97 s` | `48.39 / 22.70 rad/s` | `0.880 rad` | `42.22 rad/s` | `0.660 / 0.991 rad` | `0.377 rad` | `right_shoulder_pitch_joint` `48.39 rad/s` |
+
+结论：`balanced` 可作为动态动作响应性对照档，RAYNOS 的 target step / target velocity 位于 `stable` 和 `responsive` 之间且不触发失败；但 MCPM 长跑的 RMSE、root tilt 和关节速度余量明显弱于 `stable`，因此不替代默认稳定档。后续多 BVH 回归中需要继续观察 `left_ankle_pitch_joint` 和腰 yaw 的单点峰值。
 
 ### 2026-06-29 闭环启动记录
 

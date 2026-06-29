@@ -83,6 +83,15 @@ POSE_FILTER_PROFILES = {
         "max_joint_speed_radps": 4.0,
         "root_tilt_limit_rad": 0.45,
     },
+    "balanced": {
+        "enable_reference_filter": True,
+        "reference_alpha": 0.45,
+        "max_smpl_joint_speed_mps": 1.6,
+        "max_smpl_pose_speed_radps": 4.0,
+        "max_root_angular_speed_radps": 3.2,
+        "max_joint_speed_radps": 5.5,
+        "root_tilt_limit_rad": 0.5,
+    },
     "responsive": {
         "enable_reference_filter": True,
         "reference_alpha": 0.75,
@@ -1067,11 +1076,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--pose-filter-profile",
-        choices=["stable", "responsive", "off"],
+        choices=sorted(POSE_FILTER_PROFILES.keys()),
         default="stable",
         help=(
-            "POSE reference filter preset. 'stable' is conservative, 'responsive' follows BVH "
-            "more closely, and 'off' sends raw references."
+            "POSE reference filter preset. 'stable' is conservative, 'balanced' trades less lag "
+            "for bounded speed, 'responsive' follows BVH more closely, and 'off' sends raw references."
         ),
     )
     parser.add_argument(

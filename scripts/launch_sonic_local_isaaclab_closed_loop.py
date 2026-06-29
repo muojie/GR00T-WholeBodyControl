@@ -256,7 +256,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--pose-filter-profile",
-        choices=["stable", "responsive", "off"],
+        choices=["stable", "balanced", "responsive", "off"],
         help="Optional POSE reference filter profile passed to mocap_manager_server.py.",
     )
     parser.add_argument(

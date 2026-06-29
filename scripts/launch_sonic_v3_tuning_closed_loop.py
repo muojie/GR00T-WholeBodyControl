@@ -47,7 +47,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bvh-file", type=Path, default=DEFAULT_BVH_FILE)
     parser.add_argument(
         "--pose-filter-profile",
-        choices=["stable", "responsive", "off"],
+        choices=["stable", "balanced", "responsive", "off"],
         default="stable",
     )
     parser.add_argument(
