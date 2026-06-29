@@ -280,6 +280,31 @@ recv_fps≈50 dropped=0
 | `root_z` | root 高度是否合理 |
 | `root_tilt` | 切入时 root 倾斜是否过大 |
 
+## IsaacLab MCPM 自由根对照
+
+2026-06-29 用 `~/MCPM_20260526_190029.BVH` 做同源对照后，确认一个关键边界：`--post-unlock-follow-base` 只能作为 BVH 轨迹/动作回放诊断，不能作为 POSE v1 自由根稳定性收益。
+
+同一 BVH 的量化结果：
+
+| 口径 | target field | pass | score | fall_frames | base_height_min | root_xy_trajectory_p95 | joint_rmse_mean |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 解锁后强制 root 跟随 BVH XYZ/yaw | `body_q_target` | true | 84.13 | 0 | 0.710m | 0.011m | 0.080rad |
+| 解锁后自由根物理闭环 | `last_action` | false | 0.00 | 1076 | 0.057m | 9.91m | 0.910rad |
+
+对应结果文件：
+
+```text
+/tmp/sonic_g1_v1_mcpm_traj_bodyq_90s_20260629_summary.json
+/tmp/sonic_g1_v1_mcpm_free_60s_20260629_summary.json
+```
+
+解释：
+
+- `MCPM_20260526_190029.BVH` 经 G1 retarget 后的 root 目标并不是原地踏步，而是先沿世界 `-Y` 前进约 `4.97m`，转身后回到约 `-1.92m`。
+- `--post-unlock-follow-base` 会在 IsaacLab 解锁后继续写 root XYZ/yaw，所以能验证“BVH 轨迹和动作是否被正确回放”。
+- 关闭 `--post-unlock-follow-base` 后，IsaacLab 才是当前要优化的自由根物理口径；这组在 60s 内 `fall_frames=1076`，说明机器人稳定行走仍未解决。
+- 后续报告 v1 稳定性时，必须优先看自由根口径的 `base_height`、`fall_frames`、`root_tilt`、`joint_rmse` 和 `root_xy_trajectory_error`，不能用 root 回放分数替代。
+
 ## 后续工作
 
 这条路线下一步应把 `bvh_stream_v1` 的 skeleton packet 抽象成 mocopi 实时输入也能复用的 canonical skeleton frame，并继续优化 wrist、root heading、脚踝/脚尖和速度限幅。
