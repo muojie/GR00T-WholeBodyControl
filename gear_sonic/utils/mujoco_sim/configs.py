@@ -66,6 +66,7 @@ def override_wbc_config(
     """Override WBC YAML values with dataclass values."""
     key_to_value = {
         "INTERFACE": config.interface,
+        "DOMAIN_ID": config.domain_id,
         "ENV_TYPE": config.env_type,
         "VERSION": config.wbc_version,
         "SIMULATOR": config.simulator,
@@ -126,6 +127,9 @@ class BaseConfig(ArgsConfigTemplate):
     # System Configuration
     interface: str = "sim"
     """Interface to use for the control loop. [sim, real, lo, enxe8ea6a9c4e09]"""
+
+    domain_id: int = 0
+    """Unitree DDS domain id used by the MuJoCo sim bridge."""
 
     simulator: str = "mujoco"
     """Simulator to use."""

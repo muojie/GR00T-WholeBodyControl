@@ -31,7 +31,7 @@ from pathlib import Path
 
 
 DEFAULT_SESSION = "sonic_local_isaaclab"
-DEFAULT_REPO_ROOT = Path.home() / "GR00T-WholeBodyControl"
+DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ISAACLAB_ROOT = Path.home() / "xiaoyang_IssacLab" / "IsaacLab"
 DEFAULT_BVH_FILE = Path.home() / "MCPM_20260526_190029.BVH"
 DEFAULT_TASK = "Isaac-SonicSolo-Locomanipulation-G1-v0"
@@ -239,6 +239,31 @@ def _build_parser() -> argparse.ArgumentParser:
         help="extra delay after deploy debug port is reachable before starting bvh_stream_sender",
     )
     parser.add_argument("--pose-window-size", type=int, default=80)
+    parser.add_argument(
+        "--sony-pose-line",
+        choices=["v1", "v3"],
+        default="v1",
+        help=(
+            "Sony/BVH POSE route. v1 keeps the validated G1 encoder line; "
+            "v3 enables the experimental SMPL encoder line explicitly."
+        ),
+    )
+    parser.add_argument(
+        "--bvh-g1-smpl-joints-source",
+        choices=["g1_fk", "skeleton"],
+        default="g1_fk",
+        help="SMPL joint source for --sony-pose-line v3; g1_fk is the validated geometry bridge.",
+    )
+    parser.add_argument(
+        "--pose-filter-profile",
+        choices=["stable", "responsive", "off"],
+        help="Optional POSE reference filter profile passed to mocap_manager_server.py.",
+    )
+    parser.add_argument(
+        "--pose-root-yaw-only",
+        action="store_true",
+        help="Pass --pose-root-yaw-only to mocap_manager_server.py for v3 anchor/root A/B tests.",
+    )
     parser.add_argument("--mocap-log-interval-s", type=float, default=1.0)
 
     parser.add_argument("--lowstate-hz", type=float, default=500.0)
@@ -517,6 +542,8 @@ def _deploy_command(args: argparse.Namespace) -> str:
         '"$DDS_INTERFACE"',
         _quote(_path_arg(args.decoder, deploy_root)),
         _quote(_path_arg(args.motion_data, deploy_root)),
+        "--domain-id",
+        _quote(args.domain_id),
         "--obs-config",
         _quote(_path_arg(args.obs_config, deploy_root)),
         "--encoder-file",
@@ -533,6 +560,10 @@ def _deploy_command(args: argparse.Namespace) -> str:
         _quote(args.zmq_topic),
         "--output-type",
         "all",
+        "--zmq-out-port",
+        _quote(args.debug_port),
+        "--zmq-out-topic",
+        _quote(args.debug_topic),
         "--disable-crc-check",
     ]
     command = " && ".join(
@@ -548,6 +579,8 @@ def _deploy_command(args: argparse.Namespace) -> str:
 
 def _mocap_manager_command(args: argparse.Namespace) -> str:
     python = args.repo_root / ".venv_teleop" / "bin" / "python"
+    pose_encoder_mode = "smpl" if args.sony_pose_line == "v3" else "g1"
+    pose_protocol_version = "3" if args.sony_pose_line == "v3" else "1"
     mocap_args = [
         python,
         "-u",
@@ -563,18 +596,31 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
         "--pose-window-size",
         str(args.pose_window_size),
         "--pose-encoder-mode",
-        "g1",
+        pose_encoder_mode,
         "--pose-protocol-version",
-        "1",
+        pose_protocol_version,
         "--zmq-port",
         str(args.zmq_port),
         "--log-interval-s",
         str(args.mocap_log_interval_s),
     ]
+    if args.sony_pose_line == "v3":
+        mocap_args.extend(
+            [
+                "--allow-sony-pose-v3",
+                "--bvh-g1-smpl-joints-source",
+                args.bvh_g1_smpl_joints_source,
+            ]
+        )
+    if args.pose_filter_profile is not None:
+        mocap_args.extend(["--pose-filter-profile", args.pose_filter_profile])
+    if args.pose_root_yaw_only:
+        mocap_args.append("--pose-root-yaw-only")
     command = " && ".join(
         [
             f"cd {_quote(args.repo_root)}",
             "export PYTHONUNBUFFERED=1",
+            f"export PYTHONPATH={_quote(args.repo_root)}:${{PYTHONPATH:-}}",
             " ".join(_quote(part) for part in mocap_args),
         ]
     )
@@ -604,6 +650,7 @@ def _bvh_sender_command(args: argparse.Namespace) -> str:
     command_parts = [
         f"cd {_quote(args.repo_root)}",
         "export PYTHONUNBUFFERED=1",
+        f"export PYTHONPATH={_quote(args.repo_root)}:${{PYTHONPATH:-}}",
     ]
     if not args.no_bvh_wait_for_debug:
         command_parts.append(
@@ -661,6 +708,7 @@ def _metrics_command(args: argparse.Namespace) -> str:
         [
             f"cd {_quote(args.repo_root)}",
             "export PYTHONUNBUFFERED=1",
+            f"export PYTHONPATH={_quote(args.repo_root)}:${{PYTHONPATH:-}}",
             " ".join(_quote(part) for part in metrics_args),
         ]
     )
