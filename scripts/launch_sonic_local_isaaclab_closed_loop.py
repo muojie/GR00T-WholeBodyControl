@@ -294,6 +294,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metrics-min-samples", type=int, default=30)
     parser.add_argument("--metrics-min-deploy-fps", type=float, default=15.0)
     parser.add_argument("--metrics-min-isaac-fps", type=float, default=15.0)
+    parser.add_argument(
+        "--metrics-ignore-root-yaw-error",
+        action="store_true",
+        help="ignore root yaw error in metrics, intended for root-locked diagnostics",
+    )
     parser.add_argument("--metrics-summary-json", type=Path)
     parser.add_argument("--metrics-samples-jsonl", type=Path)
     return parser
@@ -720,6 +725,8 @@ def _metrics_command(args: argparse.Namespace) -> str:
         "--samples-jsonl",
         samples_jsonl,
     ]
+    if args.metrics_ignore_root_yaw_error:
+        metrics_args.append("--ignore-root-yaw-error")
     command = " && ".join(
         [
             f"cd {_quote(args.repo_root)}",

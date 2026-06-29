@@ -435,6 +435,8 @@ scripts/run_sonic_v3_mujoco_regression.py \
 
 - 新 worktree 本地 symlink 复用原 worktree 的 `.venv_teleop`、`.venv_sim`；`gear_sonic_deploy/build`、`gear_sonic_deploy/target` 已切成本地目录；这些运行辅助只写入本地 `.git/info/exclude`，不进入分支。
 - 新 worktree 未带 release ONNX 大文件，闭环命令显式传原 worktree 的 decoder/encoder/planner ONNX 路径。
+- v3 wrapper 现在也会 local-first / original-fallback 解析 `sonic_unitree_lowstate_cpp_proxy`，避免新 worktree 复制构建产物。
+- 本机 `env_isaaclab` 中 Isaac Sim 5.1 pip 包存在，但预检时缺 `pxr`；已在本地环境补 `usd-core==25.11` 后，`teleop_se3_agent.py` 可以 headless 创建 `Isaac-SonicSolo-Locomanipulation-G1-v0` 并以约 `50 Hz` 运行。
 - IsaacLab 当前 `locomanipulation_g1_env_cfg.py` 已被瘦身，导致 `SonicSolo` 任务导入旧接口失败；已在 IsaacLab 侧做最小兼容：`SonicSolo` 自包含 SONIC robot/action/state publisher，Sonic 系列任务注册改为字符串 entrypoint，主配置只补回 `_env_flag`。
 
 已验证到的状态：
@@ -443,9 +445,59 @@ scripts/run_sonic_v3_mujoco_regression.py \
 - deploy 识别 SMPL encoder observation：`smpl_joints_10frame_step1`、`smpl_anchor_orientation_10frame_step1`、`motion_joint_positions_wrists_10frame_step1` 维度匹配，总 encoder dim `1762`。
 - IsaacLab `SonicSolo` 能完成环境 setup，并以约 `50 Hz` 发布 `sonic_state`。
 
-已知验证缺口：
+### 2026-06-29 IsaacLab v3 root-locked conservative 验证
 
-- v3 MuJoCo 已得到 final metrics JSON；IsaacLab v3 final metrics 仍未重跑。
+MuJoCo stable 通过后，第一轮 IsaacLab 真实闭环验证暴露出自由根解锁风险：
+
+- 默认 `auto_unlock_after_packets=100`、post-unlock target limit `0.45 rad/step` 时，MCPM 20s 中 unlock 后约 1s 内 `root_tilt` 拉到 `> 1 rad`，`joint_velocity_absmax` 撞到 `37 rad/s`，最终 `fall_frames=331`，`pass=false`。
+- 关闭自动 unlock 后，MCPM 20s 无 fall，base/root tilt 稳定，但 `target_rate_limit=0.05` 的 joint RMSE 仍偏高。
+- sweep 结果显示 `target_rate_limit=0.003` 是当前 conservative 档：动作更慢，但 20s gate 可过，且速度峰值明显低。
+
+因此 v3 专用 IsaacLab wrapper 采用 root-locked conservative 默认：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--auto-unlock-after-packets` | `0` | 默认不自动解锁 root；free-root 作为后续单独 A/B |
+| `--target-rate-limit` | `0.003` | IsaacLab action target step clamp |
+| `--post-unlock-target-rate-limit` | 默认等于 `--target-rate-limit` | 避免手动 unlock 后瞬时放宽到 `0.45` |
+| `--metrics-ignore-root-yaw-error` | root-locked 时自动打开 | locked-root 模式不把 root yaw 跟随当作失败项 |
+
+最终验证命令：
+
+```bash
+scripts/launch_sonic_v3_tuning_closed_loop.py \
+  --replace --no-attach --headless \
+  --zmq-port 7056 \
+  --debug-port 7057 \
+  --state-port 7060 \
+  --bvh-stream-port 12503 \
+  --bvh-file /home/nolo/MCPM_20260526_190029.BVH \
+  --pose-filter-profile stable \
+  --metrics-duration-s 20 \
+  --metrics-summary-json /tmp/sony_pose_v3_isaaclab_mcpm_20s_conservative_v2_summary.json \
+  --metrics-samples-jsonl /tmp/sony_pose_v3_isaaclab_mcpm_20s_conservative_v2_samples.jsonl
+```
+
+结果：
+
+| 指标 | 结果 |
+| --- | --- |
+| pass | `true` |
+| samples / elapsed | `391 / 19.95s` |
+| deploy / Isaac FPS | `50.02 / 199.93` |
+| fall / nonfinite / missing | `0 / 0 / 0` |
+| body keypoint RMSE mean / p95 | `0.040 / 0.061 m` |
+| joint tracking RMSE mean / p95 | `0.343 / 0.422 rad` |
+| joint velocity max / p95 | `2.62 / 1.06 rad/s` |
+| base height min / mean | `0.740 / 0.756 m` |
+| root tilt max | `0.0 rad` |
+| ignored checks | `root_yaw_error=true`，因为 root 被锁定 |
+
+结论：IsaacLab v3 已得到一个可复现的 root-locked conservative 稳定档，补上了 MuJoCo 无法覆盖的 IsaacLab root/body state、policy 输出和场景稳定性验证。下一步才进入 free-root unlock：需要逐步放开 root yaw/translation、post-unlock damping 和 target rate，而不是直接恢复 `auto_unlock_after_packets=100`。
+
+已知剩余缺口：
+
+- free-root unlock 仍未通过；当前 `0.45 rad/step` post-unlock 放宽会导致快速倾倒。
 - `gear_sonic_deploy/target/release/run_tests` 当前会查找硬编码目录 `reference/bones_072925_test/`，v3 worktree 无该测试数据，测试进程退出 `139`；本轮未为测试补数据目录。
 
 ## 定位

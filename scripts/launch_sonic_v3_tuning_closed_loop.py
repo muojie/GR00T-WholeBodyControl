@@ -58,6 +58,29 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metrics-duration-s", type=float, default=60.0)
     parser.add_argument("--metrics-summary-json", type=Path)
     parser.add_argument("--metrics-samples-jsonl", type=Path)
+    parser.add_argument(
+        "--target-rate-limit",
+        type=float,
+        default=0.003,
+        help="IsaacLab target step clamp for the v3 conservative root-locked validation profile",
+    )
+    parser.add_argument(
+        "--post-unlock-target-rate-limit",
+        type=float,
+        help="optional target step clamp after root unlock; defaults to --target-rate-limit",
+    )
+    parser.add_argument("--post-unlock-rate-limit-release-steps", type=int, default=50)
+    parser.add_argument(
+        "--auto-unlock-after-packets",
+        type=int,
+        default=0,
+        help="keep root locked by default; use a positive value to test free-root unlock",
+    )
+    parser.add_argument(
+        "--check-root-yaw-error",
+        action="store_true",
+        help="keep the root yaw error metric active even in the default root-locked profile",
+    )
     parser.add_argument("--bvh-g1-max-joint-velocity", type=float, default=5.5)
     parser.add_argument("--bvh-g1-max-joint-step", type=float, default=0.0)
     parser.add_argument("--bvh-g1-joint-filter-alpha", type=float, default=0.45)
@@ -66,6 +89,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _resolve_release_file(relative_path: str) -> Path:
+    local = REPO_ROOT / "gear_sonic_deploy" / relative_path
+    if local.exists():
+        return local
+
+    original = ORIGINAL_REPO_ROOT / "gear_sonic_deploy" / relative_path
+    if original.exists():
+        return original
+
+    return local
+
+
+def _resolve_proxy_bin() -> Path:
+    relative_path = "build/tools/sonic_unitree_lowstate_cpp_proxy"
     local = REPO_ROOT / "gear_sonic_deploy" / relative_path
     if local.exists():
         return local
@@ -86,6 +122,11 @@ def _default_metric_path(kind: str) -> Path:
 def _launcher_command(args: argparse.Namespace, extra_args: list[str]) -> list[str]:
     summary_json = args.metrics_summary_json or _default_metric_path("summary")
     samples_jsonl = args.metrics_samples_jsonl or _default_metric_path("samples")
+    post_unlock_target_rate_limit = (
+        args.target_rate_limit
+        if args.post_unlock_target_rate_limit is None
+        else args.post_unlock_target_rate_limit
+    )
 
     cmd = [
         str(REPO_ROOT / ".venv_teleop" / "bin" / "python"),
@@ -128,6 +169,16 @@ def _launcher_command(args: argparse.Namespace, extra_args: list[str]) -> list[s
         str(_resolve_release_file("planner/target_vel/V2/planner_sonic.onnx")),
         "--obs-config",
         str(_resolve_release_file("policy/release/observation_config.yaml")),
+        "--proxy-bin",
+        str(_resolve_proxy_bin()),
+        "--target-rate-limit",
+        str(args.target_rate_limit),
+        "--post-unlock-target-rate-limit",
+        str(post_unlock_target_rate_limit),
+        "--post-unlock-rate-limit-release-steps",
+        str(args.post_unlock_rate_limit_release_steps),
+        "--auto-unlock-after-packets",
+        str(args.auto_unlock_after_packets),
         "--metrics-duration-s",
         str(args.metrics_duration_s),
         "--metrics-summary-json",
@@ -135,6 +186,8 @@ def _launcher_command(args: argparse.Namespace, extra_args: list[str]) -> list[s
         "--metrics-samples-jsonl",
         str(samples_jsonl),
     ]
+    if args.auto_unlock_after_packets == 0 and not args.check_root_yaw_error:
+        cmd.append("--metrics-ignore-root-yaw-error")
     if args.replace:
         cmd.append("--replace")
     if args.no_attach:

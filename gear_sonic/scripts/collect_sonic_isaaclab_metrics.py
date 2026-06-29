@@ -142,6 +142,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-base-height-m", type=float, default=0.45)
     parser.add_argument("--max-root-tilt-rad", type=float, default=0.85)
     parser.add_argument("--max-root-yaw-error-rad", type=float, default=0.80)
+    parser.add_argument(
+        "--ignore-root-yaw-error",
+        action="store_true",
+        help="do not fail or score-penalize root yaw error, useful for root-locked diagnostics",
+    )
     parser.add_argument("--max-root-tilt-error-rad", type=float, default=0.45)
     parser.add_argument("--max-joint-rmse-rad", type=float, default=0.35)
     parser.add_argument("--max-body-rmse-m", type=float, default=0.25)
@@ -446,6 +451,7 @@ def _pass_fail(acc: MetricsAccumulator, args: argparse.Namespace) -> dict[str, A
     fall_frames = sum(1 for sample in samples if sample.get("fall_detected"))
     missing_field_samples = sum(1 for sample in samples if sample.get("missing_fields"))
 
+    ignore_root_yaw_error = bool(args.ignore_root_yaw_error)
     checks = {
         "enough_samples": len(samples) >= args.min_samples,
         "deploy_fps": deploy_fps >= args.min_deploy_fps,
@@ -455,7 +461,8 @@ def _pass_fail(acc: MetricsAccumulator, args: argparse.Namespace) -> dict[str, A
         "no_fall_detected": fall_frames == 0,
         "base_height": _stat_min(stats, "base_height_m") >= args.min_base_height_m,
         "root_tilt": _stat_max(stats, "root_tilt_rad") <= args.max_root_tilt_rad,
-        "root_yaw_error": _stat_p95(stats, "root_yaw_error_rad") <= args.max_root_yaw_error_rad,
+        "root_yaw_error": ignore_root_yaw_error
+        or _stat_p95(stats, "root_yaw_error_rad") <= args.max_root_yaw_error_rad,
         "root_tilt_error": _stat_p95(stats, "root_tilt_error_rad") <= args.max_root_tilt_error_rad,
         "joint_tracking_rmse": _stat_mean(stats, "joint_tracking_rmse_rad") <= args.max_joint_rmse_rad,
         "body_keypoint_rmse": _stat_mean(stats, "body_keypoint_rmse_m") <= args.max_body_rmse_m,
@@ -481,6 +488,9 @@ def _pass_fail(acc: MetricsAccumulator, args: argparse.Namespace) -> dict[str, A
             "joint RMSE, body RMSE, root tilt/yaw errors, joint velocity, target step, "
             "and joint-limit margin; higher is better."
         ),
+        "ignored_checks": {
+            "root_yaw_error": ignore_root_yaw_error,
+        },
         "elapsed_s": elapsed_s,
         "samples": len(samples),
         "deploy_fps": deploy_fps,
@@ -532,7 +542,9 @@ def _score_components(
         "nonfinite_or_missing": 20.0 if nonfinite_samples or missing_field_samples else 0.0,
         "joint_tracking": _penalty(_stat_mean(stats, "joint_tracking_rmse_rad"), args.max_joint_rmse_rad, 18.0),
         "body_keypoint": _penalty(_stat_mean(stats, "body_keypoint_rmse_m"), args.max_body_rmse_m, 22.0),
-        "root_yaw": _penalty(_stat_p95(stats, "root_yaw_error_rad"), args.max_root_yaw_error_rad, 8.0),
+        "root_yaw": 0.0
+        if args.ignore_root_yaw_error
+        else _penalty(_stat_p95(stats, "root_yaw_error_rad"), args.max_root_yaw_error_rad, 8.0),
         "root_tilt": _penalty(_stat_p95(stats, "root_tilt_error_rad"), args.max_root_tilt_error_rad, 8.0),
         "joint_velocity": _penalty(_stat_max(stats, "joint_velocity_absmax_radps"), args.max_joint_velocity_radps, 7.0),
         "target_step": _penalty(_stat_max(stats, "target_step_absmax_rad"), args.max_target_step_rad, 7.0),
