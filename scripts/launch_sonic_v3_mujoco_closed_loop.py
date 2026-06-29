@@ -154,7 +154,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pose-filter-profile",
         choices=["stable", "responsive", "off"],
-        default="responsive",
+        default="stable",
     )
     parser.add_argument(
         "--no-root-yaw-only",
@@ -163,6 +163,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--pose-window-size", type=int, default=80)
     parser.add_argument("--mocap-log-interval-s", type=float, default=1.0)
+    parser.add_argument("--bvh-g1-max-joint-velocity", type=float, default=6.0)
+    parser.add_argument("--bvh-g1-max-joint-step", type=float, default=0.0)
+    parser.add_argument("--bvh-g1-joint-filter-alpha", type=float, default=0.45)
+    parser.add_argument("--bvh-g1-joint-delta-limit-scale", type=float, default=0.8)
 
     parser.add_argument("--decoder", type=Path)
     parser.add_argument("--encoder", type=Path)
@@ -173,10 +177,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-metrics", action="store_true")
     parser.add_argument("--metrics-duration-s", type=float, default=45.0)
     parser.add_argument("--metrics-startup-timeout-s", type=float, default=180.0)
-    parser.add_argument("--metrics-sample-hz", type=float, default=20.0)
+    parser.add_argument("--metrics-warmup-s", type=float, default=2.0)
+    parser.add_argument("--metrics-sample-hz", type=float, default=60.0)
     parser.add_argument("--metrics-report-interval-s", type=float, default=2.0)
     parser.add_argument("--metrics-min-samples", type=int, default=30)
     parser.add_argument("--metrics-min-deploy-fps", type=float, default=15.0)
+    parser.add_argument("--metrics-max-joint-velocity-radps", type=float, default=35.0)
+    parser.add_argument("--metrics-max-joint-velocity-p95-radps", type=float, default=25.0)
+    parser.add_argument("--metrics-max-target-step-rad", type=float, default=1.25)
+    parser.add_argument("--metrics-max-target-velocity-radps", type=float, default=45.0)
+    parser.add_argument("--metrics-top-k-joints", type=int, default=5)
+    parser.add_argument("--metrics-no-per-joint-jsonl", action="store_true")
     parser.add_argument("--metrics-summary-json", type=Path)
     parser.add_argument("--metrics-samples-jsonl", type=Path)
 
@@ -296,6 +307,14 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
         "g1_fk",
         "--pose-filter-profile",
         args.pose_filter_profile,
+        "--bvh-g1-max-joint-velocity",
+        args.bvh_g1_max_joint_velocity,
+        "--bvh-g1-max-joint-step",
+        args.bvh_g1_max_joint_step,
+        "--bvh-g1-joint-filter-alpha",
+        args.bvh_g1_joint_filter_alpha,
+        "--bvh-g1-joint-delta-limit-scale",
+        args.bvh_g1_joint_delta_limit_scale,
         "--zmq-port",
         args.zmq_port,
         "--log-interval-s",
@@ -403,6 +422,8 @@ def _metrics_command(args: argparse.Namespace) -> str:
         args.metrics_duration_s,
         "--startup-timeout-s",
         args.metrics_startup_timeout_s,
+        "--warmup-s",
+        args.metrics_warmup_s,
         "--sample-hz",
         args.metrics_sample_hz,
         "--report-interval-s",
@@ -411,11 +432,23 @@ def _metrics_command(args: argparse.Namespace) -> str:
         args.metrics_min_samples,
         "--min-deploy-fps",
         args.metrics_min_deploy_fps,
+        "--max-joint-velocity-radps",
+        args.metrics_max_joint_velocity_radps,
+        "--max-joint-velocity-p95-radps",
+        args.metrics_max_joint_velocity_p95_radps,
+        "--max-target-step-rad",
+        args.metrics_max_target_step_rad,
+        "--max-target-velocity-radps",
+        args.metrics_max_target_velocity_radps,
+        "--top-k-joints",
+        args.metrics_top_k_joints,
         "--summary-json",
         args.metrics_summary_json,
         "--samples-jsonl",
         args.metrics_samples_jsonl,
     ]
+    if args.metrics_no_per_joint_jsonl:
+        metrics_args.append("--no-per-joint-jsonl")
     command = " && ".join(
         [
             f"cd {_quote(args.repo_root)}",

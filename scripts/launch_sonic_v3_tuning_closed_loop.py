@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -47,7 +48,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pose-filter-profile",
         choices=["stable", "responsive", "off"],
-        default="responsive",
+        default="stable",
     )
     parser.add_argument(
         "--no-root-yaw-only",

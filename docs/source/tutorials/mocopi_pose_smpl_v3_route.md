@@ -64,7 +64,7 @@ repo-local `scripts/launch_sonic_local_isaaclab_closed_loop.py` 已补显式 v3 
 ```bash
 .venv_teleop/bin/python scripts/launch_sonic_local_isaaclab_closed_loop.py \
   --sony-pose-line v3 \
-  --pose-filter-profile responsive \
+  --pose-filter-profile stable \
   --pose-root-yaw-only \
   --bvh-file /home/nolo/RAYNOS_Motion1.bvh
 ```
@@ -86,6 +86,12 @@ scripts/launch_sonic_v3_tuning_closed_loop.py --no-attach --headless
 ```
 
 该脚本固定 v3 语义并使用独立端口：
+
+默认 profile 已改为 `stable`。`responsive` 只作为显式 A/B 对照使用：
+
+```bash
+scripts/launch_sonic_v3_mujoco_closed_loop.py --pose-filter-profile responsive --no-attach
+```
 
 | 通道 | 端口 |
 |------|------|
@@ -158,6 +164,84 @@ scripts/launch_sonic_v3_mujoco_closed_loop.py \
 | pass | `false`，仅 `joint_velocity_peak` 未过阈值 `35 rad/s` |
 
 结论：MuJoCo 闭环已经跑通且端口/DDS domain 与当前 v1 会话隔离；v3 `responsive + root_yaw_only + g1_fk` 没有 fall、没有 NaN、没有字段缺失，但会出现关节速度峰值过高。下一步调优优先压低 v3 输出速度峰值，而不是继续排查启动链路。
+
+### 2026-06-29 MuJoCo 指标增强与 stable A/B
+
+`collect_sonic_mujoco_metrics.py` 已从全局 max 扩展为可定位指标：
+
+- 默认采样频率从 `20 Hz` 提到 `60 Hz`，降低 target step 因跳采样被放大的概率。
+- 新增 `warmup_s=2.0`，pass/fail 统计排除启动初始窗口跳变，但 samples 仍保留全量数据。
+- summary 记录 `joint_names_order`、`top_joints`、`deploy_index_delta`、`target_velocity_absmax_radps`。
+- samples JSONL 默认保留 per-joint 的 tracking / velocity / target-step / target-velocity 数组，便于事后定位。
+
+对比命令：
+
+```bash
+scripts/launch_sonic_v3_mujoco_closed_loop.py \
+  --replace \
+  --no-attach \
+  --pose-filter-profile stable \
+  --metrics-duration-s 12 \
+  --metrics-summary-json /tmp/sony_pose_v3_mujoco_stable_enhanced_summary.json \
+  --metrics-samples-jsonl /tmp/sony_pose_v3_mujoco_stable_enhanced_samples.jsonl
+
+scripts/launch_sonic_v3_mujoco_closed_loop.py \
+  --replace \
+  --no-attach \
+  --pose-filter-profile responsive \
+  --metrics-duration-s 12 \
+  --metrics-summary-json /tmp/sony_pose_v3_mujoco_responsive_warmup_summary.json \
+  --metrics-samples-jsonl /tmp/sony_pose_v3_mujoco_responsive_warmup_samples.jsonl
+```
+
+| profile | pass | samples / eval | joint velocity max / p95 | target step max | target velocity max | joint RMSE mean | root tilt max | 速度峰值 top joint |
+|---------|------|----------------|---------------------------|-----------------|---------------------|-----------------|---------------|--------------------|
+| `stable` | `true` | `571 / 475` | `28.77 / 15.52 rad/s` | `0.057 rad` | `2.71 rad/s` | `0.490 rad` | `0.174 rad` | `left_ankle_pitch_joint` |
+| `responsive` | `false` | `563 / 468` | `48.39 / 22.70 rad/s` | `0.880 rad` | `42.22 rad/s` | `0.660 rad` | `0.377 rad` | `right_shoulder_pitch_joint` |
+
+结论：`responsive` 在 warmup 后 target 侧不再触发阈值，但机器人实测速度仍由右肩 pitch 打穿 `35 rad/s`；`stable` 在同样 MuJoCo 窗口内所有 checks 通过，并且 joint RMSE / root tilt 也更低。因此 v3 专用启动脚本默认切到 `stable`，`responsive` 保留为显式对照。
+
+### 2026-06-29 MCPM BVH 120s MuJoCo 验证
+
+按用户指定动作文件验证优化后的 v3 默认线：
+
+```bash
+scripts/launch_sonic_v3_mujoco_closed_loop.py \
+  --replace \
+  --no-attach \
+  --onscreen \
+  --bvh-file /home/nolo/MCPM_20260526_190029.BVH \
+  --metrics-duration-s 120 \
+  --metrics-startup-timeout-s 120 \
+  --metrics-summary-json /tmp/sony_pose_v3_mujoco_mcpm_20260526_190029_summary.json \
+  --metrics-samples-jsonl /tmp/sony_pose_v3_mujoco_mcpm_20260526_190029_samples.jsonl
+```
+
+| 指标 | 结果 |
+|------|------|
+| profile | `stable + root_yaw_only + g1_fk` |
+| BVH | `/home/nolo/MCPM_20260526_190029.BVH`，`2561` frames，sender `50 FPS` loop |
+| samples / elapsed | `5473 / 119.96 s` |
+| eval samples | `5380`，`warmup_s=2.0` |
+| deploy FPS | `50.01` |
+| nonfinite / missing fields | `0 / 0` |
+| fall frames | `0` |
+| root tilt max | `0.279 rad` |
+| joint RMSE mean / p95 / max | `0.441 / 1.030 / 1.194 rad` |
+| target step max | `0.408 rad` |
+| target velocity max | `9.78 rad/s` |
+| joint velocity max / p95 | `35.26 / 16.41 rad/s` |
+| pass | `false`，仅 `joint_velocity_peak` 略高于 `35 rad/s` |
+
+top velocity joints：
+
+| joint | max |
+|-------|-----|
+| `right_knee_joint` | `35.26 rad/s` |
+| `left_knee_joint` | `30.50 rad/s` |
+| `left_ankle_pitch_joint` | `29.34 rad/s` |
+
+结论：指定 MCPM BVH 在 120s MuJoCo 中无 fall、无 NaN、无字段缺失，整体观感较上一轮明显更稳；剩余问题从上肢大峰值收敛为右膝单点窄峰值，超阈值约 `0.26 rad/s`。下一步可围绕 lower-body 速度峰值做小幅压制，而不是回退到 `responsive`。
 
 ### 2026-06-29 闭环启动记录
 
@@ -327,7 +411,7 @@ motion_joint_positions_wrists_10frame_step1
   --json-out /tmp/sony_pose_v3_release_eval_off.json
 ```
 
-当前建议：闭环 A/B 时不要只用默认 `stable`；至少并行测试 `responsive` 和 `off`。腕部差异需要等 PICO pose window 抓取后再决定是否让 Sony V3 runtime 使用 SMPL pose 投影 wrist 来替代 BVH->G1 retarget wrist。
+当前建议：闭环默认使用 `stable`，`responsive` 只在需要动作响应性对照时显式启用，`off` 仅保留为 raw reference 风险对照。腕部差异需要等 PICO pose window 抓取后再决定是否让 Sony V3 runtime 使用 SMPL pose 投影 wrist 来替代 BVH->G1 retarget wrist。
 
 ## 为什么暂停为独立研究线
 
