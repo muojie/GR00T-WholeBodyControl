@@ -76,6 +76,81 @@ metrics 额外输出：
 - `/tmp/sonic_local_metrics_samples_*.jsonl`
 - `/tmp/sonic_local_metrics_summary_*.json`
 
+## 2026-06-29 回退分支自由根 baseline
+
+在确认 `--post-unlock-follow-base` 属于 BVH 轨迹/动作回放口径、不能代表真实自由根稳定性后，基于错误方向之前的点新建分支重新验证：
+
+- GR00T 分支：`optimization/v1-free-root-stability-20260629`
+- IsaacLab worktree：`/home/nolo/xiaoyang_IssacLab/IsaacLab-v1-free-root-20260629`
+- IsaacLab 分支：`optimization/v1-free-root-stability-20260629`
+- BVH：`/home/nolo/MCPM_20260526_190029.BVH`
+- session：`sonic_g1_v1_free_baseline_20260629`
+
+dry-run 后执行：
+
+```bash
+scripts/launch_sonic_local_isaaclab_closed_loop.py \
+  --session sonic_g1_v1_free_baseline_20260629 \
+  --replace \
+  --no-attach \
+  --isaaclab-root /home/nolo/xiaoyang_IssacLab/IsaacLab-v1-free-root-20260629 \
+  --bvh-file ~/MCPM_20260526_190029.BVH \
+  --metrics-duration-s 60 \
+  --metrics-startup-timeout-s 300 \
+  --metrics-summary-json /tmp/sonic_g1_v1_free_baseline_60s_20260629_summary.json \
+  --metrics-samples-jsonl /tmp/sonic_g1_v1_free_baseline_60s_20260629_samples.jsonl \
+  --zmq-port 6356 \
+  --debug-port 6357 \
+  --state-port 6360 \
+  --bvh-stream-port 12466
+```
+
+本次日志：
+
+```text
+/tmp/sonic_local_input_20260629_172828.log
+/tmp/sonic_local_isaaclab_20260629_172828.log
+/tmp/sonic_local_proxy_20260629_172828.log
+/tmp/sonic_local_deploy_20260629_172828.log
+/tmp/sonic_local_bvh_sender_20260629_172828.log
+/tmp/sonic_local_metrics_20260629_172828.log
+```
+
+通路证据：
+
+- input 日志显示 `pose_protocol=v1`、`pose_encoder=g1`，`recv_fps≈50`、`pose=sent`，`dropped=0`。
+- deploy 日志持续显示 `Protocol version: 1`、`Requested encoder_mode: 0`、`active_protocol_version_=1`。
+- proxy 从 `src=synthetic` 切到 `src=isaac`，`isaac_state` 和 `lowcmd` 持续增长。
+- IsaacLab 显示 `field='last_action'`、`auto unlock after packet 100`、`root is now free`；未启用 root 回放。
+- 本次 baseline 结束后已清理 tmux session。
+
+失败证据：
+
+```text
+/tmp/sonic_g1_v1_free_baseline_60s_20260629_summary.json
+pass=false
+score=4.9499
+samples=1174
+elapsed_s=59.9856
+fall_frames=1015
+base_height_m.min=0.0672
+root_tilt_rad.max=2.6747
+root_yaw_error_rad.p95=2.5068
+joint_tracking_rmse_rad.mean=0.9119
+body_keypoint_rmse_m.mean=0.1615
+foot_keypoint_error_m.p95=0.6458
+hand_keypoint_error_m.p95=0.5834
+joint_velocity_absmax_radps.p95=37.0
+target_step_absmax_rad.p95=0.45
+```
+
+额外失败信号：
+
+- deploy 初期出现一次 `Safety reset: ZMQ streaming disabled, returned to reference motion at frame 0`。
+- 第 38 个 metrics sample 开始 `base_height_m < 0.55`；第 63 个 sample 开始 `root_tilt_rad > 0.8` 并触发 fall。
+
+结论：回退后的 G1 POSE v1 自由根 baseline 通路是连通的，但稳定性不合格；下一步优化必须以自由根口径为准，优先处理解锁后根姿态快速倾倒、关节跟踪 RMSE 和关节速度峰值，不再用 root 回放分数作为收益。
+
 ## 稳定性指标
 
 `collect_sonic_isaaclab_metrics.py` 订阅 `g1_debug` 和 `sonic_state`，每个样本记录：
