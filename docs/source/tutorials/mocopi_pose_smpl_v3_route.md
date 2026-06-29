@@ -495,9 +495,71 @@ scripts/launch_sonic_v3_tuning_closed_loop.py \
 
 结论：IsaacLab v3 已得到一个可复现的 root-locked conservative 稳定档，补上了 MuJoCo 无法覆盖的 IsaacLab root/body state、policy 输出和场景稳定性验证。下一步才进入 free-root unlock：需要逐步放开 root yaw/translation、post-unlock damping 和 target rate，而不是直接恢复 `auto_unlock_after_packets=100`。
 
+### 2026-06-29 IsaacLab v3 free-root unlock 对照
+
+在 root-locked conservative 档稳定后，继续用 `/home/nolo/MCPM_20260526_190029.BVH` 做 free-root 解锁 A/B。v3 wrapper 新增了以下实验参数，统一透传到 IsaacLab 环境变量或 metrics：
+
+| wrapper 参数 | IsaacLab / metrics 效果 |
+| --- | --- |
+| `--post-unlock-follow-base` | `SONIC_DEPLOY_POST_UNLOCK_FOLLOW_BASE=1`，解锁后用 deploy base target 写 root XYZ/yaw，用作诊断/视觉 replay |
+| `--post-unlock-damping-steps` | `SONIC_DEPLOY_POST_UNLOCK_DAMPING_STEPS` |
+| `--post-unlock-xy-velocity-scale` | `SONIC_DEPLOY_POST_UNLOCK_XY_VELOCITY_SCALE` |
+| `--post-unlock-z-velocity-scale` | `SONIC_DEPLOY_POST_UNLOCK_Z_VELOCITY_SCALE` |
+| `--post-unlock-angular-velocity-scale` | `SONIC_DEPLOY_POST_UNLOCK_ANGULAR_VELOCITY_SCALE` |
+| `--base-yaw-rate-limit` | `SONIC_DEPLOY_BASE_YAW_RATE_LIMIT` |
+| `--base-translation-rate-limit` | `SONIC_DEPLOY_BASE_TRANSLATION_RATE_LIMIT` |
+| `--ignore-root-yaw-error` | 显式追加 `--metrics-ignore-root-yaw-error` |
+
+对照结果：
+
+| case | pass | fall frames | root tilt max / p95 | base height min | joint velocity max / p95 | joint RMSE mean / p95 | 结论 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| conservative free-root，`auto_unlock_after_packets=100` | `false` | `327` | `2.209 / 2.187 rad` | `0.112 m` | `9.71 rad/s` / - | `0.487` / - | 即使 post-unlock target step 维持 `0.003`，解锁后仍倾倒，问题不是旧 `0.45 rad/step` 放宽尖峰 |
+| damping 400 steps，XYZ/angular velocity scale 均 `0.0` | `false` | `291` | `1.818 / 1.745 rad` | `0.060 m` | `16.88 rad/s` / - | `0.421` / - | 速度阻尼单独不足以让 free-root 动力学站稳 |
+| `--post-unlock-follow-base` | `false` | `0` | `0.016 rad` / - | `0.747 m` | `1.83 / 0.945 rad/s` | `0.337 / 0.408 rad` | 稳定性通过，只剩 root yaw gate 失败 |
+| `--post-unlock-follow-base --base-yaw-rate-limit 0.30` | `false` | `0` | 稳定 | 稳定 | 稳定 | 稳定 | yaw p95 反而变差，说明 yaw metric target 与 follow-base 写入参考不是同一语义 |
+| `--post-unlock-follow-base --ignore-root-yaw-error` | `true` | `0` | `0.0115 rad` / - | `0.747 m` | `1.98 / 0.99 rad/s` | `0.343 / 0.418 rad` | 作为 follow-base 诊断/视觉 replay 档通过 |
+
+最终 wrapper 验证命令：
+
+```bash
+scripts/launch_sonic_v3_tuning_closed_loop.py \
+  --replace --no-attach --headless \
+  --zmq-port 7556 \
+  --debug-port 7557 \
+  --state-port 7560 \
+  --bvh-stream-port 12553 \
+  --bvh-file /home/nolo/MCPM_20260526_190029.BVH \
+  --pose-filter-profile stable \
+  --metrics-duration-s 20 \
+  --metrics-summary-json /tmp/sony_pose_v3_isaaclab_mcpm_20s_followbase_wrapper_summary.json \
+  --metrics-samples-jsonl /tmp/sony_pose_v3_isaaclab_mcpm_20s_followbase_wrapper_samples.jsonl \
+  --auto-unlock-after-packets 100 \
+  --post-unlock-follow-base \
+  --ignore-root-yaw-error
+```
+
+最终 20s 结果：
+
+| 指标 | 结果 |
+| --- | --- |
+| pass | `true` |
+| samples / elapsed | `392 / 19.99s` |
+| deploy / Isaac FPS | `50.03 / 199.91` |
+| fall / nonfinite / missing | `0 / 0 / 0` |
+| body keypoint RMSE mean / p95 | `0.041 / 0.063 m` |
+| joint tracking RMSE mean / p95 | `0.343 / 0.418 rad` |
+| joint velocity max / p95 | `1.98 / 0.99 rad/s` |
+| base height min / mean | `0.747 / 0.760 m` |
+| root tilt max | `0.0115 rad` |
+| root yaw error p95 | `1.771 rad`，本 case 显式忽略 |
+
+结论：`post-unlock-follow-base` 已给 v3 一个可复现的 IsaacLab 诊断/视觉 replay 档，能稳定展示解锁后的 body/keypoint 跟随效果。但它不是纯 free-root 动力学通过，因为 root XYZ/yaw 在解锁后仍被 deploy base target 写入；真正 free-root 仍会摔倒，下一步要在 base-target yaw 对齐、root translation release、足端支撑/平衡控制之间继续拆分。
+
 已知剩余缺口：
 
-- free-root unlock 仍未通过；当前 `0.45 rad/step` post-unlock 放宽会导致快速倾倒。
+- 纯 PhysX free-root unlock 仍未通过；现在已排除“post-unlock target step 从 `0.003` 突然放宽到 `0.45`”作为唯一原因，速度阻尼单独也不够。
+- follow-base 诊断档的 root yaw metric 与写入参考不是同一语义，当前需要 `--ignore-root-yaw-error` 才能作为视觉 replay gate 通过。
 - `gear_sonic_deploy/target/release/run_tests` 当前会查找硬编码目录 `reference/bones_072925_test/`，v3 worktree 无该测试数据，测试进程退出 `139`；本轮未为测试补数据目录。
 
 ## 定位

@@ -81,6 +81,22 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="keep the root yaw error metric active even in the default root-locked profile",
     )
+    parser.add_argument(
+        "--ignore-root-yaw-error",
+        action="store_true",
+        help="force root yaw error to be ignored by metrics",
+    )
+    parser.add_argument(
+        "--post-unlock-follow-base",
+        action="store_true",
+        help="after unlock, write root XYZ/yaw from deploy base targets for diagnostic replay",
+    )
+    parser.add_argument("--post-unlock-damping-steps", type=int, default=0)
+    parser.add_argument("--post-unlock-xy-velocity-scale", type=float)
+    parser.add_argument("--post-unlock-z-velocity-scale", type=float)
+    parser.add_argument("--post-unlock-angular-velocity-scale", type=float)
+    parser.add_argument("--base-yaw-rate-limit", type=float)
+    parser.add_argument("--base-translation-rate-limit", type=float)
     parser.add_argument("--bvh-g1-max-joint-velocity", type=float, default=5.5)
     parser.add_argument("--bvh-g1-max-joint-step", type=float, default=0.0)
     parser.add_argument("--bvh-g1-joint-filter-alpha", type=float, default=0.45)
@@ -186,7 +202,33 @@ def _launcher_command(args: argparse.Namespace, extra_args: list[str]) -> list[s
         "--metrics-samples-jsonl",
         str(samples_jsonl),
     ]
-    if args.auto_unlock_after_packets == 0 and not args.check_root_yaw_error:
+    if args.post_unlock_follow_base:
+        cmd.extend(["--isaac-env", "SONIC_DEPLOY_POST_UNLOCK_FOLLOW_BASE=1"])
+    if args.post_unlock_damping_steps > 0:
+        cmd.extend(["--isaac-env", f"SONIC_DEPLOY_POST_UNLOCK_DAMPING_STEPS={args.post_unlock_damping_steps}"])
+    if args.post_unlock_xy_velocity_scale is not None:
+        cmd.extend([
+            "--isaac-env",
+            f"SONIC_DEPLOY_POST_UNLOCK_XY_VELOCITY_SCALE={args.post_unlock_xy_velocity_scale}",
+        ])
+    if args.post_unlock_z_velocity_scale is not None:
+        cmd.extend([
+            "--isaac-env",
+            f"SONIC_DEPLOY_POST_UNLOCK_Z_VELOCITY_SCALE={args.post_unlock_z_velocity_scale}",
+        ])
+    if args.post_unlock_angular_velocity_scale is not None:
+        cmd.extend([
+            "--isaac-env",
+            f"SONIC_DEPLOY_POST_UNLOCK_ANGULAR_VELOCITY_SCALE={args.post_unlock_angular_velocity_scale}",
+        ])
+    if args.base_yaw_rate_limit is not None:
+        cmd.extend(["--isaac-env", f"SONIC_DEPLOY_BASE_YAW_RATE_LIMIT={args.base_yaw_rate_limit}"])
+    if args.base_translation_rate_limit is not None:
+        cmd.extend([
+            "--isaac-env",
+            f"SONIC_DEPLOY_BASE_TRANSLATION_RATE_LIMIT={args.base_translation_rate_limit}",
+        ])
+    if args.ignore_root_yaw_error or (args.auto_unlock_after_packets == 0 and not args.check_root_yaw_error):
         cmd.append("--metrics-ignore-root-yaw-error")
     if args.replace:
         cmd.append("--replace")
