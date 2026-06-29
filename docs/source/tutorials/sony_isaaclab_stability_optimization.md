@@ -51,7 +51,7 @@ python scripts/launch_sonic_local_isaaclab_closed_loop.py \
 - `isaaclab`: 本机 IsaacLab `Isaac-SonicSolo-Locomanipulation-G1-v0`。
 - `proxy`: `sonic_unitree_lowstate_cpp_proxy`，从 `sonic_state` 转 DDS lowstate。
 - `deploy`: C++ `g1_deploy_onnx_ref`。
-- `bvh_sender`: `RAYNOS_Motion1.bvh` 循环发送。
+- `bvh_sender`: `MCPM_20260526_190029.BVH` 循环发送。
 - `metrics`: `collect_sonic_isaaclab_metrics.py`，生成 pass/fail 与 score。
 
 清理：
@@ -115,6 +115,8 @@ metrics 额外输出：
 - `--self-collisions`
 - `--stabilize-root`
 - `--target-rate-limit`
+- `--post-unlock-target-rate-limit`
+- `--post-unlock-rate-limit-release-steps`
 - `--follow-alpha`
 - `SONIC_DEPLOY_BASE_YAW_RATE_LIMIT`
 - `SONIC_DEPLOY_BASE_TRANSLATION_RATE_LIMIT`
@@ -144,6 +146,86 @@ score = 100 - weighted normalized penalties
 - proxy 日志出现 `src=isaac`，不是长期 `src=synthetic`。
 - IsaacLab 日志显示 `SonicRobotStatePublisher` 正常发布。
 - metrics summary `pass=true`，且 `score`、samples、deploy_fps、isaac_fps、RMSE、fall_frames 有明确数值。
+
+## 2026-06-29 解锁后目标软限幅优化记录
+
+本轮目标是提高 IsaacLab 内 `sonic_robot` 的稳定性和 BVH 动作还原分数，不改变 deploy wire format，仍保持：
+
+```text
+bvh_stream -> POSE v1 / encoder_mode=g1 -> deploy -> g1_debug -> IsaacLab last_action
+```
+
+### 代码改动
+
+| 仓库 | 提交 | 改动 |
+|---|---|---|
+| `GR00T-WholeBodyControl` | `86762e5` | `scripts/launch_sonic_local_isaaclab_closed_loop.py` 默认 `--target-rate-limit` 从 `0.04` 调整为 `0.05`；新增 `--post-unlock-target-rate-limit 0.45` 和 `--post-unlock-rate-limit-release-steps 50`；把两个新参数导出为 IsaacLab 环境变量；修正 `--replace` 时先 kill 同名 tmux session 再做端口 preflight，避免旧 session 占用 `5556/5557/5560` 时脚本自己启动失败。 |
+| `IsaacLab` | `d03824b60` | `SonicDeployTargetActionCfg` 新增 `post_unlock_target_rate_limit_rad_per_step` 和 `post_unlock_rate_limit_release_steps`；`SonicDeployTargetAction._apply_target_rate_limit()` 在 root 解锁或 unlock blend 期间从 startup limiter 线性释放到 post-unlock 上限；`locomanipulation_g1_env_cfg.py` 从 `SONIC_DEPLOY_POST_UNLOCK_TARGET_RATE_LIMIT` 和 `SONIC_DEPLOY_POST_UNLOCK_RATE_LIMIT_RELEASE_STEPS` 读取参数；初始化日志打印实际 limiter 配置。 |
+
+### 参数结论
+
+最终保留的组合：
+
+```text
+SONIC_DEPLOY_TARGET_RATE_LIMIT=0.05
+SONIC_DEPLOY_POST_UNLOCK_TARGET_RATE_LIMIT=0.45
+SONIC_DEPLOY_POST_UNLOCK_RATE_LIMIT_RELEASE_STEPS=50
+SONIC_DEPLOY_AUTO_UNLOCK_AFTER_PACKETS=100
+```
+
+解释：
+
+- root 锁定阶段仍需要限速，避免从默认站姿到 deploy 初始动作目标时出现大跳变。
+- 解锁后不能完全保留 `0.04` 级别的强限速，否则平衡环响应太慢。
+- 直接完全放开又会产生 `target_step` 尖峰；本轮用 `0.45 rad/step` 做 post-unlock 软上限。
+
+### 量化收益
+
+有效验证结果：
+
+```text
+/tmp/sonic_local_metrics_summary_20260629_103431.json
+pass=true
+score=80.39708534989424
+samples=1174
+deploy_fps=50.0116
+isaac_fps=199.9965
+fall_frames=0
+```
+
+相对上一轮有效 baseline `/tmp/sonic_local_metrics_summary_20260628_154348.json`：
+
+| 指标 | 旧值 | 新值 | 变化 |
+|---|---:|---:|---:|
+| score | `78.5018` | `80.3971` | `+1.8952` |
+| fall_frames | `0` | `0` | 持平 |
+| target_step_absmax_rad.max | `0.8095` | `0.4500` | 明显下降 |
+| joint_tracking_rmse_rad.mean | `0.18636` | `0.18608` | 基本持平 |
+| body_keypoint_rmse_m.mean | `0.01532` | `0.01564` | 基本持平 |
+| root_yaw_error_rad.p95 | `0.10049` | `0.09445` | 小幅改善 |
+| root_tilt_rad.max | `0.22625` | `0.37815` | 变差但仍未触发 fall |
+| joint_velocity_absmax_radps.max | `11.1824` | `13.8923` | 变差 |
+
+主要收益来自 `target_step` 扣分下降：
+
+```text
+target_step score penalty: 5.6667 -> 3.1500
+```
+
+### 失败 A/B 反证
+
+只保留 post-unlock 上限、但把 startup limiter 回退到 `0.04` 的验证失败：
+
+```text
+/tmp/sonic_local_metrics_summary_20260629_103732.json
+pass=false
+score=13.55135478285115
+fall_frames=1076
+base_height_min=0.0598m
+root_tilt_max=2.5940rad
+```
+
+结论：`0.45` post-unlock cap 不是单独收益，启动锁根阶段需要 `0.05` 让机器人在解锁前更接近 deploy target。后续若继续优化，不能只压低 limiter，需要同时看解锁瞬间的 root tilt、joint velocity 和 policy action 响应。
 
 ## 2026-06-28 本机验证记录
 
