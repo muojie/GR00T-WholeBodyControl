@@ -450,6 +450,49 @@ scripts/run_sonic_v3_mujoco_regression.py \
 
 结论：MuJoCo 默认线恢复为两条默认 case 全通过；MCPM 的 `support_foot_drift` 从失败的 `1.016 m` 收到 `0.949 m`，且 samples 可直接用 `relative_time_s` 定位峰值。下一轮 MuJoCo 优化若继续推进，应优先扩展 BVH 覆盖和更长时长，而不是再单点压 `max_joint_velocity`。
 
+### 2026-06-29 IsaacLab current-branch v3 smoke
+
+用户切换外部 IsaacLab 到 `sonic-pico-closed-loop` 后，基于该 HEAD 新建调试分支：
+
+```bash
+git -C /home/nolo/xiaoyang_IssacLab/IsaacLab switch -c optimization/v3-isaaclab-debug-20260629
+```
+
+本轮只做当前分支最小调通，不混入旧的 safety-assist/free-root 改动：
+
+- IsaacLab `SonicRobotStatePublisherAction` 发布包补 `root_pos_w`，让 `collect_sonic_isaaclab_metrics.py` 能计算 root height、tilt、body FK 和 joint tracking。
+- v3 wrapper 新增 `--isaac-target-field {body_q_target,last_action}`，默认 `body_q_target`。当前 IsaacLab root-locked 指标比较的是 deploy `body_q_target`，直接消费 `last_action` 会把 policy action 与 motion reference 混在一起，导致 joint RMSE 系统性偏高。
+- `--target-rate-limit` 仍保持 `0.003`。在 `body_q_target` 下，`0.006/0.01/0.02` 虽然能略降 joint RMSE，但会抬高 body RMSE、关节速度和高度代价，综合分数更低。
+
+对比烟测均使用 `/home/nolo/MCPM_20260526_190029.BVH`、`stable + root_yaw_only + g1_fk`、12s headless IsaacLab 闭环：
+
+| case | pass | score | fall / missing / nonfinite | joint RMSE mean / p95 | body RMSE mean / p95 | base height min | joint velocity p95 |
+|---|---|---:|---|---|---|---:|---:|
+| 缺 `root_pos_w` 初始包 | `false` | `8.000` | `0 / 237 / 237` | - | - | - | - |
+| `last_action + root_pos_w` | `false` | `76.664` | `0 / 0 / 0` | `0.357 / 0.474 rad` | `0.045 / 0.076 m` | `0.707 m` | `1.092 rad/s` |
+| 默认 `body_q_target + root_pos_w` | `true` | `83.349` | `0 / 0 / 0` | `0.193 / 0.302 rad` | `0.055 / 0.079 m` | `0.724 m` | `1.109 rad/s` |
+
+最终默认验证命令：
+
+```bash
+scripts/launch_sonic_v3_tuning_closed_loop.py \
+  --replace --no-attach --headless \
+  --bvh-file /home/nolo/MCPM_20260526_190029.BVH \
+  --metrics-duration-s 12 \
+  --metrics-summary-json /tmp/sony_pose_v3_isaaclab_default_after_summary.json \
+  --metrics-samples-jsonl /tmp/sony_pose_v3_isaaclab_default_after_samples.jsonl
+```
+
+结果：
+
+- summary：`/tmp/sony_pose_v3_isaaclab_default_after_summary.json`
+- IsaacLab log：`/tmp/sonic_local_isaaclab_20260629_233105.log`
+- 日志确认：`first target parsed field='body_q_target'`
+- samples：`235`，deploy/Isaac FPS `50.01 / 200.02`
+- 所有 checks 为 `true`，包括 `base_height`、`root_tilt`、`joint_tracking_rmse`、`body_keypoint_rmse`、`target_step_peak`。
+
+结论：基于用户当前 IsaacLab 分支的新调试分支，v3 root-locked 默认一键路径已从“协议字段缺失 + 目标字段错配”修到可量化通过。下一步应扩展到 20s/45s 与多 BVH IsaacLab 回归，再回到 free-root 解锁；当前不要再单纯放大 target rate。
+
 ### 2026-06-29 闭环启动记录
 
 以下是专用脚本落地前的手动启动记录，仅保留为排障证据；后续 v3 调优以 `scripts/launch_sonic_v3_tuning_closed_loop.py` 和 `6056/6057/6060/12403` 端口组为准。

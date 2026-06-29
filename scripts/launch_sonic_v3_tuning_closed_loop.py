@@ -70,6 +70,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="IsaacLab target step clamp for the v3 conservative root-locked validation profile",
     )
     parser.add_argument(
+        "--isaac-target-field",
+        choices=["body_q_target", "last_action"],
+        default="body_q_target",
+        help="deploy joint field consumed by IsaacLab; v3 metrics compare against body_q_target",
+    )
+    parser.add_argument(
         "--post-unlock-target-rate-limit",
         type=float,
         help="optional target step clamp after root unlock; defaults to --target-rate-limit",
@@ -227,6 +233,8 @@ def _launcher_command(args: argparse.Namespace, extra_args: list[str]) -> list[s
         str(samples_jsonl),
         "--metrics-root-yaw-reference",
         metrics_root_yaw_reference,
+        "--isaac-env",
+        f"SONIC_DEPLOY_TARGET_FIELD={args.isaac_target_field}",
     ]
     if args.post_unlock_follow_base:
         cmd.extend(["--isaac-env", "SONIC_DEPLOY_POST_UNLOCK_FOLLOW_BASE=1"])
