@@ -227,6 +227,80 @@ root_tilt_max=2.5940rad
 
 结论：`0.45` post-unlock cap 不是单独收益，启动锁根阶段需要 `0.05` 让机器人在解锁前更接近 deploy target。后续若继续优化，不能只压低 limiter，需要同时看解锁瞬间的 root tilt、joint velocity 和 policy action 响应。
 
+## 2026-06-29 端口一致性与 MCPM 长窗复验记录
+
+用户现场复核仍看到机器人摔倒后，复查发现有两类干扰源：
+
+1. `scripts/launch_sonic_local_isaaclab_closed_loop.py --debug-port ...` 只传给 IsaacLab、metrics 和 BVH wait，未传给 deploy；deploy 会回落到默认 `5557`，导致自定义端口验证可能接到旧 deploy 或 stale stream。
+2. 现场残留一个 `sonic_v3_tuning_20260629` tmux session，运行的是 `GR00T-WholeBodyControl-v3-tuning` 的 SMPL POSE v3 路线，并且 BVH 是 `RAYNOS_Motion1.bvh`，不是当前指定的 `~/MCPM_20260526_190029.BVH`。该 session 的 30s metrics 已经显示摔倒，不能作为当前 G1 POSE v1 路线结论。
+
+本轮工程修复：
+
+```text
+deploy command now passes:
+--zmq-out-port <debug_port>
+--zmq-out-topic <debug_topic>
+```
+
+因此 launcher 中 `--debug-port` / `--debug-topic` 会同时作用于 deploy、IsaacLab、metrics 和 BVH sender wait，端口不再分裂。
+
+本轮环境处理：
+
+```bash
+sudo -n sysctl -w fs.inotify.max_user_watches=1048576 \
+  fs.inotify.max_user_instances=1024 \
+  fs.inotify.max_queued_events=32768
+tmux kill-session -t sonic_v3_tuning_20260629
+```
+
+原因：Isaac Sim 日志中出现大量 `Failed to create change watch ... errno=28/No space left on device`，实际磁盘仍有空间，属于 inotify watcher 上限耗尽；同时 v3 残留 session 会占用端口和 GPU/CPU 资源并输出错误 BVH 的摔倒结果。
+
+复验命令：
+
+```bash
+python scripts/launch_sonic_local_isaaclab_closed_loop.py \
+  --session sonic_g1_v1_mcpm_20260629 \
+  --replace \
+  --no-attach \
+  --isaaclab-root /tmp/isaaclab-sonic-clean-20260629 \
+  --zmq-port 5956 \
+  --debug-port 5957 \
+  --state-port 5960 \
+  --bvh-stream-port 12392 \
+  --post-unlock-target-rate-limit 0.45 \
+  --post-unlock-rate-limit-release-steps 50 \
+  --metrics-duration-s 180 \
+  --metrics-report-interval-s 5 \
+  --metrics-summary-json /tmp/sonic_g1_v1_mcpm_180s_20260629_summary.json \
+  --metrics-samples-jsonl /tmp/sonic_g1_v1_mcpm_180s_20260629_samples.jsonl
+```
+
+链路证据：
+
+- `bvh_sender` 使用 `/home/nolo/MCPM_20260526_190029.BVH`，从 `source_frame=1` 开始发送。
+- deploy debug socket 绑定 `5957`，metrics 订阅 `tcp://127.0.0.1:5957/g1_debug`。
+- IsaacLab 日志显示 `auto unlock after packet 100; equivalent to operator pressing U`，解锁后继续运行。
+
+180s 结果：
+
+```text
+/tmp/sonic_g1_v1_mcpm_180s_20260629_summary.json
+pass=true
+score=81.35578393790246
+samples=3516
+deploy_fps=50.0022
+isaac_fps=200.0090
+fall_frames=0
+base_height_m.min=0.6599
+base_height_m.mean=0.7719
+root_tilt_rad.max=0.2765
+joint_tracking_rmse_rad.mean=0.1758
+body_keypoint_rmse_m.mean=0.01382
+target_step_absmax_rad.max=0.45
+```
+
+结论：在清理 v3 残留、修复 deploy debug port 传参、提高 inotify watcher 上限后，当前 G1 POSE v1 + MCPM BVH 路线 180s 长窗未复现摔倒。若后续用户仍在画面中看到摔倒，第一优先级不是继续盲目调 limiter，而是先确认实际 attach 的 tmux session、BVH 文件、端口组和 pose line 是否与上面的验证命令一致。
+
 ## 2026-06-28 本机验证记录
 
 本次验证命令：

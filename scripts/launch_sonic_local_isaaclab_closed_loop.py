@@ -533,6 +533,10 @@ def _deploy_command(args: argparse.Namespace) -> str:
         _quote(args.zmq_topic),
         "--output-type",
         "all",
+        "--zmq-out-port",
+        _quote(args.debug_port),
+        "--zmq-out-topic",
+        _quote(args.debug_topic),
         "--disable-crc-check",
     ]
     command = " && ".join(
