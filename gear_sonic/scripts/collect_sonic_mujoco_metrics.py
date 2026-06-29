@@ -55,6 +55,8 @@ PER_JOINT_KEYS = {
     "target_velocity_abs_radps": "target_velocity_abs_radps",
 }
 
+FOOT_SIDES = ("left", "right")
+
 
 @dataclass
 class TopicSubscriber:
@@ -131,6 +133,16 @@ class MetricsAccumulator:
         return max(0.0, self.ended_at - self.started_at)
 
 
+@dataclass
+class FootMetricState:
+    previous_sim_time_s: float | None = None
+    previous_positions: dict[str, np.ndarray] = field(default_factory=dict)
+    previous_contacts: dict[str, bool] = field(default_factory=lambda: {side: False for side in FOOT_SIDES})
+    support_anchors: dict[str, np.ndarray | None] = field(
+        default_factory=lambda: {side: None for side in FOOT_SIDES}
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Collect deploy-side closed-loop metrics for SONIC + MuJoCo.",
@@ -138,6 +150,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--deploy-endpoint", default="tcp://127.0.0.1:6157")
     parser.add_argument("--deploy-topic", default="g1_debug")
+    parser.add_argument("--sim-endpoint", help="Optional MuJoCo diagnostic ZMQ endpoint.")
+    parser.add_argument("--sim-topic", default="mujoco_metrics")
     parser.add_argument("--duration-s", type=float, default=45.0)
     parser.add_argument("--startup-timeout-s", type=float, default=180.0)
     parser.add_argument("--warmup-s", type=float, default=2.0)
@@ -161,6 +175,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-joint-velocity-p95-radps", type=float, default=25.0)
     parser.add_argument("--max-target-step-rad", type=float, default=1.25)
     parser.add_argument("--max-target-velocity-radps", type=float, default=45.0)
+    parser.add_argument("--max-sim-sample-age-s", type=float, default=0.5)
+    parser.add_argument("--max-foot-slip-speed-mps", type=float, default=8.0)
+    parser.add_argument("--max-support-foot-drift-m", type=float, default=1.0)
+    parser.add_argument("--foot-support-height-margin-m", type=float, default=0.04)
+    parser.add_argument("--min-any-foot-contact-ratio", type=float, default=0.05)
+    parser.add_argument("--max-no-foot-contact-ratio", type=float, default=0.95)
     return parser
 
 
@@ -218,8 +238,142 @@ def _joint_event(prefix: str, values: np.ndarray) -> dict[str, Any]:
     }
 
 
+def _bool_ratio(samples: list[dict[str, Any]], key: str) -> float | None:
+    values = [sample.get(key) for sample in samples if key in sample]
+    if not values:
+        return None
+    return float(sum(1 for value in values if bool(value)) / len(values))
+
+
+def _foot_metrics(
+    sim_msg: dict[str, Any] | None,
+    sim_receive_time: float | None,
+    now: float,
+    state: FootMetricState,
+    support_height_margin_m: float,
+) -> dict[str, Any]:
+    if sim_msg is None:
+        return {"sim_metrics_available": False}
+
+    feet = sim_msg.get("feet")
+    if not isinstance(feet, dict):
+        return {"sim_metrics_available": False, "sim_metrics_error": "missing feet"}
+
+    sim_time_s = _optional_float(sim_msg.get("sim_time_s"))
+    sim_dt_s = None
+    if sim_time_s is not None and state.previous_sim_time_s is not None:
+        sim_dt_s = max(0.0, sim_time_s - state.previous_sim_time_s)
+
+    out: dict[str, Any] = {
+        "sim_metrics_available": True,
+        "sim_time_s": sim_time_s,
+        "sim_sample_age_s": None if sim_receive_time is None else max(0.0, now - sim_receive_time),
+    }
+    root_pos = _array(sim_msg.get("root_pos"), (3,))
+    if root_pos is not None:
+        out["sim_root_height_m"] = float(root_pos[2])
+        out["sim_root_xy_m"] = root_pos[:2].tolist()
+
+    any_contact = False
+    contact_count = 0
+    slip_speeds: list[float] = []
+    support_drifts: list[float] = []
+    parsed_positions: dict[str, np.ndarray] = {}
+    parsed_contacts: dict[str, bool] = {}
+    parsed_floor_contacts: dict[str, bool] = {}
+    parsed_velocities: dict[str, np.ndarray | None] = {}
+
+    for side in FOOT_SIDES:
+        foot = feet.get(side)
+        if not isinstance(foot, dict):
+            out[f"{side}_foot_metrics_available"] = False
+            continue
+        pos = _array(foot.get("pos"), (3,))
+        if pos is None:
+            out[f"{side}_foot_metrics_available"] = False
+            continue
+        parsed_positions[side] = pos
+        parsed_floor_contacts[side] = bool(foot.get("floor_contact", False))
+        parsed_velocities[side] = _array(foot.get("vel_world"), (6,))
+
+    if parsed_positions:
+        min_foot_height = min(float(pos[2]) for pos in parsed_positions.values())
+        out["foot_support_height_threshold_m"] = min_foot_height + max(0.0, float(support_height_margin_m))
+    else:
+        min_foot_height = math.inf
+
+    for side in FOOT_SIDES:
+        pos = parsed_positions.get(side)
+        if pos is None:
+            continue
+
+        floor_contact = parsed_floor_contacts.get(side, False)
+        support_contact = floor_contact or (
+            math.isfinite(min_foot_height)
+            and float(pos[2]) <= min_foot_height + max(0.0, float(support_height_margin_m))
+        )
+        vel = parsed_velocities.get(side)
+        parsed_contacts[side] = support_contact
+        any_contact = any_contact or support_contact
+        contact_count += int(support_contact)
+
+        previous_pos = state.previous_positions.get(side)
+        delta_speed = None
+        if previous_pos is not None and sim_dt_s is not None and sim_dt_s > 1e-6:
+            delta_speed = float(np.linalg.norm((pos[:2] - previous_pos[:2]) / sim_dt_s))
+        velocity_speed = None
+        if vel is not None:
+            velocity_speed = float(np.linalg.norm(vel[:2]))
+        horizontal_speed = velocity_speed if velocity_speed is not None else delta_speed
+
+        if support_contact:
+            if not state.previous_contacts.get(side, False) or state.support_anchors.get(side) is None:
+                state.support_anchors[side] = pos[:2].copy()
+            anchor = state.support_anchors.get(side)
+            support_drift = 0.0 if anchor is None else float(np.linalg.norm(pos[:2] - anchor))
+            slip_speed = 0.0 if horizontal_speed is None else horizontal_speed
+        else:
+            state.support_anchors[side] = None
+            support_drift = 0.0
+            slip_speed = 0.0
+
+        slip_speeds.append(slip_speed)
+        support_drifts.append(support_drift)
+        out.update(
+            {
+                f"{side}_foot_height_m": float(pos[2]),
+                f"{side}_foot_floor_contact": floor_contact,
+                f"{side}_foot_support_contact": support_contact,
+                f"{side}_foot_horizontal_speed_mps": 0.0
+                if horizontal_speed is None
+                else float(horizontal_speed),
+                f"{side}_foot_slip_speed_mps": float(slip_speed),
+                f"{side}_support_foot_drift_m": float(support_drift),
+            }
+        )
+
+    state.previous_positions.update(parsed_positions)
+    state.previous_contacts.update(parsed_contacts)
+    if sim_time_s is not None:
+        state.previous_sim_time_s = sim_time_s
+
+    out.update(
+        {
+            "any_foot_contact": any_contact,
+            "double_support": contact_count == 2,
+            "no_foot_contact": contact_count == 0,
+            "foot_slip_speed_mps": float(max(slip_speeds)) if slip_speeds else None,
+            "support_foot_drift_m": float(max(support_drifts)) if support_drifts else None,
+        }
+    )
+    return out
+
+
 def _compute_sample(
     msg: dict[str, Any],
+    sim_msg: dict[str, Any] | None,
+    sim_receive_time: float | None,
+    foot_state: FootMetricState,
     previous_target_q: np.ndarray | None,
     previous_sample_time: float | None,
     previous_deploy_index: int | None,
@@ -255,6 +409,9 @@ def _compute_sample(
             "wall_time": time.time(),
             "deploy_index": _optional_int(msg.get("index")),
             "missing_fields": required_missing,
+            **_foot_metrics(
+                sim_msg, sim_receive_time, now, foot_state, args.foot_support_height_margin_m
+            ),
             "_nonfinite": True,
         }
 
@@ -317,6 +474,9 @@ def _compute_sample(
             "target_step_abs_rad": target_step_by_joint.tolist(),
             "target_velocity_abs_radps": target_velocity_by_joint.tolist(),
         },
+        **_foot_metrics(
+            sim_msg, sim_receive_time, now, foot_state, args.foot_support_height_margin_m
+        ),
     }
     sample["_nonfinite"] = any(
         isinstance(value, float) and not math.isfinite(value) for value in sample.values()
@@ -434,10 +594,34 @@ def _pass_fail(acc: MetricsAccumulator, args: argparse.Namespace) -> dict[str, A
             "target_step_absmax_rad",
             "target_velocity_absmax_radps",
             "deploy_index_delta",
+            "sim_sample_age_s",
+            "sim_root_height_m",
+            "left_foot_height_m",
+            "right_foot_height_m",
+            "foot_support_height_threshold_m",
+            "left_foot_horizontal_speed_mps",
+            "right_foot_horizontal_speed_mps",
+            "left_foot_slip_speed_mps",
+            "right_foot_slip_speed_mps",
+            "foot_slip_speed_mps",
+            "left_support_foot_drift_m",
+            "right_support_foot_drift_m",
+            "support_foot_drift_m",
         ]
     }
     fall_frames = sum(1 for sample in samples if sample.get("fall_detected"))
     missing_field_samples = sum(1 for sample in samples if sample.get("missing_fields"))
+    sim_requested = bool(args.sim_endpoint)
+    sim_eval_samples = [sample for sample in eval_samples if sample.get("sim_metrics_available")]
+    contact_ratios = {
+        "any_foot_contact": _bool_ratio(sim_eval_samples, "any_foot_contact"),
+        "double_support": _bool_ratio(sim_eval_samples, "double_support"),
+        "no_foot_contact": _bool_ratio(sim_eval_samples, "no_foot_contact"),
+        "left_foot_floor_contact": _bool_ratio(sim_eval_samples, "left_foot_floor_contact"),
+        "right_foot_floor_contact": _bool_ratio(sim_eval_samples, "right_foot_floor_contact"),
+        "left_foot_support_contact": _bool_ratio(sim_eval_samples, "left_foot_support_contact"),
+        "right_foot_support_contact": _bool_ratio(sim_eval_samples, "right_foot_support_contact"),
+    }
     checks = {
         "enough_samples": len(samples) >= args.min_samples,
         "deploy_fps": deploy_fps >= args.min_deploy_fps,
@@ -456,6 +640,42 @@ def _pass_fail(acc: MetricsAccumulator, args: argparse.Namespace) -> dict[str, A
         "target_step_peak": _stat_max(stats, "target_step_absmax_rad") <= args.max_target_step_rad,
         "target_velocity_peak": _stat_max(stats, "target_velocity_absmax_radps")
         <= args.max_target_velocity_radps,
+        "sim_metrics_available": (not sim_requested) or len(sim_eval_samples) > 0,
+        "sim_sample_fresh": (
+            (not sim_requested)
+            or (
+                stats["sim_sample_age_s"]["max"] is not None
+                and float(stats["sim_sample_age_s"]["max"]) <= args.max_sim_sample_age_s
+            )
+        ),
+        "foot_contact_observed": (
+            (not sim_requested)
+            or (
+                contact_ratios["any_foot_contact"] is not None
+                and contact_ratios["any_foot_contact"] >= args.min_any_foot_contact_ratio
+            )
+        ),
+        "no_foot_contact_ratio": (
+            (not sim_requested)
+            or (
+                contact_ratios["no_foot_contact"] is not None
+                and contact_ratios["no_foot_contact"] <= args.max_no_foot_contact_ratio
+            )
+        ),
+        "foot_slip_speed": (
+            (not sim_requested)
+            or (
+                stats["foot_slip_speed_mps"]["max"] is not None
+                and float(stats["foot_slip_speed_mps"]["max"]) <= args.max_foot_slip_speed_mps
+            )
+        ),
+        "support_foot_drift": (
+            (not sim_requested)
+            or (
+                stats["support_foot_drift_m"]["max"] is not None
+                and float(stats["support_foot_drift_m"]["max"]) <= args.max_support_foot_drift_m
+            )
+        ),
     }
     return {
         "pass": all(checks.values()),
@@ -468,6 +688,9 @@ def _pass_fail(acc: MetricsAccumulator, args: argparse.Namespace) -> dict[str, A
         "fall_frames": fall_frames,
         "nonfinite_samples": acc.nonfinite_samples,
         "missing_field_samples": missing_field_samples,
+        "sim_metrics_requested": sim_requested,
+        "sim_metrics_samples": len(sim_eval_samples),
+        "foot_contact_ratios": contact_ratios,
         "stats": stats,
         "joint_names_order": G1_MUJOCO_JOINT_NAMES,
         "top_joints": {
@@ -475,8 +698,10 @@ def _pass_fail(acc: MetricsAccumulator, args: argparse.Namespace) -> dict[str, A
             for label, key in PER_JOINT_KEYS.items()
         },
         "metric_scope": (
-            "deploy g1_debug stream; body_q/body_dq are read from MuJoCo LowState via DDS, "
-            "base_trans_measured is the deploy debug field"
+            "deploy g1_debug stream plus optional MuJoCo diagnostic stream; body_q/body_dq are "
+            "read from MuJoCo LowState via DDS, base_trans_measured is the deploy debug field, "
+            "and foot contact/slip metrics use MuJoCo body poses/contact pairs when sim metrics "
+            "are enabled"
         ),
     }
 
@@ -509,6 +734,14 @@ def _print_summary(label: str, summary: dict[str, Any]) -> None:
         "target_step_max": summary["stats"]["target_step_absmax_rad"]["max"],
         "target_velocity_max": summary["stats"]["target_velocity_absmax_radps"]["max"],
     }
+    if summary.get("sim_metrics_requested"):
+        compact.update(
+            {
+                "foot_slip_speed_max": summary["stats"]["foot_slip_speed_mps"]["max"],
+                "support_foot_drift_max": summary["stats"]["support_foot_drift_m"]["max"],
+                "any_foot_contact_ratio": summary["foot_contact_ratios"]["any_foot_contact"],
+            }
+        )
     print(f"[SonicMujocoMetrics] {json.dumps(compact, sort_keys=True)}", flush=True)
 
 
@@ -526,21 +759,26 @@ def main() -> int:
 
     ctx = zmq.Context()
     deploy_sub = TopicSubscriber(args.deploy_endpoint, args.deploy_topic, ctx)
+    sim_sub = TopicSubscriber(args.sim_endpoint, args.sim_topic, ctx) if args.sim_endpoint else None
     print(
         "[SonicMujocoMetrics] waiting for stream "
-        f"deploy={args.deploy_endpoint}/{args.deploy_topic}",
+        f"deploy={args.deploy_endpoint}/{args.deploy_topic}"
+        + ("" if sim_sub is None else f" sim={args.sim_endpoint}/{args.sim_topic}"),
         flush=True,
     )
 
     try:
         deadline = time.monotonic() + max(0.0, args.startup_timeout_s)
-        while deploy_sub.latest is None:
+        while deploy_sub.latest is None or (sim_sub is not None and sim_sub.latest is None):
             deploy_sub.poll()
+            if sim_sub is not None:
+                sim_sub.poll()
             if time.monotonic() >= deadline:
                 summary = {
                     "pass": False,
                     "reason": "startup_timeout",
                     "deploy_received": deploy_sub.received,
+                    "sim_received": None if sim_sub is None else sim_sub.received,
                 }
                 _write_json(args.summary_json, summary)
                 print(f"[SonicMujocoMetrics] {json.dumps(summary, sort_keys=True)}", flush=True)
@@ -555,15 +793,21 @@ def main() -> int:
         previous_index: int | None = None
         previous_target_q: np.ndarray | None = None
         previous_sample_time: float | None = None
+        foot_state = FootMetricState()
 
         while time.monotonic() < duration_deadline:
             deploy_sub.poll()
+            if sim_sub is not None:
+                sim_sub.poll()
             now = time.monotonic()
             if now >= next_sample_time and deploy_sub.latest is not None:
                 deploy_index = _optional_int(deploy_sub.latest.get("index"))
                 if previous_index != deploy_index:
                     sample = _compute_sample(
                         deploy_sub.latest,
+                        None if sim_sub is None else sim_sub.latest,
+                        None if sim_sub is None else sim_sub.last_receive_time,
+                        foot_state,
                         previous_target_q,
                         previous_sample_time,
                         previous_index,
@@ -588,6 +832,8 @@ def main() -> int:
         return 0 if summary["pass"] else 1
     finally:
         deploy_sub.close()
+        if sim_sub is not None:
+            sim_sub.close()
         ctx.term()
 
 

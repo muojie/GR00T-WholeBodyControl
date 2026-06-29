@@ -90,6 +90,9 @@ def override_wbc_config(
         "waist_pitch_limit": config.waist_pitch_limit,
         "hand_torque_limit": config.hand_torque_limit,
         "enable_natural_walk": config.enable_natural_walk,
+        "MUJOCO_METRICS_ZMQ_BIND": config.mujoco_metrics_zmq_bind,
+        "MUJOCO_METRICS_ZMQ_TOPIC": config.mujoco_metrics_zmq_topic,
+        "MUJOCO_METRICS_HZ": config.mujoco_metrics_hz,
     }
 
     if missed_keys_only:
@@ -208,6 +211,15 @@ class BaseConfig(ArgsConfigTemplate):
 
     enable_natural_walk: bool = False
     """Enable natural walk mode."""
+
+    mujoco_metrics_zmq_bind: str = ""
+    """Optional ZMQ PUB bind endpoint for MuJoCo-only diagnostic metrics."""
+
+    mujoco_metrics_zmq_topic: str = "mujoco_metrics"
+    """Topic prefix for MuJoCo diagnostic metrics."""
+
+    mujoco_metrics_hz: float = 50.0
+    """Publish frequency for MuJoCo diagnostic metrics."""
 
     # Teleop/Device Configuration
     body_control_device: str = "dummy"

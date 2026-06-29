@@ -15,14 +15,16 @@ import time
 from typing import Dict
 import xml.etree.ElementTree as ET
 
+import msgpack
 import mujoco
 import mujoco.viewer
 import numpy as np
 from scipy.spatial.transform import Rotation
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+import zmq
 
 from gear_sonic.utils.mujoco_sim.metric_utils import check_contact, check_height
-from gear_sonic.utils.mujoco_sim.sim_utils import get_subtree_body_names
+from gear_sonic.utils.mujoco_sim.sim_utils import get_body_geom_ids, get_subtree_body_names
 from gear_sonic.utils.mujoco_sim.unitree_sdk2py_bridge import ElasticBand, UnitreeSdk2Bridge
 from gear_sonic.utils.mujoco_sim.robot import Robot
 
@@ -62,6 +64,7 @@ class DefaultEnv:
         self.onscreen = onscreen
 
         self.init_scene()
+        self._init_mujoco_metrics_publisher()
         self.last_reward = 0
 
         self.offscreen = offscreen
@@ -523,6 +526,104 @@ class DefaultEnv:
             print(f"Warning: Self-collision detected: {contact_bodies}")
         return self_collision
 
+    def _init_mujoco_metrics_publisher(self):
+        self.mujoco_metrics_ctx = None
+        self.mujoco_metrics_socket = None
+        self.mujoco_metrics_topic = str(self.config.get("MUJOCO_METRICS_ZMQ_TOPIC", "mujoco_metrics"))
+        self.mujoco_metrics_period_s = 1.0 / max(
+            1e-6, float(self.config.get("MUJOCO_METRICS_HZ", 50.0))
+        )
+        self.next_mujoco_metrics_publish_s = 0.0
+        bind = str(self.config.get("MUJOCO_METRICS_ZMQ_BIND", "") or "")
+        if not bind:
+            return
+        self.mujoco_metrics_ctx = zmq.Context.instance()
+        self.mujoco_metrics_socket = self.mujoco_metrics_ctx.socket(zmq.PUB)
+        self.mujoco_metrics_socket.setsockopt(zmq.SNDHWM, 1)
+        self.mujoco_metrics_socket.bind(bind)
+        print(
+            f"[MuJoCoMetrics] publishing {self.mujoco_metrics_topic} on {bind} "
+            f"at {1.0 / self.mujoco_metrics_period_s:.1f} Hz"
+        )
+
+    def _body_floor_contact(self, body_name: str) -> tuple[bool, list[tuple[str, str]]]:
+        body_id = self.mj_model.body(body_name).id
+        body_geoms = set(get_body_geom_ids(self.mj_model, body_id))
+        contact_pairs: list[tuple[str, str]] = []
+        for i in range(self.mj_data.ncon):
+            contact = self.mj_data.contact[i]
+            if contact.geom1 not in body_geoms and contact.geom2 not in body_geoms:
+                continue
+            geom1 = self.mj_model.geom(contact.geom1)
+            geom2 = self.mj_model.geom(contact.geom2)
+            body1_name = self.mj_model.body(geom1.bodyid).name
+            body2_name = self.mj_model.body(geom2.bodyid).name
+            geom1_name = self.mj_model.geom(contact.geom1).name
+            geom2_name = self.mj_model.geom(contact.geom2).name
+            contact_pairs.append((body1_name, body2_name))
+            if geom1_name == "floor" or geom2_name == "floor" or body1_name == "world" or body2_name == "world":
+                return True, contact_pairs
+        return False, contact_pairs
+
+    def _body_velocity_world(self, body_name: str) -> np.ndarray:
+        velocity = np.zeros(6)
+        mujoco.mj_objectVelocity(
+            self.mj_model,
+            self.mj_data,
+            mujoco.mjtObj.mjOBJ_BODY,
+            self.mj_model.body(body_name).id,
+            velocity,
+            0,
+        )
+        return np.concatenate([velocity[3:6], velocity[0:3]])
+
+    def _mujoco_metrics_payload(self) -> dict:
+        left_foot_body = "left_ankle_roll_link"
+        right_foot_body = "right_ankle_roll_link"
+        left_contact, left_contact_pairs = self._body_floor_contact(left_foot_body)
+        right_contact, right_contact_pairs = self._body_floor_contact(right_foot_body)
+        root_body = self.root_body
+        return {
+            "wall_time": time.time(),
+            "monotonic_time": time.monotonic(),
+            "sim_time_s": float(self.mj_data.time),
+            "root_body": root_body,
+            "root_pos": self.mj_data.body(root_body).xpos.tolist(),
+            "root_quat_wxyz": self.mj_data.body(root_body).xquat.tolist(),
+            "root_vel_world": self._body_velocity_world(root_body).tolist(),
+            "feet": {
+                "left": {
+                    "body": left_foot_body,
+                    "pos": self.mj_data.body(left_foot_body).xpos.tolist(),
+                    "quat_wxyz": self.mj_data.body(left_foot_body).xquat.tolist(),
+                    "vel_world": self._body_velocity_world(left_foot_body).tolist(),
+                    "floor_contact": bool(left_contact),
+                    "contact_pairs": [list(pair) for pair in left_contact_pairs],
+                },
+                "right": {
+                    "body": right_foot_body,
+                    "pos": self.mj_data.body(right_foot_body).xpos.tolist(),
+                    "quat_wxyz": self.mj_data.body(right_foot_body).xquat.tolist(),
+                    "vel_world": self._body_velocity_world(right_foot_body).tolist(),
+                    "floor_contact": bool(right_contact),
+                    "contact_pairs": [list(pair) for pair in right_contact_pairs],
+                },
+            },
+        }
+
+    def publish_mujoco_metrics_if_due(self, now_s: float) -> None:
+        if self.mujoco_metrics_socket is None or now_s < self.next_mujoco_metrics_publish_s:
+            return
+        payload = self._mujoco_metrics_payload()
+        packed = msgpack.packb(payload, use_bin_type=True)
+        self.mujoco_metrics_socket.send(self.mujoco_metrics_topic.encode("utf-8") + packed)
+        self.next_mujoco_metrics_publish_s = now_s + self.mujoco_metrics_period_s
+
+    def close(self):
+        if self.mujoco_metrics_socket is not None:
+            self.mujoco_metrics_socket.close(0)
+            self.mujoco_metrics_socket = None
+
     def reset(self):
         mujoco.mj_resetData(self.mj_model, self.mj_data)
 
@@ -608,6 +709,7 @@ class BaseSimulator:
                 step_start = time.monotonic()
 
                 self.sim_env.sim_step()
+                self.sim_env.publish_mujoco_metrics_if_due(step_start)
                 now = time.time()
                 if now - ts > 1 / 10.0 and self.redis_client is not None:
                     head_pose = self.sim_env.get_head_pose()
@@ -649,6 +751,7 @@ class BaseSimulator:
                 self.sim_env.image_publish_process.stop()
             if self.sim_env.viewer is not None:
                 self.sim_env.viewer.close()
+            self.sim_env.close()
         except Exception as e:
             print(f"Warning during close: {e}")
 

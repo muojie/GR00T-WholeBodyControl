@@ -21,6 +21,7 @@ ORIGINAL_REPO_ROOT = Path.home() / "GR00T-WholeBodyControl"
 
 DEFAULT_ZMQ_PORT = 6156
 DEFAULT_DEBUG_PORT = 6157
+DEFAULT_SIM_METRICS_PORT = 6158
 DEFAULT_BVH_STREAM_PORT = 12413
 DEFAULT_DOMAIN_ID = 4
 
@@ -135,6 +136,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--zmq-port", type=int, default=DEFAULT_ZMQ_PORT)
     parser.add_argument("--debug-port", type=int, default=DEFAULT_DEBUG_PORT)
     parser.add_argument("--debug-topic", default="g1_debug")
+    parser.add_argument("--sim-metrics-port", type=int, default=DEFAULT_SIM_METRICS_PORT)
+    parser.add_argument("--sim-metrics-topic", default="mujoco_metrics")
+    parser.add_argument("--sim-metrics-hz", type=float, default=50.0)
+    parser.add_argument("--no-sim-metrics", action="store_true")
     parser.add_argument("--zmq-topic", default="pose")
     parser.add_argument("--bvh-stream-host", default="0.0.0.0")
     parser.add_argument("--bvh-stream-sender-host", default="127.0.0.1")
@@ -186,6 +191,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metrics-max-joint-velocity-p95-radps", type=float, default=25.0)
     parser.add_argument("--metrics-max-target-step-rad", type=float, default=1.25)
     parser.add_argument("--metrics-max-target-velocity-radps", type=float, default=45.0)
+    parser.add_argument("--metrics-max-sim-sample-age-s", type=float, default=0.5)
+    parser.add_argument("--metrics-max-foot-slip-speed-mps", type=float, default=8.0)
+    parser.add_argument("--metrics-max-support-foot-drift-m", type=float, default=1.0)
+    parser.add_argument("--metrics-foot-support-height-margin-m", type=float, default=0.04)
+    parser.add_argument("--metrics-min-any-foot-contact-ratio", type=float, default=0.05)
+    parser.add_argument("--metrics-max-no-foot-contact-ratio", type=float, default=0.95)
     parser.add_argument("--metrics-top-k-joints", type=int, default=5)
     parser.add_argument("--metrics-no-per-joint-jsonl", action="store_true")
     parser.add_argument("--metrics-summary-json", type=Path)
@@ -241,7 +252,10 @@ def _preflight(args: argparse.Namespace) -> None:
         if not path.exists():
             errors.append(f"{path_name.replace('_', '-')} not found: {path}")
     if not args.ignore_port_check:
-        busy_ports = [port for port in [args.zmq_port, args.debug_port] if not _port_is_available(port)]
+        ports_to_check = [args.zmq_port, args.debug_port]
+        if not args.no_metrics and not args.no_sim_metrics:
+            ports_to_check.append(args.sim_metrics_port)
+        busy_ports = [port for port in ports_to_check if not _port_is_available(port)]
         if busy_ports:
             errors.append("required TCP port(s) already in use: " + ", ".join(str(port) for port in busy_ports))
     if errors:
@@ -271,6 +285,17 @@ def _mujoco_command(args: argparse.Namespace) -> str:
     sim_args.append("--enable-onscreen" if args.onscreen else "--no-enable-onscreen")
     if args.offscreen:
         sim_args.append("--enable-offscreen")
+    if not args.no_metrics and not args.no_sim_metrics:
+        sim_args.extend(
+            [
+                "--mujoco-metrics-zmq-bind",
+                f"tcp://*:{args.sim_metrics_port}",
+                "--mujoco-metrics-zmq-topic",
+                args.sim_metrics_topic,
+                "--mujoco-metrics-hz",
+                args.sim_metrics_hz,
+            ]
+        )
     command = " && ".join(
         [
             f"cd {_quote(args.repo_root)}",
@@ -440,6 +465,18 @@ def _metrics_command(args: argparse.Namespace) -> str:
         args.metrics_max_target_step_rad,
         "--max-target-velocity-radps",
         args.metrics_max_target_velocity_radps,
+        "--max-sim-sample-age-s",
+        args.metrics_max_sim_sample_age_s,
+        "--max-foot-slip-speed-mps",
+        args.metrics_max_foot_slip_speed_mps,
+        "--max-support-foot-drift-m",
+        args.metrics_max_support_foot_drift_m,
+        "--foot-support-height-margin-m",
+        args.metrics_foot_support_height_margin_m,
+        "--min-any-foot-contact-ratio",
+        args.metrics_min_any_foot_contact_ratio,
+        "--max-no-foot-contact-ratio",
+        args.metrics_max_no_foot_contact_ratio,
         "--top-k-joints",
         args.metrics_top_k_joints,
         "--summary-json",
@@ -449,6 +486,15 @@ def _metrics_command(args: argparse.Namespace) -> str:
     ]
     if args.metrics_no_per_joint_jsonl:
         metrics_args.append("--no-per-joint-jsonl")
+    if not args.no_sim_metrics:
+        metrics_args.extend(
+            [
+                "--sim-endpoint",
+                f"tcp://127.0.0.1:{args.sim_metrics_port}",
+                "--sim-topic",
+                args.sim_metrics_topic,
+            ]
+        )
     command = " && ".join(
         [
             f"cd {_quote(args.repo_root)}",

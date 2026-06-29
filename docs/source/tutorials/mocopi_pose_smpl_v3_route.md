@@ -336,6 +336,45 @@ scripts/launch_sonic_v3_mujoco_closed_loop.py \
 
 结论：`balanced` 可作为动态动作响应性对照档，RAYNOS 的 target step / target velocity 位于 `stable` 和 `responsive` 之间且不触发失败；但 MCPM 长跑的 RMSE、root tilt 和关节速度余量明显弱于 `stable`，因此不替代默认稳定档。后续多 BVH 回归中需要继续观察 `left_ankle_pitch_joint` 和腰 yaw 的单点峰值。
 
+### 2026-06-29 MuJoCo foot metrics 扩展
+
+第三项优化先扩展闭环量化指标，而不是直接调 foot 参数。MuJoCo sim 进程新增可选 `mujoco_metrics` ZMQ topic，v3 专用 launcher 默认打开：
+
+```bash
+gear_sonic/scripts/run_sim_loop.py \
+  --mujoco-metrics-zmq-bind tcp://*:6158 \
+  --mujoco-metrics-zmq-topic mujoco_metrics \
+  --mujoco-metrics-hz 50
+```
+
+`collect_sonic_mujoco_metrics.py` 会同时订阅 deploy `g1_debug` 和 MuJoCo `mujoco_metrics`：
+
+```bash
+gear_sonic/scripts/collect_sonic_mujoco_metrics.py \
+  --deploy-endpoint tcp://127.0.0.1:6157 \
+  --deploy-topic g1_debug \
+  --sim-endpoint tcp://127.0.0.1:6158 \
+  --sim-topic mujoco_metrics
+```
+
+新增指标：
+
+- `sim_sample_age_s`：metrics 采样时 MuJoCo diagnostic sample 的年龄，默认要求 `<= 0.5 s`。
+- `left/right_foot_floor_contact`：MuJoCo contact pair 中足端 body 是否直接碰到 floor。
+- `left/right_foot_support_contact`：当前模型里 physical floor contact 始终为 `0`，因此另用“左右足端最低高度 + 0.04 m”推断支撑脚。
+- `foot_slip_speed_mps`：支撑脚水平速度的左右最大值，默认 smoke gate `<= 8.0 m/s`。
+- `support_foot_drift_m`：一次支撑段内足端水平位移，默认 smoke gate `<= 1.0 m`。
+- `foot_contact_ratios`：any contact、double support、no contact、左右 floor/support contact 比例。
+
+验证命令均使用默认 `stable + root_yaw_only + g1_fk + bvh_g1_max_joint_velocity=5.5`，且 `--metrics-no-per-joint-jsonl` 避免 `/tmp` 被 per-joint samples 写满。
+
+| case | pass | samples / FPS | joint velocity max / p95 | RMSE mean | root tilt max | any / double support | floor contact L/R | foot slip max / p95 | support drift max / p95 |
+|------|------|---------------|--------------------------|-----------|---------------|----------------------|-------------------|---------------------|--------------------------|
+| RAYNOS 12s | `true` | `561 / 50.00` | `29.50 / 16.42 rad/s` | `0.748 rad` | `0.151 rad` | `1.00 / 0.31` | `0.00 / 0.00` | `5.18 / 3.49 m/s` | `0.557 / 0.370 m` |
+| MCPM 45s | `true` | `2135 / 50.00` | `34.44 / 15.97 rad/s` | `0.423 rad` | `0.301 rad` | `1.00 / 0.49` | `0.00 / 0.00` | `7.23 / 3.79 m/s` | `0.969 / 0.350 m` |
+
+结论：第 3 项中的 foot/contact/slip 指标扩展完成；当前 MuJoCo 模型没有直接 floor contact pair，因此短期用 support-height 推断支撑脚做 smoke 指标。新的量化结果显示 foot slip / support drift 是下一轮自然度优化目标；多 BVH 自动回归汇总仍需单独做。
+
 ### 2026-06-29 闭环启动记录
 
 以下是专用脚本落地前的手动启动记录，仅保留为排障证据；后续 v3 调优以 `scripts/launch_sonic_v3_tuning_closed_loop.py` 和 `6056/6057/6060/12403` 端口组为准。
