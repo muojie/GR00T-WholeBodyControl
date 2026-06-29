@@ -59,6 +59,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metrics-summary-json", type=Path)
     parser.add_argument("--metrics-samples-jsonl", type=Path)
     parser.add_argument(
+        "--metrics-root-yaw-reference",
+        choices=["deploy_absolute", "base_relative"],
+        help="override the metrics root yaw gate reference; follow-base diagnostics default to base_relative",
+    )
+    parser.add_argument(
         "--target-rate-limit",
         type=float,
         default=0.003,
@@ -89,7 +94,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--post-unlock-follow-base",
         action="store_true",
-        help="after unlock, write root XYZ/yaw from deploy base targets for diagnostic replay",
+        help="after unlock, write root XY/yaw from deploy base targets for diagnostic replay",
     )
     parser.add_argument("--post-unlock-damping-steps", type=int, default=0)
     parser.add_argument("--post-unlock-xy-velocity-scale", type=float)
@@ -142,6 +147,9 @@ def _launcher_command(args: argparse.Namespace, extra_args: list[str]) -> list[s
         args.target_rate_limit
         if args.post_unlock_target_rate_limit is None
         else args.post_unlock_target_rate_limit
+    )
+    metrics_root_yaw_reference = args.metrics_root_yaw_reference or (
+        "base_relative" if args.post_unlock_follow_base else "deploy_absolute"
     )
 
     cmd = [
@@ -201,9 +209,13 @@ def _launcher_command(args: argparse.Namespace, extra_args: list[str]) -> list[s
         str(summary_json),
         "--metrics-samples-jsonl",
         str(samples_jsonl),
+        "--metrics-root-yaw-reference",
+        metrics_root_yaw_reference,
     ]
     if args.post_unlock_follow_base:
         cmd.extend(["--isaac-env", "SONIC_DEPLOY_POST_UNLOCK_FOLLOW_BASE=1"])
+        cmd.extend(["--isaac-env", "SONIC_DEPLOY_FOLLOW_BASE_YAW=1"])
+        cmd.extend(["--isaac-env", "SONIC_DEPLOY_FOLLOW_BASE_TRANSLATION=1"])
     if args.post_unlock_damping_steps > 0:
         cmd.extend(["--isaac-env", f"SONIC_DEPLOY_POST_UNLOCK_DAMPING_STEPS={args.post_unlock_damping_steps}"])
     if args.post_unlock_xy_velocity_scale is not None:

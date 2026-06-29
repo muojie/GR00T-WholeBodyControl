@@ -295,6 +295,21 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metrics-min-deploy-fps", type=float, default=15.0)
     parser.add_argument("--metrics-min-isaac-fps", type=float, default=15.0)
     parser.add_argument(
+        "--metrics-root-yaw-reference",
+        choices=["deploy_absolute", "base_relative"],
+        default="deploy_absolute",
+        help=(
+            "root yaw reference used by the metrics gate. base_relative is intended for "
+            "follow-base diagnostic replay, where deploy base yaw is interpreted as a delta"
+        ),
+    )
+    parser.add_argument(
+        "--metrics-base-relative-translation-scale",
+        type=float,
+        default=2.0,
+        help="XY scale used by metrics base_relative root translation diagnostics",
+    )
+    parser.add_argument(
         "--metrics-ignore-root-yaw-error",
         action="store_true",
         help="ignore root yaw error in metrics, intended for root-locked diagnostics",
@@ -720,6 +735,10 @@ def _metrics_command(args: argparse.Namespace) -> str:
         str(args.metrics_min_deploy_fps),
         "--min-isaac-fps",
         str(args.metrics_min_isaac_fps),
+        "--root-yaw-reference",
+        args.metrics_root_yaw_reference,
+        "--base-relative-translation-scale",
+        str(args.metrics_base_relative_translation_scale),
         "--summary-json",
         summary_json,
         "--samples-jsonl",

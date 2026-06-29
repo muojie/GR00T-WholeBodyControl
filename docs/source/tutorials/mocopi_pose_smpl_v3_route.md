@@ -501,13 +501,14 @@ scripts/launch_sonic_v3_tuning_closed_loop.py \
 
 | wrapper 参数 | IsaacLab / metrics 效果 |
 | --- | --- |
-| `--post-unlock-follow-base` | `SONIC_DEPLOY_POST_UNLOCK_FOLLOW_BASE=1`，解锁后用 deploy base target 写 root XYZ/yaw，用作诊断/视觉 replay |
+| `--post-unlock-follow-base` | `SONIC_DEPLOY_POST_UNLOCK_FOLLOW_BASE=1`，并打开 `SONIC_DEPLOY_FOLLOW_BASE_YAW=1` / `SONIC_DEPLOY_FOLLOW_BASE_TRANSLATION=1`，解锁后用 deploy base target 写 root XY/yaw，用作诊断/视觉 replay |
 | `--post-unlock-damping-steps` | `SONIC_DEPLOY_POST_UNLOCK_DAMPING_STEPS` |
 | `--post-unlock-xy-velocity-scale` | `SONIC_DEPLOY_POST_UNLOCK_XY_VELOCITY_SCALE` |
 | `--post-unlock-z-velocity-scale` | `SONIC_DEPLOY_POST_UNLOCK_Z_VELOCITY_SCALE` |
 | `--post-unlock-angular-velocity-scale` | `SONIC_DEPLOY_POST_UNLOCK_ANGULAR_VELOCITY_SCALE` |
 | `--base-yaw-rate-limit` | `SONIC_DEPLOY_BASE_YAW_RATE_LIMIT` |
 | `--base-translation-rate-limit` | `SONIC_DEPLOY_BASE_TRANSLATION_RATE_LIMIT` |
+| `--metrics-root-yaw-reference base_relative` | metrics 用“首帧 robot yaw + deploy base yaw delta”作为 root yaw gate，匹配 follow-base 诊断语义 |
 | `--ignore-root-yaw-error` | 显式追加 `--metrics-ignore-root-yaw-error` |
 
 对照结果：
@@ -518,25 +519,26 @@ scripts/launch_sonic_v3_tuning_closed_loop.py \
 | damping 400 steps，XYZ/angular velocity scale 均 `0.0` | `false` | `291` | `1.818 / 1.745 rad` | `0.060 m` | `16.88 rad/s` / - | `0.421` / - | 速度阻尼单独不足以让 free-root 动力学站稳 |
 | `--post-unlock-follow-base` | `false` | `0` | `0.016 rad` / - | `0.747 m` | `1.83 / 0.945 rad/s` | `0.337 / 0.408 rad` | 稳定性通过，只剩 root yaw gate 失败 |
 | `--post-unlock-follow-base --base-yaw-rate-limit 0.30` | `false` | `0` | 稳定 | 稳定 | 稳定 | 稳定 | yaw p95 反而变差，说明 yaw metric target 与 follow-base 写入参考不是同一语义 |
-| `--post-unlock-follow-base --ignore-root-yaw-error` | `true` | `0` | `0.0115 rad` / - | `0.747 m` | `1.98 / 0.99 rad/s` | `0.343 / 0.418 rad` | 作为 follow-base 诊断/视觉 replay 档通过 |
+| 旧 wrapper：`--post-unlock-follow-base --metrics-root-yaw-reference base_relative` | `false` | `0` | `0.0115 rad` / - | `0.747 m` | `2.48 / 1.16 rad/s` | `0.338 / 0.414 rad` | 暴露 wrapper 只打开 `POST_UNLOCK_FOLLOW_BASE`，未同时打开 `FOLLOW_BASE_YAW/TRANSLATION`；root 仍停在 anchor，base-relative yaw p95 `0.942 rad`，XY p95 `9.73 m` |
+| 修正后：`--post-unlock-follow-base` | `true` | `0` | `0.0104 rad` / - | `0.747 m` | `2.59 / 1.09 rad/s` | `0.341 / 0.410 rad` | 真正跟随 base-relative root XY/yaw；root yaw p95 `0.0175 rad`，base-relative XY p95 `0.0169 m`，不再需要 ignore yaw |
+| 纯 free-root：`--auto-unlock-after-packets 100 --metrics-root-yaw-reference base_relative` | `false` | `175` in 12s | `1.903 rad` / `1.680 rad` | `0.188 m` | `12.44 / 3.34 rad/s` | `0.547 / 0.822 rad` | yaw gate 通过（p95 `0.368 rad`），但 base height / root tilt / fall 失败，说明下一项是自由根物理稳定 |
 
 最终 wrapper 验证命令：
 
 ```bash
 scripts/launch_sonic_v3_tuning_closed_loop.py \
   --replace --no-attach --headless \
-  --zmq-port 7556 \
-  --debug-port 7557 \
-  --state-port 7560 \
-  --bvh-stream-port 12553 \
+  --zmq-port 7756 \
+  --debug-port 7757 \
+  --state-port 7760 \
+  --bvh-stream-port 12573 \
   --bvh-file /home/nolo/MCPM_20260526_190029.BVH \
   --pose-filter-profile stable \
   --metrics-duration-s 20 \
-  --metrics-summary-json /tmp/sony_pose_v3_isaaclab_mcpm_20s_followbase_wrapper_summary.json \
-  --metrics-samples-jsonl /tmp/sony_pose_v3_isaaclab_mcpm_20s_followbase_wrapper_samples.jsonl \
+  --metrics-summary-json /tmp/sony_pose_v3_isaaclab_mcpm_20s_followbase_baserel_yaw_followxy_summary.json \
+  --metrics-samples-jsonl /tmp/sony_pose_v3_isaaclab_mcpm_20s_followbase_baserel_yaw_followxy_samples.jsonl \
   --auto-unlock-after-packets 100 \
-  --post-unlock-follow-base \
-  --ignore-root-yaw-error
+  --post-unlock-follow-base
 ```
 
 最终 20s 结果：
@@ -544,22 +546,24 @@ scripts/launch_sonic_v3_tuning_closed_loop.py \
 | 指标 | 结果 |
 | --- | --- |
 | pass | `true` |
-| samples / elapsed | `392 / 19.99s` |
-| deploy / Isaac FPS | `50.03 / 199.91` |
+| samples / elapsed | `392 / 20.00s` |
+| deploy / Isaac FPS | `50.01 / 200.13` |
 | fall / nonfinite / missing | `0 / 0 / 0` |
 | body keypoint RMSE mean / p95 | `0.041 / 0.063 m` |
-| joint tracking RMSE mean / p95 | `0.343 / 0.418 rad` |
-| joint velocity max / p95 | `1.98 / 0.99 rad/s` |
+| joint tracking RMSE mean / p95 | `0.341 / 0.410 rad` |
+| joint velocity max / p95 | `2.59 / 1.09 rad/s` |
 | base height min / mean | `0.747 / 0.760 m` |
-| root tilt max | `0.0115 rad` |
-| root yaw error p95 | `1.771 rad`，本 case 显式忽略 |
+| root tilt max | `0.0104 rad` |
+| root yaw reference | `base_relative` |
+| root yaw error p95 | `0.0175 rad` |
+| base-relative root XY error mean / p95 | `0.0082 / 0.0169 m` |
 
-结论：`post-unlock-follow-base` 已给 v3 一个可复现的 IsaacLab 诊断/视觉 replay 档，能稳定展示解锁后的 body/keypoint 跟随效果。但它不是纯 free-root 动力学通过，因为 root XYZ/yaw 在解锁后仍被 deploy base target 写入；真正 free-root 仍会摔倒，下一步要在 base-target yaw 对齐、root translation release、足端支撑/平衡控制之间继续拆分。
+结论：`post-unlock-follow-base` 已给 v3 一个可复现的 IsaacLab 诊断/视觉 replay 档，能稳定展示解锁后的 body/keypoint 跟随效果，并且 root yaw gate 现在可以用 `base_relative` 参考自然通过。但它不是纯 free-root 动力学通过，因为 root XY/yaw 在解锁后仍被 deploy base target 写入；真正 free-root 仍会摔倒，下一步要转向 root translation release、足端支撑/平衡控制和自由根姿态稳定。
 
 已知剩余缺口：
 
-- 纯 PhysX free-root unlock 仍未通过；现在已排除“post-unlock target step 从 `0.003` 突然放宽到 `0.45`”作为唯一原因，速度阻尼单独也不够。
-- follow-base 诊断档的 root yaw metric 与写入参考不是同一语义，当前需要 `--ignore-root-yaw-error` 才能作为视觉 replay gate 通过。
+- 纯 PhysX free-root unlock 仍未通过；现在已排除“post-unlock target step 从 `0.003` 突然放宽到 `0.45`”作为唯一原因，也已排除 root yaw gate 作为主因，速度阻尼单独也不够。
+- follow-base 诊断档已经能用 `base_relative` yaw gate 通过；后续不能把它误当成纯 free-root 动力学通过。
 - `gear_sonic_deploy/target/release/run_tests` 当前会查找硬编码目录 `reference/bones_072925_test/`，v3 worktree 无该测试数据，测试进程退出 `139`；本轮未为测试补数据目录。
 
 ## 定位

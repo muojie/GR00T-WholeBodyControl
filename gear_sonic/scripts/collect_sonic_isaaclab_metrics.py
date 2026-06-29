@@ -119,6 +119,51 @@ class MetricsAccumulator:
         return max(0.0, self.ended_at - self.started_at)
 
 
+@dataclass
+class RootReferenceTracker:
+    initial_actual_root_pos: np.ndarray | None = None
+    initial_actual_yaw: float | None = None
+    initial_target_root_pos: np.ndarray | None = None
+    initial_target_yaw: float | None = None
+
+    def compute(
+        self,
+        *,
+        actual_root_pos: np.ndarray,
+        actual_yaw: float,
+        target_root_pos: np.ndarray,
+        target_yaw: float,
+        translation_scale: float,
+    ) -> dict[str, float]:
+        if self.initial_actual_root_pos is None:
+            self.initial_actual_root_pos = actual_root_pos.astype(np.float32).copy()
+            self.initial_actual_yaw = float(actual_yaw)
+            self.initial_target_root_pos = target_root_pos.astype(np.float32).copy()
+            self.initial_target_yaw = float(target_yaw)
+
+        assert self.initial_actual_root_pos is not None
+        assert self.initial_actual_yaw is not None
+        assert self.initial_target_root_pos is not None
+        assert self.initial_target_yaw is not None
+
+        target_yaw_delta = _wrap_pi(target_yaw - self.initial_target_yaw)
+        base_relative_target_yaw = _wrap_pi(self.initial_actual_yaw + target_yaw_delta)
+        base_relative_target_xy = self.initial_actual_root_pos[:2] + (
+            target_root_pos[:2] - self.initial_target_root_pos[:2]
+        ) * float(translation_scale)
+        base_relative_target_z = self.initial_actual_root_pos[2] + (
+            target_root_pos[2] - self.initial_target_root_pos[2]
+        )
+        return {
+            "base_relative_root_yaw_target_rad": base_relative_target_yaw,
+            "base_relative_root_yaw_error_rad": abs(_wrap_pi(actual_yaw - base_relative_target_yaw)),
+            "base_relative_root_xy_error_m": float(
+                np.linalg.norm(actual_root_pos[:2] - base_relative_target_xy)
+            ),
+            "base_relative_root_height_error_m": float(abs(actual_root_pos[2] - base_relative_target_z)),
+        }
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Collect closed-loop metrics from deploy g1_debug and IsaacLab sonic_state.",
@@ -142,6 +187,22 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-base-height-m", type=float, default=0.45)
     parser.add_argument("--max-root-tilt-rad", type=float, default=0.85)
     parser.add_argument("--max-root-yaw-error-rad", type=float, default=0.80)
+    parser.add_argument(
+        "--root-yaw-reference",
+        choices=["deploy_absolute", "base_relative"],
+        default="deploy_absolute",
+        help=(
+            "reference used by the root_yaw_error gate. deploy_absolute compares against deploy "
+            "base_quat_target directly; base_relative compares against first robot yaw plus deploy "
+            "base_quat_target delta, matching follow-base diagnostic replay semantics"
+        ),
+    )
+    parser.add_argument(
+        "--base-relative-translation-scale",
+        type=float,
+        default=2.0,
+        help="XY scale used when reporting base_relative_root_xy_error_m diagnostics",
+    )
     parser.add_argument(
         "--ignore-root-yaw-error",
         action="store_true",
@@ -274,6 +335,7 @@ def _compute_sample(
     joint_lower_mujoco: np.ndarray,
     joint_upper_mujoco: np.ndarray,
     previous_target_q_mujoco: np.ndarray | None,
+    root_reference: RootReferenceTracker,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     target_q_mujoco = _array(deploy.get("body_q_target"), (29,))
@@ -349,6 +411,20 @@ def _compute_sample(
     target_tilt = _root_tilt_rad(target_root_quat)
     actual_yaw = _root_yaw_rad(actual_root_quat)
     target_yaw = _root_yaw_rad(target_root_quat)
+    root_yaw_error_deploy_absolute = abs(_wrap_pi(actual_yaw - target_yaw))
+    root_reference_metrics = root_reference.compute(
+        actual_root_pos=actual_root_pos,
+        actual_yaw=actual_yaw,
+        target_root_pos=target_root_pos,
+        target_yaw=target_yaw,
+        translation_scale=args.base_relative_translation_scale,
+    )
+    root_yaw_error_base_relative = root_reference_metrics["base_relative_root_yaw_error_rad"]
+    root_yaw_error = (
+        root_yaw_error_base_relative
+        if args.root_yaw_reference == "base_relative"
+        else root_yaw_error_deploy_absolute
+    )
     fall_detected = bool(
         float(actual_root_pos[2]) < args.min_base_height_m
         or actual_tilt > args.max_root_tilt_rad
@@ -361,7 +437,12 @@ def _compute_sample(
         "isaac_sequence": _optional_int(isaac.get("sequence")),
         "base_height_m": float(actual_root_pos[2]),
         "root_tilt_rad": actual_tilt,
-        "root_yaw_error_rad": abs(_wrap_pi(actual_yaw - target_yaw)),
+        "root_yaw_reference": args.root_yaw_reference,
+        "root_yaw_actual_rad": actual_yaw,
+        "root_yaw_target_deploy_absolute_rad": target_yaw,
+        "root_yaw_error_rad": root_yaw_error,
+        "root_yaw_error_rad_deploy_absolute": root_yaw_error_deploy_absolute,
+        "root_yaw_error_rad_base_relative": root_yaw_error_base_relative,
         "root_tilt_error_rad": abs(actual_tilt - target_tilt),
         "root_height_error_m": float(abs(actual_root_pos[2] - target_root_pos[2])),
         "joint_tracking_rmse_rad": float(np.sqrt(np.mean(np.square(joint_error)))),
@@ -379,6 +460,7 @@ def _compute_sample(
         "fall_detected": fall_detected,
         "missing_fields": [],
     }
+    sample.update(root_reference_metrics)
     if applied_target_step is not None:
         sample["applied_target_step_absmax_rad"] = applied_target_step
     for group, names in GROUP_BODY_INDEXES.items():
@@ -429,6 +511,10 @@ def _pass_fail(acc: MetricsAccumulator, args: argparse.Namespace) -> dict[str, A
             "base_height_m",
             "root_tilt_rad",
             "root_yaw_error_rad",
+            "root_yaw_error_rad_deploy_absolute",
+            "root_yaw_error_rad_base_relative",
+            "base_relative_root_xy_error_m",
+            "base_relative_root_height_error_m",
             "root_tilt_error_rad",
             "root_height_error_m",
             "joint_tracking_rmse_rad",
@@ -491,6 +577,7 @@ def _pass_fail(acc: MetricsAccumulator, args: argparse.Namespace) -> dict[str, A
         "ignored_checks": {
             "root_yaw_error": ignore_root_yaw_error,
         },
+        "root_yaw_reference": args.root_yaw_reference,
         "elapsed_s": elapsed_s,
         "samples": len(samples),
         "deploy_fps": deploy_fps,
@@ -580,6 +667,9 @@ def _print_summary(label: str, summary: dict[str, Any]) -> None:
         "body_rmse_mean": summary["stats"]["body_keypoint_rmse_m"]["mean"],
         "base_height_min": summary["stats"]["base_height_m"]["min"],
         "root_tilt_max": summary["stats"]["root_tilt_rad"]["max"],
+        "root_yaw_reference": summary.get("root_yaw_reference"),
+        "root_yaw_p95": summary["stats"]["root_yaw_error_rad"]["p95"],
+        "root_yaw_base_relative_p95": summary["stats"]["root_yaw_error_rad_base_relative"]["p95"],
     }
     print(f"[SonicIsaacMetrics] {json.dumps(compact, sort_keys=True)}", flush=True)
 
@@ -624,6 +714,7 @@ def main() -> int:
     next_report_time = time.monotonic() + max(args.report_interval_s, 0.5)
     previous_pair: tuple[int | None, int | None] | None = None
     previous_target_q_mujoco: np.ndarray | None = None
+    root_reference = RootReferenceTracker()
 
     try:
         while time.monotonic() < duration_deadline:
@@ -643,6 +734,7 @@ def main() -> int:
                         joint_lower_mujoco=joint_lower_mujoco,
                         joint_upper_mujoco=joint_upper_mujoco,
                         previous_target_q_mujoco=previous_target_q_mujoco,
+                        root_reference=root_reference,
                         args=args,
                     )
                     target_q = _array(deploy_sub.latest.get("body_q_target"), (29,))
