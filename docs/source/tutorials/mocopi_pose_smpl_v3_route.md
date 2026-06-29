@@ -574,9 +574,36 @@ follow-base yaw gate 修正后，继续只做纯 free-root 释放诊断：不写
 
 结论：本轮把纯 free-root 失稳从“yaw/target-rate 误判”收敛到“root velocity / attitude release 后缺少真实支撑稳定”。强 velocity-assist 只是在诊断窗口内把速度压住，20s 仍会倒，所以下一项不应继续单调加大 damping，而应转向足端支撑、CoM/hip 高度约束或策略输入/动作时延对自由根平衡的影响。
 
+#### 2026-06-29 pure free-root safety velocity assist
+
+继续沿纯 free-root 路线做诊断辅助：IsaacLab action 新增 post-unlock safety velocity assist，触发条件来自 root height 和 root tilt。它只写 root velocity，不写 root pose；当高度或倾角进入安全区间时，压低 root XY / angular velocity，抑制向下 Z velocity，并可配置一个小的向上速度下限。因此它不同于 `post-unlock-follow-base`，不会把 root XY/yaw 直接贴回 deploy base target。
+
+v3 wrapper 同步暴露以下参数，便于从专用启动脚本复现实验：
+
+| 参数 | 环境变量 |
+| --- | --- |
+| `--post-unlock-safety-assist` | `SONIC_DEPLOY_POST_UNLOCK_SAFETY_ASSIST=1` |
+| `--post-unlock-safety-strength` | `SONIC_DEPLOY_POST_UNLOCK_SAFETY_STRENGTH` |
+| `--post-unlock-safety-min-height` | `SONIC_DEPLOY_POST_UNLOCK_SAFETY_MIN_HEIGHT` |
+| `--post-unlock-safety-height-margin` | `SONIC_DEPLOY_POST_UNLOCK_SAFETY_HEIGHT_MARGIN` |
+| `--post-unlock-safety-tilt-start` | `SONIC_DEPLOY_POST_UNLOCK_SAFETY_TILT_START` |
+| `--post-unlock-safety-tilt-full` | `SONIC_DEPLOY_POST_UNLOCK_SAFETY_TILT_FULL` |
+| `--post-unlock-safety-lift-velocity` | `SONIC_DEPLOY_POST_UNLOCK_SAFETY_LIFT_VELOCITY` |
+
+所有 case 均使用 `/home/nolo/MCPM_20260526_190029.BVH`、`auto_unlock_after_packets=100`、纯 free-root、不启用 follow-base。
+
+| case | pass | failed checks | first fall | fall frames | base height min | root tilt max / p95 | root yaw p95 | joint RMSE mean / p95 | joint velocity max / p95 | 结论 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `safety_blend200`：target `0.003`，blend `200`，damping `800`，min height `0.72`，tilt `0.05/0.28` | `false` | tilt / RMSE | none in 20s | `0 / 392` | `0.665 m` | `0.540 / 0.451 rad` | `0.792 rad` | `0.384 / 0.484 rad` | `7.27 / 0.93 rad/s` | 已消除摔倒，但倾角和 RMSE 仍偏高 |
+| `safety_stable_006`：stable，target `0.006`，blend `200`，damping `800`，min height `0.74`，margin `0.22`，tilt `0.03/0.18`，lift `0.12` | `false` | joint tracking RMSE | none in 20s | `0 / 392` | `0.714 m` | `0.210 / 0.183 rad` | `0.671 rad` | `0.363 / 0.479 rad` | `2.78 / 1.39 rad/s` | 当前最佳纯 free-root 候选：无 fall，height/tilt/yaw 均过，只剩 RMSE mean 略高于 `0.35` |
+| `safety_stable_008`：同上，target `0.008` | `false` | root yaw / RMSE | none in 20s | `0 / 392` | `0.710 m` | `0.162 / 0.144 rad` | `1.675 rad` | `0.359 / 0.480 rad` | `5.60 / - rad/s` | target rate 再放大后 yaw 明显变差 |
+| `safety_balanced_006`：balanced，target `0.006` | `false` | root yaw / RMSE | none in 20s | `0 / 392` | `0.689 m` | `0.274 / 0.207 rad` | `0.986 rad` | `0.372 / 0.537 rad` | `2.30 / - rad/s` | balanced 在 IsaacLab free-root 上不如 stable |
+
+结论：安全速度辅助有效解决了 20s 窗口内的摔倒、高度塌陷和大倾角问题，说明当前主要瓶颈已经从“站不住”推进到“站住后 joint tracking RMSE 还差一小段”。后续不宜继续盲目加强安全辅助，否则会进一步牺牲动作跟随；下一项应在 `safety_stable_006` 这条线上优化 reference/action 时延、target rate release、policy observation 对齐和下肢跟踪误差。
+
 已知剩余缺口：
 
-- 纯 PhysX free-root unlock 仍未通过；现在已排除“post-unlock target step 从 `0.003` 突然放宽到 `0.45`”作为唯一原因，也已排除 root yaw gate 作为主因，速度阻尼单独也不够。
+- 纯 PhysX free-root unlock 已能在 safety velocity assist 下 20s 不摔，但严格 pass 仍差 joint RMSE：当前最佳 `safety_stable_006` 的 mean RMSE 为 `0.363 rad`，阈值是 `0.35 rad`。
 - follow-base 诊断档已经能用 `base_relative` yaw gate 通过；后续不能把它误当成纯 free-root 动力学通过。
 - `gear_sonic_deploy/target/release/run_tests` 当前会查找硬编码目录 `reference/bones_072925_test/`，v3 worktree 无该测试数据，测试进程退出 `139`；本轮未为测试补数据目录。
 

@@ -105,6 +105,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--post-unlock-xy-velocity-scale", type=float)
     parser.add_argument("--post-unlock-z-velocity-scale", type=float)
     parser.add_argument("--post-unlock-angular-velocity-scale", type=float)
+    parser.add_argument(
+        "--post-unlock-safety-assist",
+        action="store_true",
+        help="enable IsaacLab post-unlock velocity-only root height/tilt safety assist",
+    )
+    parser.add_argument("--post-unlock-safety-strength", type=float)
+    parser.add_argument("--post-unlock-safety-min-height", type=float)
+    parser.add_argument("--post-unlock-safety-height-margin", type=float)
+    parser.add_argument("--post-unlock-safety-tilt-start", type=float)
+    parser.add_argument("--post-unlock-safety-tilt-full", type=float)
+    parser.add_argument("--post-unlock-safety-lift-velocity", type=float)
     parser.add_argument("--base-yaw-rate-limit", type=float)
     parser.add_argument("--base-translation-rate-limit", type=float)
     parser.add_argument("--bvh-g1-max-joint-velocity", type=float, default=5.5)
@@ -239,6 +250,38 @@ def _launcher_command(args: argparse.Namespace, extra_args: list[str]) -> list[s
         cmd.extend([
             "--isaac-env",
             f"SONIC_DEPLOY_POST_UNLOCK_ANGULAR_VELOCITY_SCALE={args.post_unlock_angular_velocity_scale}",
+        ])
+    if args.post_unlock_safety_assist:
+        cmd.extend(["--isaac-env", "SONIC_DEPLOY_POST_UNLOCK_SAFETY_ASSIST=1"])
+    if args.post_unlock_safety_strength is not None:
+        cmd.extend([
+            "--isaac-env",
+            f"SONIC_DEPLOY_POST_UNLOCK_SAFETY_STRENGTH={args.post_unlock_safety_strength}",
+        ])
+    if args.post_unlock_safety_min_height is not None:
+        cmd.extend([
+            "--isaac-env",
+            f"SONIC_DEPLOY_POST_UNLOCK_SAFETY_MIN_HEIGHT={args.post_unlock_safety_min_height}",
+        ])
+    if args.post_unlock_safety_height_margin is not None:
+        cmd.extend([
+            "--isaac-env",
+            f"SONIC_DEPLOY_POST_UNLOCK_SAFETY_HEIGHT_MARGIN={args.post_unlock_safety_height_margin}",
+        ])
+    if args.post_unlock_safety_tilt_start is not None:
+        cmd.extend([
+            "--isaac-env",
+            f"SONIC_DEPLOY_POST_UNLOCK_SAFETY_TILT_START={args.post_unlock_safety_tilt_start}",
+        ])
+    if args.post_unlock_safety_tilt_full is not None:
+        cmd.extend([
+            "--isaac-env",
+            f"SONIC_DEPLOY_POST_UNLOCK_SAFETY_TILT_FULL={args.post_unlock_safety_tilt_full}",
+        ])
+    if args.post_unlock_safety_lift_velocity is not None:
+        cmd.extend([
+            "--isaac-env",
+            f"SONIC_DEPLOY_POST_UNLOCK_SAFETY_LIFT_VELOCITY={args.post_unlock_safety_lift_velocity}",
         ])
     if args.base_yaw_rate_limit is not None:
         cmd.extend(["--isaac-env", f"SONIC_DEPLOY_BASE_YAW_RATE_LIMIT={args.base_yaw_rate_limit}"])
