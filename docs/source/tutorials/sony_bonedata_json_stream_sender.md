@@ -24,7 +24,7 @@ JSON 专用输入类型。
 
 ## 输入 JSON 结构
 
-当前 sender 支持的 BoneData JSON 是一个顶层 dict，包含三组等长数组：
+当前 sender 支持的 BoneData JSON 是一个顶层 dict，包含三组数组：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -32,12 +32,22 @@ JSON 专用输入类型。
 | `position` | object array | 每项为 `{x, y, z}` |
 | `rotation` | object array | 每项为 `{x, y, z, w}`，即 `xyzw` 四元数 |
 
-数据按帧展平成一维数组。当前 Sony mocopi 样例每帧 27 个节点，因此：
+`position` 和 `rotation` 必须按帧展平成一维数组。`name` 支持两种布局。
+
+布局 A：旧格式，`name` 也按帧重复：
 
 ```text
 len(name) == len(position) == len(rotation)
 frame_count = len(name) / 27
 frame[i] = entries[i * 27 : (i + 1) * 27]
+```
+
+布局 B：新格式，`name` 只保存一帧 27 个节点名：
+
+```text
+len(name) == 27
+len(position) == len(rotation) == frame_count * 27
+frame[i] = position/rotation[i * 27 : (i + 1) * 27]
 ```
 
 同一个 sender 会话中，每帧的 27 个 `name` 顺序必须一致。sender 会把第一帧的
@@ -129,8 +139,58 @@ sender 输出的 payload 与 `bvh_stream_sender.py` 保持同一协议名：
 | `--joints-per-frame` | 自动推断 | 当前 Sony 样例是 27 |
 | `--position-scale` | `1.0` | position 乘法缩放 |
 | `--input-quat-order` | `xyzw` | 当前 JSON rotation 字段顺序 |
+| `--coordinate-frame` | `sonic_zup` | 可选 `sonic_zup` / `left_handed_zup` / `left_handed_yup` / `zup_flip_xy` |
 | `--local-root` | false | 是否去掉每帧 root translation |
 | `--max-frames` | 不限制 | 调试时只发送前 N 帧 |
+
+## 坐标系选项
+
+默认 `--coordinate-frame sonic_zup` 表示 JSON 已经是 SONIC/MuJoCo 主线需要的
+右手 Z-up 米制世界坐标，sender 只做 position scale 和 quaternion `xyzw -> wxyz`。
+
+如果 JSON 是左手 Y-up，并且 position / rotation 没有提前转换，使用：
+
+```bash
+.venv_teleop/bin/python -u gear_sonic/scripts/sony_bonedata_json_stream_sender.py \
+  --json-file /home/nolo/saveBoneData_Yup.json \
+  --host 127.0.0.1 \
+  --port 12352 \
+  --fps 50 \
+  --loop \
+  --coordinate-frame left_handed_yup
+```
+
+`left_handed_yup` 的转换规则：
+
+```text
+position: (x, y, z) -> (-x, -z, y)
+rotation: source xyzw -> wxyz 后，再用同一个左手 Y-up 到右手 Z-up 基变换处理
+```
+
+如果 JSON 已经是 Z-up，只用 `left_handed_zup`；如果 JSON 是 Y-up，不要用
+`left_handed_zup`，否则只会做左右手镜像，不会把上轴从 Y 转到 Z。
+
+如果文件名或上游说明写的是 Y-up，但数值上 root/head/toes 的高度主要落在 `z`
+轴，并且机器人表现为连续倒退，优先使用：
+
+```bash
+.venv_teleop/bin/python -u gear_sonic/scripts/sony_bonedata_json_stream_sender.py \
+  --json-file /home/nolo/saveBoneData_Yup.json \
+  --host 127.0.0.1 \
+  --port 12352 \
+  --fps 50 \
+  --loop \
+  --coordinate-frame zup_flip_xy
+```
+
+`zup_flip_xy` 的转换规则：
+
+```text
+position: (x, y, z) -> (-x, -y, z)
+rotation: source xyzw -> wxyz 后，用同一个 X/Y 水平轴反向基变换处理
+```
+
+这个模式保持 Z 高度不变，同时把左右轴和前后轴都翻到 SONIC/BVH-G1 约定。
 
 ## manager / deploy 配套命令
 

@@ -53,11 +53,68 @@ def _read_vec3(value: Any, *, position_scale: float) -> list[float]:
     raise ValueError(f"position must be dict x/y/z or length-3 list, got {value!r}")
 
 
+def _convert_position(position: list[float], *, coordinate_frame: str) -> list[float]:
+    if coordinate_frame == "sonic_zup":
+        return position
+    if coordinate_frame == "left_handed_zup":
+        return [-position[0], position[1], position[2]]
+    if coordinate_frame == "left_handed_yup":
+        return [-position[0], -position[2], position[1]]
+    if coordinate_frame == "zup_flip_xy":
+        return [-position[0], -position[1], position[2]]
+    raise ValueError(f"unsupported coordinate frame {coordinate_frame!r}")
+
+
 def _normalize_quat_wxyz(quat: list[float]) -> list[float]:
     norm = math.sqrt(sum(float(v) * float(v) for v in quat))
     if norm < 1e-8 or not math.isfinite(norm):
         return [1.0, 0.0, 0.0, 0.0]
     return [float(v) / norm for v in quat]
+
+
+def _quat_wxyz_to_matrix(quat: list[float]) -> list[list[float]]:
+    w, x, y, z = _normalize_quat_wxyz(quat)
+    return [
+        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+        [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+        [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+    ]
+
+
+def _matrix_to_quat_wxyz(matrix: list[list[float]]) -> list[float]:
+    m00, m01, m02 = matrix[0]
+    m10, m11, m12 = matrix[1]
+    m20, m21, m22 = matrix[2]
+    trace = m00 + m11 + m22
+    if trace > 0.0:
+        s = math.sqrt(trace + 1.0) * 2.0
+        quat = [0.25 * s, (m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s]
+    elif m00 > m11 and m00 > m22:
+        s = math.sqrt(max(0.0, 1.0 + m00 - m11 - m22)) * 2.0
+        quat = [(m21 - m12) / s, 0.25 * s, (m01 + m10) / s, (m02 + m20) / s]
+    elif m11 > m22:
+        s = math.sqrt(max(0.0, 1.0 + m11 - m00 - m22)) * 2.0
+        quat = [(m02 - m20) / s, (m01 + m10) / s, 0.25 * s, (m12 + m21) / s]
+    else:
+        s = math.sqrt(max(0.0, 1.0 + m22 - m00 - m11)) * 2.0
+        quat = [(m10 - m01) / s, (m02 + m20) / s, (m12 + m21) / s, 0.25 * s]
+    return _normalize_quat_wxyz(quat)
+
+
+def _basis_change_quat_wxyz(quat: list[float], basis: list[list[float]]) -> list[float]:
+    rotation = _quat_wxyz_to_matrix(quat)
+    changed = [
+        [
+            sum(
+                basis[row][k] * rotation[k][l] * basis[col][l]
+                for k in range(3)
+                for l in range(3)
+            )
+            for col in range(3)
+        ]
+        for row in range(3)
+    ]
+    return _matrix_to_quat_wxyz(changed)
 
 
 def _read_quat_wxyz(value: Any, *, input_quat_order: str) -> list[float]:
@@ -83,12 +140,39 @@ def _read_quat_wxyz(value: Any, *, input_quat_order: str) -> list[float]:
     raise ValueError(f"rotation must be dict x/y/z/w or length-4 list, got {value!r}")
 
 
+def _convert_quat_wxyz(quat: list[float], *, coordinate_frame: str) -> list[float]:
+    if coordinate_frame == "sonic_zup":
+        return quat
+    if coordinate_frame == "left_handed_zup":
+        # Mirror X to convert a left-handed Z-up source basis into SONIC's right-handed Z-up basis:
+        # position (x, y, z) -> (-x, y, z), rotation R -> M R M where M=diag(-1,1,1).
+        return _normalize_quat_wxyz([quat[0], quat[1], -quat[2], -quat[3]])
+    if coordinate_frame == "left_handed_yup":
+        # Convert a left-handed Y-up source basis to SONIC's right-handed Z-up basis.
+        # Position uses (x, y, z) -> (-x, -z, y); rotations use R' = B R B^-1.
+        return _basis_change_quat_wxyz(
+            quat,
+            [[-1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]],
+        )
+    if coordinate_frame == "zup_flip_xy":
+        # Some BoneData exports are numerically Z-up but have both horizontal axes
+        # opposite to the SONIC/BVH-G1 convention. This keeps height intact and
+        # applies a 180 degree horizontal-frame change.
+        return _basis_change_quat_wxyz(
+            quat,
+            [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]],
+        )
+    raise ValueError(f"unsupported coordinate frame {coordinate_frame!r}")
+
+
 def load_sony_bonedata_json(
     json_file: Path,
     *,
     joints_per_frame: int,
     position_scale: float,
     input_quat_order: str,
+    rotation_mode: str,
+    coordinate_frame: str,
     source_fps: float,
     playback_fps: float,
     local_root: bool,
@@ -107,19 +191,31 @@ def load_sony_bonedata_json(
     rotations = data["rotation"]
     if not isinstance(names, list) or not isinstance(positions, list) or not isinstance(rotations, list):
         raise ValueError("name, position, and rotation must all be lists")
-    if len(names) != len(positions) or len(names) != len(rotations):
-        raise ValueError(
-            "name, position, and rotation must have the same length; "
-            f"got {len(names)}, {len(positions)}, {len(rotations)}"
-        )
     if joints_per_frame <= 0:
         raise ValueError("--joints-per-frame must be positive")
-    if len(names) == 0 or len(names) % joints_per_frame != 0:
+    if len(names) == 0:
+        raise ValueError("name must not be empty")
+    if len(positions) != len(rotations):
         raise ValueError(
-            f"name length {len(names)} is not divisible by joints_per_frame={joints_per_frame}"
+            "position and rotation must have the same length; "
+            f"got {len(positions)}, {len(rotations)}"
+        )
+    if len(positions) == 0 or len(positions) % joints_per_frame != 0:
+        raise ValueError(
+            f"position length {len(positions)} is not divisible by "
+            f"joints_per_frame={joints_per_frame}"
         )
 
-    frame_count = len(names) // joints_per_frame
+    frame_count = len(positions) // joints_per_frame
+    names_are_flat_frames = len(names) == len(positions)
+    names_are_single_frame = len(names) == joints_per_frame
+    if not names_are_flat_frames and not names_are_single_frame:
+        raise ValueError(
+            "name must either repeat per frame or contain one joint-name frame; "
+            f"got name={len(names)}, position={len(positions)}, "
+            f"joints_per_frame={joints_per_frame}"
+        )
+
     joint_names = [str(name) for name in names[:joints_per_frame]]
     world_positions: list[list[list[float]]] = []
     world_quat_wxyz: list[list[list[float]]] = []
@@ -127,15 +223,20 @@ def load_sony_bonedata_json(
     for frame_idx in range(frame_count):
         start = frame_idx * joints_per_frame
         end = start + joints_per_frame
-        frame_names = [str(name) for name in names[start:end]]
-        if frame_names != joint_names:
-            raise ValueError(
-                f"joint names changed at frame {frame_idx}; "
-                "bvh_stream_v1 expects stable joint order within one sender session"
-            )
+        if names_are_flat_frames:
+            frame_names = [str(name) for name in names[start:end]]
+            if frame_names != joint_names:
+                raise ValueError(
+                    f"joint names changed at frame {frame_idx}; "
+                    "bvh_stream_v1 expects stable joint order within one sender session"
+                )
 
         frame_positions = [
-            _read_vec3(value, position_scale=position_scale) for value in positions[start:end]
+            _convert_position(
+                _read_vec3(value, position_scale=position_scale),
+                coordinate_frame=coordinate_frame,
+            )
+            for value in positions[start:end]
         ]
         if local_root:
             root = frame_positions[0]
@@ -144,9 +245,16 @@ def load_sony_bonedata_json(
                 for pos in frame_positions
             ]
         frame_quats = [
-            _read_quat_wxyz(value, input_quat_order=input_quat_order)
+            _convert_quat_wxyz(
+                _read_quat_wxyz(value, input_quat_order=input_quat_order),
+                coordinate_frame=coordinate_frame,
+            )
             for value in rotations[start:end]
         ]
+        if rotation_mode == "identity":
+            frame_quats = [[1.0, 0.0, 0.0, 0.0] for _ in frame_quats]
+        elif rotation_mode != "input":
+            raise ValueError(f"unsupported rotation mode {rotation_mode!r}")
         world_positions.append(frame_positions)
         world_quat_wxyz.append(frame_quats)
 
@@ -210,6 +318,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Quaternion order for list rotations. Dict rotations with x/y/z/w ignore this.",
     )
     parser.add_argument(
+        "--rotation-mode",
+        choices=("input", "identity"),
+        default="input",
+        help="Use converted input rotations, or send identity world quaternions for diagnosis.",
+    )
+    parser.add_argument(
+        "--coordinate-frame",
+        choices=("sonic_zup", "left_handed_zup", "left_handed_yup", "zup_flip_xy"),
+        default="sonic_zup",
+        help=(
+            "Coordinate frame used by the JSON positions/rotations. "
+            "sonic_zup streams values as-is; left_handed_zup mirrors X; "
+            "left_handed_yup maps (x,y,z) to (-x,-z,y); "
+            "zup_flip_xy maps (x,y,z) to (-x,-y,z)."
+        ),
+    )
+    parser.add_argument(
         "--local-root",
         action="store_true",
         help="Subtract each frame's root position from all joints before streaming.",
@@ -249,6 +374,8 @@ def main() -> None:
         joints_per_frame=args.joints_per_frame,
         position_scale=args.position_scale,
         input_quat_order=args.input_quat_order,
+        rotation_mode=args.rotation_mode,
+        coordinate_frame=args.coordinate_frame,
         source_fps=source_fps,
         playback_fps=args.fps,
         local_root=args.local_root,
@@ -264,7 +391,8 @@ def main() -> None:
         f"udp://{args.host}:{args.port} format={args.format} fps={motion.playback_fps:.1f} "
         f"source_fps={motion.source_fps:.1f} frames={motion.frame_count} "
         f"joints={len(motion.joint_names)} loop={args.loop} "
-        f"position_scale={args.position_scale:g} local_root={args.local_root}"
+        f"position_scale={args.position_scale:g} coordinate_frame={args.coordinate_frame} "
+        f"rotation_mode={args.rotation_mode} local_root={args.local_root}"
     )
     if args.startup_delay_s > 0.0:
         time.sleep(args.startup_delay_s)
