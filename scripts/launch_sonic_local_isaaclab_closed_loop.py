@@ -47,6 +47,7 @@ def _default_host_path(relative_path: Path) -> Path:
 
 DEFAULT_ISAACLAB_ROOT = _default_host_path(Path("xiaoyang_IssacLab") / "IsaacLab")
 DEFAULT_BVH_FILE = _default_host_path(Path("RAYNOS_Motion1.bvh"))
+PROXY_BINARY_NAME = "sonic_unitree_lowstate_cpp_proxy"
 
 
 @dataclass(frozen=True)
@@ -246,13 +247,11 @@ def _resolve_defaults(args: argparse.Namespace) -> None:
     args.bvh_file = args.bvh_file.expanduser().resolve()
 
     if args.proxy_bin is None:
-        args.proxy_bin = (
-            args.repo_root
-            / "gear_sonic_deploy"
-            / "build"
-            / "tools"
-            / "sonic_unitree_lowstate_cpp_proxy"
-        )
+        proxy_candidates = [
+            args.repo_root / "gear_sonic_deploy" / "build" / "tools" / PROXY_BINARY_NAME,
+            args.repo_root / "gear_sonic_deploy" / "prebuilt" / "linux-x86_64" / PROXY_BINARY_NAME,
+        ]
+        args.proxy_bin = next((path for path in proxy_candidates if path.exists()), proxy_candidates[0])
     args.proxy_bin = args.proxy_bin.expanduser().resolve()
 
     if args.sdk_root is None:

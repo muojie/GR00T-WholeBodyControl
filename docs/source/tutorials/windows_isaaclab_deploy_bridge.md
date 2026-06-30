@@ -44,7 +44,16 @@ Ubuntu 上的 deploy 和 lowstate proxy 使用本机 DDS loopback，即 `sim` / 
 sudo apt-get install libzmq3-dev libmsgpack-dev
 ```
 
-编译：
+仓库自带 x86_64 Ubuntu 预编译版本，默认路径是：
+
+```bash
+gear_sonic_deploy/prebuilt/linux-x86_64/sonic_unitree_lowstate_cpp_proxy
+```
+
+`scripts/launch_sonic_local_isaaclab_closed_loop.py` 会优先使用本地
+`gear_sonic_deploy/build/tools/sonic_unitree_lowstate_cpp_proxy`，如果本地构建产物不存在，
+会自动回退到上面的预编译版本。只有需要重新编译、目标机器不是 x86_64，或者要更新 proxy
+源码时，才需要执行下面的编译命令：
 
 ```bash
 cd /home/nolo/GR00T-WholeBodyControl
