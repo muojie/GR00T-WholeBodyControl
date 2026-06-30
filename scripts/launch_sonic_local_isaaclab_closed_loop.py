@@ -31,10 +31,22 @@ from pathlib import Path
 
 
 DEFAULT_SESSION = "sonic_local_isaaclab"
-DEFAULT_REPO_ROOT = Path.home() / "GR00T-WholeBodyControl"
-DEFAULT_ISAACLAB_ROOT = Path.home() / "xiaoyang_IssacLab" / "IsaacLab"
-DEFAULT_BVH_FILE = Path.home() / "RAYNOS_Motion1.bvh"
+DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TASK = "Isaac-SonicSolo-Locomanipulation-G1-v0"
+
+
+def _default_host_path(relative_path: Path) -> Path:
+    home_path = Path.home() / relative_path
+    if home_path.exists():
+        return home_path
+    checkout_sibling = DEFAULT_REPO_ROOT.parent / relative_path
+    if checkout_sibling.exists():
+        return checkout_sibling
+    return home_path
+
+
+DEFAULT_ISAACLAB_ROOT = _default_host_path(Path("xiaoyang_IssacLab") / "IsaacLab")
+DEFAULT_BVH_FILE = _default_host_path(Path("RAYNOS_Motion1.bvh"))
 
 
 @dataclass(frozen=True)
@@ -74,6 +86,19 @@ def _tmux_session_exists(session: str) -> bool:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     ).returncode == 0
+
+
+def _prepare_tmux_session(args: argparse.Namespace) -> None:
+    if not _tmux_session_exists(args.session):
+        return
+    if not args.replace:
+        print(
+            f"tmux session already exists: {args.session}\n"
+            f"Use --replace to kill and recreate it.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    _run(["tmux", "kill-session", "-t", args.session])
 
 
 def _port_is_available(port: int) -> bool:
@@ -251,6 +276,8 @@ def _preflight(args: argparse.Namespace) -> None:
         errors.append(f"C++ proxy binary not found: {args.proxy_bin}")
     if not (args.repo_root / ".venv_teleop" / "bin" / "python").exists():
         errors.append(f"teleop venv python not found: {args.repo_root / '.venv_teleop/bin/python'}")
+    if _launches_bvh_stream_sender(args) and not args.bvh_file.exists():
+        errors.append(f"BVH file not found: {args.bvh_file}")
 
     if not args.ignore_port_check:
         local_ports = [args.zmq_port, args.debug_port]
@@ -557,16 +584,6 @@ def _print_dry_run(args: argparse.Namespace, commands: list[WindowCommand]) -> N
 
 
 def _launch_tmux(args: argparse.Namespace, commands: list[WindowCommand]) -> None:
-    if _tmux_session_exists(args.session):
-        if not args.replace:
-            print(
-                f"tmux session already exists: {args.session}\n"
-                f"Use --replace to kill and recreate it.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        _run(["tmux", "kill-session", "-t", args.session])
-
     first, *rest = commands
     _run(["tmux", "new-session", "-d", "-s", args.session, "-n", first.name, _shell_window(first.command)])
 
@@ -607,6 +624,7 @@ def main() -> None:
         _print_dry_run(args, commands)
         return
 
+    _prepare_tmux_session(args)
     _preflight(args)
     _launch_tmux(args, commands)
 
