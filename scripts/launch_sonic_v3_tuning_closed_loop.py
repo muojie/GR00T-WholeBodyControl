@@ -23,8 +23,22 @@ DEFAULT_ZMQ_PORT = 6056
 DEFAULT_DEBUG_PORT = 6057
 DEFAULT_STATE_PORT = 6060
 DEFAULT_BVH_STREAM_PORT = 12403
+BASELINE_STACK_ZMQ_PORT = 6756
+BASELINE_STACK_DEBUG_PORT = 6757
+BASELINE_STACK_STATE_PORT = 6760
+BASELINE_STACK_BVH_STREAM_PORT = 12413
+DEFAULT_DOMAIN_ID = 4
+BASELINE_STACK_DOMAIN_ID = 0
 DEFAULT_BVH_FILE = Path.home() / "RAYNOS_Motion1.bvh"
 ORIGINAL_REPO_ROOT = Path.home() / "GR00T-WholeBodyControl"
+BASELINE_ISAACLAB_ROOT = Path.home() / "xiaoyang_IssacLab" / "IsaacLab-baseline-20260630"
+BASELINE_PROXY_BIN = (
+    Path("/tmp/GR00T-WholeBodyControl-baseline-20260630")
+    / "gear_sonic_deploy"
+    / "build"
+    / "tools"
+    / "sonic_unitree_lowstate_cpp_proxy"
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -37,12 +51,22 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-attach", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument(
+        "--baseline-isaaclab-stack",
+        action="store_true",
+        help=(
+            "use the verified IsaacLab baseline worktree plus baseline C++ proxy, "
+            "and force DDS domain 0 for the current v3 deploy binary"
+        ),
+    )
+    parser.add_argument("--isaaclab-root", type=Path, help="override IsaacLab worktree passed to the base launcher")
+    parser.add_argument("--proxy-bin", type=Path, help="override C++ lowstate proxy binary")
 
     parser.add_argument("--zmq-port", type=int, default=DEFAULT_ZMQ_PORT)
     parser.add_argument("--debug-port", type=int, default=DEFAULT_DEBUG_PORT)
     parser.add_argument("--state-port", type=int, default=DEFAULT_STATE_PORT)
     parser.add_argument("--bvh-stream-port", type=int, default=DEFAULT_BVH_STREAM_PORT)
-    parser.add_argument("--domain-id", type=int, default=4)
+    parser.add_argument("--domain-id", type=int, help="proxy DDS domain; baseline stack profile defaults to 0")
 
     parser.add_argument("--bvh-file", type=Path, default=DEFAULT_BVH_FILE)
     parser.add_argument(
@@ -146,7 +170,12 @@ def _resolve_release_file(relative_path: str) -> Path:
     return local
 
 
-def _resolve_proxy_bin() -> Path:
+def _resolve_proxy_bin(args: argparse.Namespace) -> Path:
+    if args.proxy_bin is not None:
+        return args.proxy_bin.expanduser()
+    if args.baseline_isaaclab_stack and BASELINE_PROXY_BIN.exists():
+        return BASELINE_PROXY_BIN
+
     relative_path = "build/tools/sonic_unitree_lowstate_cpp_proxy"
     local = REPO_ROOT / "gear_sonic_deploy" / relative_path
     if local.exists():
@@ -166,6 +195,22 @@ def _default_metric_path(kind: str) -> Path:
 
 
 def _launcher_command(args: argparse.Namespace, extra_args: list[str]) -> list[str]:
+    if args.baseline_isaaclab_stack:
+        if args.zmq_port == DEFAULT_ZMQ_PORT:
+            args.zmq_port = BASELINE_STACK_ZMQ_PORT
+        if args.debug_port == DEFAULT_DEBUG_PORT:
+            args.debug_port = BASELINE_STACK_DEBUG_PORT
+        if args.state_port == DEFAULT_STATE_PORT:
+            args.state_port = BASELINE_STACK_STATE_PORT
+        if args.bvh_stream_port == DEFAULT_BVH_STREAM_PORT:
+            args.bvh_stream_port = BASELINE_STACK_BVH_STREAM_PORT
+        if args.isaaclab_root is None:
+            args.isaaclab_root = BASELINE_ISAACLAB_ROOT
+
+    domain_id = args.domain_id
+    if domain_id is None:
+        domain_id = BASELINE_STACK_DOMAIN_ID if args.baseline_isaaclab_stack else DEFAULT_DOMAIN_ID
+
     summary_json = args.metrics_summary_json or _default_metric_path("summary")
     samples_jsonl = args.metrics_samples_jsonl or _default_metric_path("samples")
     post_unlock_target_rate_limit = (
@@ -185,7 +230,7 @@ def _launcher_command(args: argparse.Namespace, extra_args: list[str]) -> list[s
         "--session",
         args.session,
         "--domain-id",
-        str(args.domain_id),
+        str(domain_id),
         "--zmq-port",
         str(args.zmq_port),
         "--debug-port",
@@ -219,7 +264,7 @@ def _launcher_command(args: argparse.Namespace, extra_args: list[str]) -> list[s
         "--obs-config",
         str(_resolve_release_file("policy/release/observation_config.yaml")),
         "--proxy-bin",
-        str(_resolve_proxy_bin()),
+        str(_resolve_proxy_bin(args)),
         "--target-rate-limit",
         str(args.target_rate_limit),
         "--post-unlock-target-rate-limit",
@@ -313,6 +358,8 @@ def _launcher_command(args: argparse.Namespace, extra_args: list[str]) -> list[s
         cmd.append("--headless")
     if not args.no_root_yaw_only:
         cmd.append("--pose-root-yaw-only")
+    if args.isaaclab_root is not None:
+        cmd.extend(["--isaaclab-root", str(args.isaaclab_root.expanduser())])
     cmd.extend(extra_args)
     return cmd
 

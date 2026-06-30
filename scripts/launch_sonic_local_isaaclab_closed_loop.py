@@ -801,6 +801,7 @@ def _launch_tmux(args: argparse.Namespace, commands: list[WindowCommand]) -> Non
 
     first, *rest = commands
     _run(["tmux", "new-session", "-d", "-s", args.session, "-n", first.name, _shell_window(first.command)])
+    _run(["tmux", "set-option", "-t", args.session, "mouse", "on"])
 
     waits = {
         "input": args.wait_after_input,
