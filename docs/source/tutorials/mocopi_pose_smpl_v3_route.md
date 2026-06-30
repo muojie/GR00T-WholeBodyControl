@@ -461,7 +461,7 @@ git -C /home/nolo/xiaoyang_IssacLab/IsaacLab switch -c optimization/v3-isaaclab-
 本轮只做当前分支最小调通，不混入旧的 safety-assist/free-root 改动：
 
 - IsaacLab `SonicRobotStatePublisherAction` 发布包补 `root_pos_w`，让 `collect_sonic_isaaclab_metrics.py` 能计算 root height、tilt、body FK 和 joint tracking。
-- v3 wrapper 新增 `--isaac-target-field {body_q_target,last_action}`，默认 `body_q_target`。当前 IsaacLab root-locked 指标比较的是 deploy `body_q_target`，直接消费 `last_action` 会把 policy action 与 motion reference 混在一起，导致 joint RMSE 系统性偏高。
+- v3 wrapper 新增 `--isaac-target-field {body_q_target,last_action}`。本小节最初把默认切到 `body_q_target`，用于对齐 root-locked reference 指标；2026-06-30 free-root 复核后已修正为默认 `last_action`，因为 `last_action` 才是 deploy policy 输出给物理控制的目标。
 - `--target-rate-limit` 仍保持 `0.003`。在 `body_q_target` 下，`0.006/0.01/0.02` 虽然能略降 joint RMSE，但会抬高 body RMSE、关节速度和高度代价，综合分数更低。
 
 对比烟测均使用 `/home/nolo/MCPM_20260526_190029.BVH`、`stable + root_yaw_only + g1_fk`、12s headless IsaacLab 闭环：
@@ -491,7 +491,38 @@ scripts/launch_sonic_v3_tuning_closed_loop.py \
 - samples：`235`，deploy/Isaac FPS `50.01 / 200.02`
 - 所有 checks 为 `true`，包括 `base_height`、`root_tilt`、`joint_tracking_rmse`、`body_keypoint_rmse`、`target_step_peak`。
 
-结论：基于用户当前 IsaacLab 分支的新调试分支，v3 root-locked 默认一键路径已从“协议字段缺失 + 目标字段错配”修到可量化通过。下一步应扩展到 20s/45s 与多 BVH IsaacLab 回归，再回到 free-root 解锁；当前不要再单纯放大 target rate。
+结论：基于用户当前 IsaacLab 分支的新调试分支，v3 root-locked reference smoke 已从“协议字段缺失”修到可量化；但 `body_q_target` 只适合作为 root-locked reference 诊断，不应作为 free-root 物理控制默认目标。
+
+### 2026-06-30 IsaacLab free-root target-field correction
+
+用户指出当前 IsaacLab 分支之前可以站住，复核后确认上一轮思路有误：把 `body_q_target` 设为默认控制目标会改善 root-locked reference 指标，但 free-root 解锁时更容易失稳。真正的 IsaacLab 物理控制目标应保持为 deploy 的 `last_action`。
+
+证据：
+
+- 10:28 / 10:58 两次 60s `pass=true` 记录没有触发 unlock，属于 root-locked 通过；日志没有 `root pose unlock`，`root_tilt max=0`。
+- 11:27 运行手动触发 `U unlock` 后，`body_q_target` 控制在 `53.15s` 首次 fall，root 高度最小 `0.071 m`，root tilt max `1.799 rad`。
+- 同一当前分支用独立端口做自动 unlock A/B，`last_action` 明显更符合可站立控制目标。
+
+自动 unlock A/B 均使用 `/home/nolo/MCPM_20260526_190029.BVH`、`stable + root_yaw_only + g1_fk`：
+
+| case | duration | pass | fall / first fall | root tilt max | base height min | joint RMSE mean / p95 | body RMSE mean | 结论 |
+|---|---:|---|---|---:|---:|---|---:|---|
+| `last_action` + auto-unlock | 20s | `true` | `0 / none` | `0.000 rad` | `0.696 m` | `0.337 / - rad` | `0.044 m` | 能站住且过当前 gate |
+| `body_q_target` + auto-unlock | 20s | `false` | `0 / none` | `0.000 rad` | `0.712 m` | `0.211 / - rad` | `0.058 m` | reference RMSE 好，但 gate 已失败，速度更高 |
+| `last_action` + auto-unlock | 60s | `false` | `0 / none` | `0.000 rad` | `0.658 m` | `0.393 / 0.536 rad` | `0.064 m` | 60s 不摔；失败来自 reference RMSE / absolute yaw gate |
+| `body_q_target` + manual unlock | 60s | `false` | `135 / 53.15s` | `1.799 rad` | `0.071 m` | `0.233 / 0.370 rad` | `0.060 m` | 指标表面更贴 reference，但 free-root 物理摔倒 |
+
+因此 v3 wrapper 默认恢复为：
+
+```text
+--isaac-target-field last_action
+```
+
+后续指标也要拆开看：
+
+- **控制稳定性**：free-root 下优先看 fall、root height、root tilt、joint velocity、action tracking。
+- **reference 保真度**：`body_q_target` joint/body RMSE 仍保留，但不能单独决定 IsaacLab 物理控制目标。
+- **root yaw**：free-root 不应继续用 deploy absolute yaw 作为唯一 gate；需要 base-relative 或单独诊断项。
 
 ### 2026-06-29 闭环启动记录
 

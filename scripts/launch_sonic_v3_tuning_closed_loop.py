@@ -72,8 +72,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--isaac-target-field",
         choices=["body_q_target", "last_action"],
-        default="body_q_target",
-        help="deploy joint field consumed by IsaacLab; v3 metrics compare against body_q_target",
+        default="last_action",
+        help=(
+            "deploy joint field consumed by IsaacLab. last_action is the physics-control target; "
+            "body_q_target is a root-locked reference-tracking diagnostic."
+        ),
     )
     parser.add_argument(
         "--post-unlock-target-rate-limit",
