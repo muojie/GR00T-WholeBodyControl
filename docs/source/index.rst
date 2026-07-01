@@ -99,6 +99,7 @@ Documentation
    tutorials/windows_isaaclab_deploy_bridge
    tutorials/sony_isaaclab_stability_optimization
    tutorials/mocopi_pose_smpl_v3_route
+   tutorials/v3_smpl_g1_tuning_tracking
    tutorials/data_collection
    tutorials/vla_workflow
    tutorials/vla_inference
