@@ -192,6 +192,26 @@ def _build_parser() -> argparse.ArgumentParser:
         default=100,
         help="auto-run IsaacLab's U/unlock callback after this many valid deploy target packets; 0 disables",
     )
+    parser.add_argument(
+        "--auto-reset-on-fall",
+        action="store_true",
+        help="ask IsaacLab deploy mode to env.reset() when robot root height/tilt indicates a fall",
+    )
+    parser.add_argument(
+        "--fall-reset-min-height",
+        type=float,
+        help="IsaacLab fall auto-reset root height threshold in meters",
+    )
+    parser.add_argument(
+        "--fall-reset-max-tilt",
+        type=float,
+        help="IsaacLab fall auto-reset root tilt threshold in radians",
+    )
+    parser.add_argument(
+        "--fall-reset-grace-steps",
+        type=int,
+        help="IsaacLab env steps to suppress fall checks immediately after a reset",
+    )
 
     parser.add_argument("--zmq-port", type=int, default=5556, help="mocap manager -> deploy port")
     parser.add_argument("--debug-port", type=int, default=5557, help="deploy g1_debug ZMQ port")
@@ -517,6 +537,14 @@ def _isaaclab_command(args: argparse.Namespace) -> str:
         f"export SONIC_DEPLOY_POST_UNLOCK_RATE_LIMIT_RELEASE_STEPS={_quote(args.post_unlock_rate_limit_release_steps)}",
         f"export SONIC_DEPLOY_AUTO_UNLOCK_AFTER_PACKETS={_quote(args.auto_unlock_after_packets)}",
     ]
+    if args.auto_reset_on_fall:
+        commands.append("export SONIC_DEPLOY_AUTO_RESET_ON_FALL=1")
+    if args.fall_reset_min_height is not None:
+        commands.append(f"export SONIC_DEPLOY_FALL_RESET_MIN_HEIGHT={_quote(args.fall_reset_min_height)}")
+    if args.fall_reset_max_tilt is not None:
+        commands.append(f"export SONIC_DEPLOY_FALL_RESET_MAX_TILT={_quote(args.fall_reset_max_tilt)}")
+    if args.fall_reset_grace_steps is not None:
+        commands.append(f"export SONIC_DEPLOY_FALL_RESET_GRACE_STEPS={_quote(args.fall_reset_grace_steps)}")
     for env_item in args.isaac_env:
         if "=" not in env_item:
             raise ValueError(f"--isaac-env must be KEY=VALUE, got {env_item!r}")

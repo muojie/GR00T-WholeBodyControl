@@ -31,6 +31,7 @@ DEFAULT_DOMAIN_ID = 4
 BASELINE_STACK_DOMAIN_ID = 0
 DEFAULT_BVH_FILE = Path.home() / "RAYNOS_Motion1.bvh"
 ORIGINAL_REPO_ROOT = Path.home() / "GR00T-WholeBodyControl"
+DEFAULT_ISAACLAB_ROOT = Path.home() / "xiaoyang_IssacLab" / "IsaacLab-v1-free-root-20260629"
 BASELINE_ISAACLAB_ROOT = Path.home() / "xiaoyang_IssacLab" / "IsaacLab-baseline-20260630"
 BASELINE_PROXY_BIN = (
     Path("/tmp/GR00T-WholeBodyControl-baseline-20260630")
@@ -59,7 +60,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "and force DDS domain 0 for the current v3 deploy binary"
         ),
     )
-    parser.add_argument("--isaaclab-root", type=Path, help="override IsaacLab worktree passed to the base launcher")
+    parser.add_argument(
+        "--isaaclab-root",
+        type=Path,
+        help=f"override IsaacLab worktree passed to the base launcher; default is {DEFAULT_ISAACLAB_ROOT}",
+    )
     parser.add_argument("--proxy-bin", type=Path, help="override C++ lowstate proxy binary")
 
     parser.add_argument("--zmq-port", type=int, default=DEFAULT_ZMQ_PORT)
@@ -149,6 +154,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--post-unlock-safety-tilt-start", type=float)
     parser.add_argument("--post-unlock-safety-tilt-full", type=float)
     parser.add_argument("--post-unlock-safety-lift-velocity", type=float)
+    parser.add_argument(
+        "--auto-reset-on-fall",
+        action="store_true",
+        help="enable IsaacLab env.reset() watchdog when root height/tilt indicates a fall",
+    )
+    parser.add_argument("--fall-reset-min-height", type=float)
+    parser.add_argument("--fall-reset-max-tilt", type=float)
+    parser.add_argument("--fall-reset-grace-steps", type=int)
     parser.add_argument("--base-yaw-rate-limit", type=float)
     parser.add_argument("--base-translation-rate-limit", type=float)
     parser.add_argument("--bvh-g1-max-joint-velocity", type=float, default=5.5)
@@ -206,6 +219,8 @@ def _launcher_command(args: argparse.Namespace, extra_args: list[str]) -> list[s
             args.bvh_stream_port = BASELINE_STACK_BVH_STREAM_PORT
         if args.isaaclab_root is None:
             args.isaaclab_root = BASELINE_ISAACLAB_ROOT
+    elif args.isaaclab_root is None:
+        args.isaaclab_root = DEFAULT_ISAACLAB_ROOT
 
     domain_id = args.domain_id
     if domain_id is None:
@@ -284,6 +299,14 @@ def _launcher_command(args: argparse.Namespace, extra_args: list[str]) -> list[s
         "--isaac-env",
         f"SONIC_DEPLOY_TARGET_FIELD={args.isaac_target_field}",
     ]
+    if args.auto_reset_on_fall:
+        cmd.append("--auto-reset-on-fall")
+    if args.fall_reset_min_height is not None:
+        cmd.extend(["--fall-reset-min-height", str(args.fall_reset_min_height)])
+    if args.fall_reset_max_tilt is not None:
+        cmd.extend(["--fall-reset-max-tilt", str(args.fall_reset_max_tilt)])
+    if args.fall_reset_grace_steps is not None:
+        cmd.extend(["--fall-reset-grace-steps", str(args.fall_reset_grace_steps)])
     if args.post_unlock_follow_base:
         cmd.extend(["--isaac-env", "SONIC_DEPLOY_POST_UNLOCK_FOLLOW_BASE=1"])
         cmd.extend(["--isaac-env", "SONIC_DEPLOY_FOLLOW_BASE_YAW=1"])
