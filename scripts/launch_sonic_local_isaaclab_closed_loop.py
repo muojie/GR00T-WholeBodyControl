@@ -491,6 +491,12 @@ def _path_arg(path: Path, base: Path) -> str:
         return str(path)
 
 
+def _isaaclab_pythonpath(args: argparse.Namespace) -> str:
+    source_root = args.isaaclab_root / "source"
+    entries = sorted(path for path in source_root.iterdir() if path.is_dir()) if source_root.exists() else []
+    return ":".join(str(path) for path in entries)
+
+
 def _isaaclab_command(args: argparse.Namespace) -> str:
     kit_args = [
         "--/app/vsync=false",
@@ -518,6 +524,7 @@ def _isaaclab_command(args: argparse.Namespace) -> str:
         f"source {_quote(args.conda_sh)}",
         f"conda activate {_quote(args.conda_env)}",
         "export PYTHONUNBUFFERED=1",
+        f"export PYTHONPATH={_quote(_isaaclab_pythonpath(args))}:${{PYTHONPATH:-}}",
         f"export UNITREE_DDS_INTERFACE={_quote(args.interface)}",
         f"export UNITREE_DDS_DOMAIN_ID={_quote(args.domain_id)}",
         "export SONIC_DEPLOY_TRANSPORT=zmq",
