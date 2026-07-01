@@ -164,6 +164,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fall-reset-grace-steps", type=int)
     parser.add_argument("--base-yaw-rate-limit", type=float)
     parser.add_argument("--base-translation-rate-limit", type=float)
+    parser.add_argument("--bvh-g1-smpl-joints-source", choices=["g1_fk", "skeleton"], default="g1_fk")
+    parser.add_argument("--bvh-g1-retarget-scale", type=float, default=1.0)
+    parser.add_argument("--bvh-g1-lower-scale", type=float, default=0.60)
+    parser.add_argument("--bvh-g1-upper-scale", type=float, default=0.85)
+    parser.add_argument("--bvh-g1-wrist-scale", type=float, default=0.55)
+    parser.add_argument("--bvh-g1-waist-scale", type=float, default=0.25)
     parser.add_argument("--bvh-g1-max-joint-velocity", type=float, default=5.5)
     parser.add_argument("--bvh-g1-max-joint-step", type=float, default=0.0)
     parser.add_argument("--bvh-g1-joint-filter-alpha", type=float, default=0.45)
@@ -259,7 +265,17 @@ def _launcher_command(args: argparse.Namespace, extra_args: list[str]) -> list[s
         "--pose-filter-profile",
         args.pose_filter_profile,
         "--bvh-g1-smpl-joints-source",
-        "g1_fk",
+        args.bvh_g1_smpl_joints_source,
+        "--bvh-g1-retarget-scale",
+        str(args.bvh_g1_retarget_scale),
+        "--bvh-g1-lower-scale",
+        str(args.bvh_g1_lower_scale),
+        "--bvh-g1-upper-scale",
+        str(args.bvh_g1_upper_scale),
+        "--bvh-g1-wrist-scale",
+        str(args.bvh_g1_wrist_scale),
+        "--bvh-g1-waist-scale",
+        str(args.bvh_g1_waist_scale),
         "--bvh-g1-max-joint-velocity",
         str(args.bvh_g1_max_joint_velocity),
         "--bvh-g1-max-joint-step",

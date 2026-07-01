@@ -285,6 +285,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Pass --pose-root-yaw-only to mocap_manager_server.py for v3 anchor/root A/B tests.",
     )
     parser.add_argument("--mocap-log-interval-s", type=float, default=1.0)
+    parser.add_argument("--bvh-g1-retarget-scale", type=float, default=1.0)
+    parser.add_argument("--bvh-g1-lower-scale", type=float, default=0.60)
+    parser.add_argument("--bvh-g1-upper-scale", type=float, default=0.85)
+    parser.add_argument("--bvh-g1-wrist-scale", type=float, default=0.55)
+    parser.add_argument("--bvh-g1-waist-scale", type=float, default=0.25)
     parser.add_argument("--bvh-g1-max-joint-velocity", type=float, default=6.0)
     parser.add_argument("--bvh-g1-max-joint-step", type=float, default=0.0)
     parser.add_argument("--bvh-g1-joint-filter-alpha", type=float, default=0.45)
@@ -675,6 +680,16 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
         mocap_args.extend(["--pose-filter-profile", args.pose_filter_profile])
     mocap_args.extend(
         [
+            "--bvh-g1-retarget-scale",
+            str(args.bvh_g1_retarget_scale),
+            "--bvh-g1-lower-scale",
+            str(args.bvh_g1_lower_scale),
+            "--bvh-g1-upper-scale",
+            str(args.bvh_g1_upper_scale),
+            "--bvh-g1-wrist-scale",
+            str(args.bvh_g1_wrist_scale),
+            "--bvh-g1-waist-scale",
+            str(args.bvh_g1_waist_scale),
             "--bvh-g1-max-joint-velocity",
             str(args.bvh_g1_max_joint_velocity),
             "--bvh-g1-max-joint-step",
