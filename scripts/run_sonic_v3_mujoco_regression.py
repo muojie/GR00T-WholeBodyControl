@@ -124,6 +124,7 @@ def _tmux_session_exists(session: str) -> bool:
 def _tcp_port_available(port: int) -> bool:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(("0.0.0.0", int(port)))
         return True
     except OSError:
@@ -332,6 +333,8 @@ def main(argv: list[str] | None = None) -> int:
             print("[sonic-v3-regression] " + " ".join(cmd))
             if args.dry_run:
                 continue
+            summary_path.unlink(missing_ok=True)
+            samples_path.unlink(missing_ok=True)
             _kill_session(args.session)
             _wait_for_cleanup(args.session, launcher_ports, args.cleanup_timeout_s)
             result = subprocess.run(cmd, cwd=REPO_ROOT, check=False)

@@ -51,6 +51,7 @@ def _tmux_session_exists(session: str) -> bool:
 def _port_is_available(port: int) -> bool:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(("0.0.0.0", port))
         return True
     except OSError:
@@ -252,9 +253,7 @@ def _preflight(args: argparse.Namespace) -> None:
         if not path.exists():
             errors.append(f"{path_name.replace('_', '-')} not found: {path}")
     if not args.ignore_port_check:
-        ports_to_check = [args.zmq_port, args.debug_port]
-        if not args.no_metrics and not args.no_sim_metrics:
-            ports_to_check.append(args.sim_metrics_port)
+        ports_to_check = _ports_to_check(args)
         busy_ports = [port for port in ports_to_check if not _port_is_available(port)]
         if busy_ports:
             errors.append("required TCP port(s) already in use: " + ", ".join(str(port) for port in busy_ports))
@@ -265,6 +264,24 @@ def _preflight(args: argparse.Namespace) -> None:
         print("", file=sys.stderr)
         print("Use --dry-run to inspect commands, or fix the missing prerequisite before launching.", file=sys.stderr)
         sys.exit(2)
+
+
+def _ports_to_check(args: argparse.Namespace) -> list[int]:
+    ports_to_check = [args.zmq_port, args.debug_port]
+    if not args.no_metrics and not args.no_sim_metrics:
+        ports_to_check.append(args.sim_metrics_port)
+    return sorted(set(int(port) for port in ports_to_check))
+
+
+def _wait_for_cleanup(args: argparse.Namespace, timeout_s: float = 10.0) -> None:
+    if args.ignore_port_check:
+        return
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    ports_to_check = _ports_to_check(args)
+    while time.monotonic() < deadline:
+        if all(_port_is_available(port) for port in ports_to_check):
+            return
+        time.sleep(0.25)
 
 
 def _mujoco_command(args: argparse.Namespace) -> str:
@@ -534,6 +551,7 @@ def _launch_tmux(args: argparse.Namespace, commands: list[WindowCommand]) -> Non
             )
             sys.exit(2)
         _run(["tmux", "kill-session", "-t", args.session])
+        _wait_for_cleanup(args)
 
     first, *rest = commands
     _run(["tmux", "new-session", "-d", "-s", args.session, "-n", first.name, _shell_window(first.command)])
@@ -566,6 +584,9 @@ def main() -> int:
     if args.dry_run:
         _print_dry_run(commands)
         return 0
+    if args.replace and _tmux_session_exists(args.session):
+        _run(["tmux", "kill-session", "-t", args.session])
+        _wait_for_cleanup(args)
     _preflight(args)
     _launch_tmux(args, commands)
     return 0
