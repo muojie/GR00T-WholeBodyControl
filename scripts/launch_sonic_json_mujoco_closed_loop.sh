@@ -26,6 +26,8 @@ JSON_FILE=${JSON_FILE:-/home/nolo/saveBoneData_Yup20260702.json}
 BVH_STREAM_PORT=${BVH_STREAM_PORT:-12362}
 MOCAP_ZMQ_PORT=${MOCAP_ZMQ_PORT:-5656}
 DEBUG_PORT=${DEBUG_PORT:-5657}
+BASE_POSE_PORT=${BASE_POSE_PORT:-5658}
+BAND_RELEASE_S=${BAND_RELEASE_S:-90}
 STATE_PORT=${STATE_PORT:-5560}
 FPS=${FPS:-50}
 COORDINATE_FRAME=${COORDINATE_FRAME:-left_handed_yup}
@@ -39,6 +41,7 @@ SIM_PY=${SIM_PY:-${REPO_ROOT}/.venv_sim/bin/python}
 TELEOP_PY=${TELEOP_PY:-${REPO_ROOT}/.venv_teleop/bin/python}
 SENDER_SCRIPT=${SENDER_SCRIPT:-${REPO_ROOT}/gear_sonic/scripts/sony_bonedata_json_stream_sender.py}
 MANAGER_SCRIPT=${MANAGER_SCRIPT:-${REPO_ROOT}/gear_sonic/scripts/mocap_manager_server.py}
+MANAGER_EXTRA_ARGS=${MANAGER_EXTRA_ARGS:-}
 DEPLOY_ROOT=${DEPLOY_ROOT:-${REPO_ROOT}/gear_sonic_deploy}
 
 usage() {
@@ -315,6 +318,8 @@ cd "${REPO_ROOT}"
 source "${REPO_ROOT}/.venv_sim/bin/activate"
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="${REPO_ROOT}:\${PYTHONPATH:-}"
+export SONIC_SIM_BASE_POSE_PORT="${BASE_POSE_PORT}"
+export SONIC_SIM_BAND_RELEASE_S="${BAND_RELEASE_S}"
 "${SIM_PY}" -u gear_sonic/scripts/run_sim_loop.py \
   2>&1 | tee "${LOG_DIR}/mujoco.log"
 status=\$?
@@ -342,7 +347,7 @@ export PYTHONPATH="${REPO_ROOT}:\${PYTHONPATH:-}"
   --pose-encoder-mode g1 \
   --pose-protocol-version 1 \
   --zmq-port "${MOCAP_ZMQ_PORT}" \
-  --log-interval-s 1.0 \
+  --log-interval-s 1.0 ${MANAGER_EXTRA_ARGS} \
   2>&1 | tee "${LOG_DIR}/manager.log"
 status=\$?
 echo

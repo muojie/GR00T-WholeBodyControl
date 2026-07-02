@@ -5,10 +5,12 @@ commands, steps physics, and publishes observations back via the SDK bridge.
 BaseSimulator wraps DefaultEnv with rate-limiting and viewer/image update loops.
 """
 
+import json
 import os
 import pathlib
 from pathlib import Path
 import pickle
+import socket
 import tempfile
 from threading import Lock, Thread
 import time
@@ -60,6 +62,25 @@ class DefaultEnv:
         self.reward_lock = Lock()
         self.unitree_bridge = None
         self.onscreen = onscreen
+
+        # Optional floating-base ground-truth UDP publisher for closed-loop
+        # diagnostics (base translation is not available via LowState/g1_debug).
+        # Enable with SONIC_SIM_BASE_POSE_PORT=<udp-port>; off by default.
+        self._base_pose_addr = None
+        self._base_pose_sock = None
+        self._base_pose_decimation = max(1, int(os.environ.get("SONIC_SIM_BASE_POSE_EVERY", "20")))
+        self._base_pose_counter = 0
+        base_pose_port = os.environ.get("SONIC_SIM_BASE_POSE_PORT")
+        if base_pose_port:
+            self._base_pose_addr = ("127.0.0.1", int(base_pose_port))
+            self._base_pose_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            print(f"[DefaultEnv] publishing base pose ground truth to udp://127.0.0.1:{base_pose_port}")
+
+        # Optional timed elastic-band auto-release for unattended closed-loop
+        # runs: the virtual band holds the robot while deploy warms up, but the
+        # robot cannot walk while suspended and the only manual release is the
+        # viewer's key 9. SONIC_SIM_BAND_RELEASE_S=<sim-seconds>; 0/unset = off.
+        self._band_release_s = float(os.environ.get("SONIC_SIM_BAND_RELEASE_S", "0") or 0.0)
 
         self.init_scene()
         self.last_reward = 0
@@ -387,6 +408,14 @@ class DefaultEnv:
         return obs
 
     def sim_step(self):
+        if (
+            self._band_release_s > 0
+            and getattr(self, "elastic_band", None) is not None
+            and self.elastic_band.enable
+            and self.mj_data.time >= self._band_release_s
+        ):
+            self.elastic_band.enable = False
+            print(f"[DefaultEnv] elastic band auto-released at sim t={self.mj_data.time:.1f}s")
         self.obs = self.prepare_obs()
         self.unitree_bridge.PublishLowState(self.obs)
         if self.unitree_bridge.joystick:
@@ -430,6 +459,23 @@ class DefaultEnv:
         mujoco.mj_step(self.mj_model, self.mj_data)
 
         self.check_fall()
+
+        if self._base_pose_sock is not None and self.use_floating_root_link:
+            self._base_pose_counter += 1
+            if self._base_pose_counter % self._base_pose_decimation == 0:
+                payload = {
+                    "sim_time_s": float(self.mj_data.time),
+                    "wall_time_s": time.time(),
+                    "base_pos": self.mj_data.qpos[:3].tolist(),
+                    "base_quat_wxyz": self.mj_data.qpos[3:7].tolist(),
+                    "fall": bool(self.fall),
+                }
+                try:
+                    self._base_pose_sock.sendto(
+                        json.dumps(payload).encode("utf-8"), self._base_pose_addr
+                    )
+                except OSError:
+                    pass
 
     def apply_perturbation(self, key):
         perturbation_x_body = 0.0
