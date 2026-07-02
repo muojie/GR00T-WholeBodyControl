@@ -574,7 +574,13 @@ class G1Deploy {
         std::cout << "**********************************************************" << std::endl;
       }
 
-      if (current_frame_ == 0) {
+      // Frame-0 re-anchor is only valid for pre-loaded clips (loop restarts,
+      // motion switches). Streamed motion legitimately idles at frame 0 of the
+      // sliding window every tick, and its frame 0 advances with the stream —
+      // re-anchoring here would zero the reference heading error each tick and
+      // the policy would never turn the base. Streamed motion anchors only via
+      // reinitialize_heading_ (catch-up / mode toggle).
+      if (current_frame_ == 0 && current_motion_->name != "streamed") {
         const auto motion_body_quat_init = current_motion_->BodyQuaternions(0);
         init_ref_data_root_rot_array_ = motion_body_quat_init[0];
       }
