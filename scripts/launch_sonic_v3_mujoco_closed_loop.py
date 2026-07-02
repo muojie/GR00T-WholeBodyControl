@@ -163,6 +163,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sony-bonedata-joints-per-frame", type=int, default=27)
     parser.add_argument("--sony-bonedata-fps", type=float, help="Sony BoneData sender FPS; defaults to --bvh-fps or 50.")
     parser.add_argument("--sony-bonedata-source-fps", type=float, help="Original Sony BoneData capture FPS.")
+    parser.add_argument("--sony-bonedata-start-frame", type=int, default=0)
     parser.add_argument(
         "--bvh-stream-bonedata-coordinate-frame",
         choices=["sonic_zup", "left_handed_zup", "left_handed_yup", "zup_flip_xy"],
@@ -191,6 +192,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--pose-window-size", type=int, default=80)
     parser.add_argument("--mocap-log-interval-s", type=float, default=1.0)
+    parser.add_argument("--bvh-g1-retarget-scale", type=float, default=1.0)
+    parser.add_argument("--bvh-g1-lower-scale", type=float, default=0.60)
+    parser.add_argument("--bvh-g1-upper-scale", type=float, default=0.85)
+    parser.add_argument("--bvh-g1-wrist-scale", type=float, default=0.55)
+    parser.add_argument("--bvh-g1-waist-scale", type=float, default=0.25)
     parser.add_argument("--bvh-g1-max-joint-velocity", type=float, default=5.5)
     parser.add_argument("--bvh-g1-max-joint-step", type=float, default=0.0)
     parser.add_argument("--bvh-g1-joint-filter-alpha", type=float, default=0.35)
@@ -387,6 +393,16 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
         "g1_fk",
         "--pose-filter-profile",
         args.pose_filter_profile,
+        "--bvh-g1-retarget-scale",
+        args.bvh_g1_retarget_scale,
+        "--bvh-g1-lower-scale",
+        args.bvh_g1_lower_scale,
+        "--bvh-g1-upper-scale",
+        args.bvh_g1_upper_scale,
+        "--bvh-g1-wrist-scale",
+        args.bvh_g1_wrist_scale,
+        "--bvh-g1-waist-scale",
+        args.bvh_g1_waist_scale,
         "--bvh-g1-max-joint-velocity",
         args.bvh_g1_max_joint_velocity,
         "--bvh-g1-max-joint-step",
@@ -483,6 +499,8 @@ def _bvh_sender_command(args: argparse.Namespace) -> str:
             fps,
             "--joints-per-frame",
             args.sony_bonedata_joints_per_frame,
+            "--start-frame",
+            args.sony_bonedata_start_frame,
             "--log-interval-s",
             1,
         ]

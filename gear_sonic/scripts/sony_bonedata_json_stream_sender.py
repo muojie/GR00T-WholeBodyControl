@@ -67,6 +67,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Stop after sending this many stream frames. Use 0 for no explicit limit.",
     )
     parser.add_argument(
+        "--start-frame",
+        type=int,
+        default=0,
+        help="Start streaming from this source frame index. Loops return to this frame.",
+    )
+    parser.add_argument(
         "--startup-delay-s",
         type=float,
         default=0.0,
@@ -112,7 +118,8 @@ def main() -> None:
     if args.startup_delay_s > 0.0:
         time.sleep(args.startup_delay_s)
 
-    frame_idx = 0
+    start_frame = min(max(0, int(args.start_frame)), max(0, motion.frame_count - 1))
+    frame_idx = start_frame
     stream_frame_idx = 0
     next_tick_s = time.time()
     last_log_s = 0.0
@@ -135,7 +142,7 @@ def main() -> None:
             if frame_idx >= motion.frame_count:
                 if not args.loop:
                     break
-                frame_idx = 0
+                frame_idx = start_frame
 
             now = time.time()
             if args.log_interval_s > 0.0 and now - last_log_s >= args.log_interval_s:
