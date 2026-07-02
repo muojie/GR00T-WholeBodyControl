@@ -11,6 +11,10 @@ MOCAP_ZMQ_PORT=${MOCAP_ZMQ_PORT:-5556}
 DEBUG_PORT=${DEBUG_PORT:-5557}
 STATE_PORT=${STATE_PORT:-5560}
 FPS=${FPS:-50}
+COORDINATE_FRAME=${COORDINATE_FRAME:-left_handed_yup}
+BONEDATA_POSITION_SCALE=${BONEDATA_POSITION_SCALE:-1.0}
+BONEDATA_INPUT_QUAT_ORDER=${BONEDATA_INPUT_QUAT_ORDER:-xyzw}
+BONEDATA_ROTATION_MODE=${BONEDATA_ROTATION_MODE:-input}
 
 ISAACLAB_ROOT=${ISAACLAB_ROOT:-/home/nolo/xiaoyang_IssacLab/IsaacLab}
 CONDA_SH=${CONDA_SH:-/home/nolo/miniconda3/etc/profile.d/conda.sh}
@@ -117,6 +121,7 @@ chmod +x "${RUNTIME_DIR}/isaaclab.sh"
 
 echo "[sonic-json] session=${SESSION}"
 echo "[sonic-json] json=${JSON_FILE}"
+echo "[sonic-json] receiver_coordinate_frame=${COORDINATE_FRAME}"
 echo "[sonic-json] bvh_stream_port=${BVH_STREAM_PORT} mocap_zmq_port=${MOCAP_ZMQ_PORT}"
 
 "${LAUNCHER_PY}" -u "${LAUNCHER}" \
@@ -126,6 +131,10 @@ echo "[sonic-json] bvh_stream_port=${BVH_STREAM_PORT} mocap_zmq_port=${MOCAP_ZMQ
   --no-isaaclab \
   --no-bvh-stream-sender \
   --bvh-stream-port "${BVH_STREAM_PORT}" \
+  --bvh-stream-bonedata-coordinate-frame "${COORDINATE_FRAME}" \
+  --bvh-stream-bonedata-position-scale "${BONEDATA_POSITION_SCALE}" \
+  --bvh-stream-bonedata-input-quat-order "${BONEDATA_INPUT_QUAT_ORDER}" \
+  --bvh-stream-bonedata-rotation-mode "${BONEDATA_ROTATION_MODE}" \
   --zmq-port "${MOCAP_ZMQ_PORT}" \
   --debug-port "${DEBUG_PORT}" \
   --state-port "${STATE_PORT}"

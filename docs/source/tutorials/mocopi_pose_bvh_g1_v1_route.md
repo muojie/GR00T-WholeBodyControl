@@ -85,7 +85,7 @@ sender 命令：
 [BvhStreamSender] streaming /home/nolo/RAYNOS_Motion1.bvh to udp://127.0.0.1:12352 format=msgpack fps=50.0
 ```
 
-如果要让外部同事开发自己的 sender app，按 [BVH stream sender app 协议](bvh_stream_sender_app_protocol.md) 实现 UDP `bvh_stream_v1` 包即可。app 侧只发 skeleton frame；manager 侧继续负责 BVH/canonical skeleton 到 G1 29 维 joint reference 的 retarget，并通过 POSE v1 发给 deploy。
+如果要让外部同事开发自己的 sender app，按 [BVH stream sender app 协议](bvh_stream_sender_app_protocol.md) 实现 UDP `bvh_stream_v1` 包即可。app 侧只发 skeleton frame；manager 侧继续负责 BVH/canonical skeleton 到 G1 29 维 joint reference 的 retarget，并通过 POSE v1 发给 deploy。Sony `saveBoneData` 上游也可以发送 raw `sony_bonedata_json_v1`，由 manager 接收侧先转换成同一套 skeleton frame。
 
 换 BVH 时只重启 sender。MuJoCo、deploy、manager 可以常驻；MuJoCo 中需要清空状态时，在 viewer 里按 `Backspace`。新的 sender 从 `frame_index=0` 开始时，deploy 侧通过 catch-up reset 切到新 motion window。
 

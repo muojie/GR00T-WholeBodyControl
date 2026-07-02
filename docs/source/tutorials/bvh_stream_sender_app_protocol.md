@@ -53,9 +53,22 @@ manager / deploy 侧的稳定主线固定为：
 
 UDP 不保证可靠到达和顺序。sender 需要按固定 FPS 持续发送最新帧；manager 只消费最新收到的 payload。不要依赖重传，也不要把多帧合并到一个 UDP 包。
 
-## 包字段
+## 两类输入 payload
 
-payload 是一个 map / dict。当前协议名是 `bvh_stream_v1`。
+`--source bvh_stream` 当前接收两类 UDP payload：
+
+| payload | sender 责任 | receiver 责任 |
+|---|---|---|
+| `bvh_stream_v1` | 发送标准化后的 `joint_names/world_positions/world_quat_wxyz` | 直接 retarget 到 G1 |
+| `sony_bonedata_json_v1` | 只发送 BoneData raw `name/position/rotation` 单帧数据 | 在 `BvhStreamUdpSource` 中做 scale、坐标系、四元数顺序和 root-local 转换，再 retarget |
+
+外部通用 sender app 推荐实现 `bvh_stream_v1`。如果上游本身就是 Sony
+`saveBoneData` 结构，推荐发送 `sony_bonedata_json_v1`，把坐标系选择留在 manager
+启动参数里，便于同一个 sender 配合不同接收端调试。
+
+## 标准 `bvh_stream_v1` 包字段
+
+标准 payload 是一个 map / dict，协议名是 `bvh_stream_v1`。
 
 | 字段 | 类型 / shape | 必需 | 用途 |
 |------|--------------|------|------|
@@ -75,6 +88,41 @@ payload 是一个 map / dict。当前协议名是 `bvh_stream_v1`。
 | `packet_format` | string | 可选 | `msgpack` 或 `json`，仅用于诊断 |
 
 `world_positions` 和 `world_quat_wxyz` 可以是普通嵌套 list，也可以是 msgpack-numpy 编码的 ndarray。manager 会转换成 `float32` 并校验形状。
+
+## Raw BoneData `sony_bonedata_json_v1` 包字段
+
+Raw BoneData payload 也是一帧一个 UDP datagram。它不包含
+`world_positions/world_quat_wxyz`，只包含原始 BoneData 单帧字段：
+
+| 字段 | 类型 / shape | 必需 | 用途 |
+|------|--------------|------|------|
+| `format` | string | 是 | 固定为 `sony_bonedata_json_v1` |
+| `schema_version` | int | 建议 | 当前填 `1` |
+| `name` | string list, length `J` | 是 | BoneData 节点名 |
+| `position` | object/list array, length `J` | 是 | 原始 `{x,y,z}` 或 `[x,y,z]` |
+| `rotation` | object/list array, length `J` | 是 | 原始 `{x,y,z,w}` 或长度 4 list |
+| `frame_index` | int | 是 | sender 输出帧序号 |
+| `source_frame_index` | int | 建议 | 原始 JSON 帧号 |
+| `fps` | float | 建议 | sender 实际发送 FPS |
+| `source_fps` | float | 建议 | 原始源 FPS |
+| `source_time_ns` | int | 建议 | sender 发包时间，纳秒 |
+| `path` | string | 可选 | 数据来源路径或 app source id |
+| `motion_name` | string | 可选 | 动作名 |
+
+接收侧转换参数在 manager 上配置：
+
+```bash
+.venv_teleop/bin/python -u gear_sonic/scripts/mocap_manager_server.py \
+  --source bvh_stream \
+  --bvh-stream-port 12352 \
+  --bvh-stream-bonedata-coordinate-frame left_handed_yup \
+  --bvh-stream-bonedata-position-scale 1.0 \
+  --bvh-stream-bonedata-input-quat-order xyzw \
+  --bvh-stream-bonedata-rotation-mode input \
+  --control-mode pose \
+  --pose-encoder-mode g1 \
+  --pose-protocol-version 1
+```
 
 ## JSON 示例
 
@@ -303,4 +351,3 @@ manager 周期日志里重点看：
 | 有包但不出 pose | manager 是否使用 `--control-mode pose --pose-protocol-version 1 --pose-encoder-mode g1` |
 | 动作抖动 | `fps`、实际发送频率、manager `--target-fps` 是否长期不一致 |
 | 换动作后还跟旧动作 | 新 sender 是否从 `frame_index=0` 开始 |
-

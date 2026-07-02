@@ -193,7 +193,10 @@ BVH file
 
 当前推荐路径使用 `--pose-protocol-version 1 --pose-encoder-mode g1`。manager 侧先把 BVH skeleton frame 重定向成 G1 29 维 `joint_pos/joint_vel`，再交给 deploy 的 streamed-motion merger。它不是把 BVH 或 mocopi 原始数据直接交给 deploy。
 
-外部 sender app 只需要实现 UDP `bvh_stream_v1` skeleton frame。字段、坐标系、编码和热切换约束见 [BVH stream sender app 协议](bvh_stream_sender_app_protocol.md)。
+外部 sender app 可以实现标准 UDP `bvh_stream_v1` skeleton frame；如果上游就是
+Sony `saveBoneData` 结构，也可以发送 raw `sony_bonedata_json_v1` 单帧包，让
+manager 接收侧完成坐标系和四元数转换。字段、坐标系、编码和热切换约束见
+[BVH stream sender app 协议](bvh_stream_sender_app_protocol.md)。
 
 MuJoCo release policy 会读取未来帧 observation。不要用早期 `--pose-window-size 5` 做主验证，当前 `--control-mode pose` 不显式设置窗口时默认使用 80 帧；推荐命令里仍保留 `--pose-window-size 80`，否则旧脚本或手工命令容易复现 `Motion streamed completed and waiting following motion`。
 

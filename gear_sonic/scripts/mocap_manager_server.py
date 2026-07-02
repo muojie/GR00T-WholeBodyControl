@@ -31,6 +31,11 @@ from gear_sonic.utils.teleop.sources import (
     RobotPklPlaybackSource,
     resolve_g1_isaaclab_joint_index,
 )
+from gear_sonic.utils.teleop.sources.sony_bonedata_json import (
+    SONY_BONEDATA_COORDINATE_FRAMES,
+    SONY_BONEDATA_INPUT_QUAT_ORDERS,
+    SONY_BONEDATA_ROTATION_MODES,
+)
 from gear_sonic.utils.teleop.zmq.zmq_planner_sender import (
     build_command_message,
     build_planner_message,
@@ -322,6 +327,11 @@ def _create_source(args: argparse.Namespace):
             recv_size=args.bvh_stream_recv_size,
             retarget_config=retarget_config,
             align_root=not args.bvh_g1_no_align_root,
+            bonedata_position_scale=args.bvh_stream_bonedata_position_scale,
+            bonedata_input_quat_order=args.bvh_stream_bonedata_input_quat_order,
+            bonedata_rotation_mode=args.bvh_stream_bonedata_rotation_mode,
+            bonedata_coordinate_frame=args.bvh_stream_bonedata_coordinate_frame,
+            bonedata_local_root=args.bvh_stream_bonedata_local_root,
         )
         description = (
             f"listening for BVH stream UDP on {args.bvh_stream_host}:{args.bvh_stream_port} "
@@ -330,7 +340,9 @@ def _create_source(args: argparse.Namespace):
             f"lower={args.bvh_g1_lower_scale:.2f}, upper={args.bvh_g1_upper_scale:.2f}, "
             f"axis_map={args.bvh_g1_axis_map}, body_fk={int(not args.bvh_g1_no_body_fk)}, "
             f"smpl_joints={args.bvh_g1_smpl_joints_source}, "
-            f"align_root={int(not args.bvh_g1_no_align_root)})"
+            f"align_root={int(not args.bvh_g1_no_align_root)}, "
+            f"bonedata_frame={args.bvh_stream_bonedata_coordinate_frame}, "
+            f"bonedata_scale={args.bvh_stream_bonedata_position_scale:g})"
         )
         return source, description
 
@@ -763,6 +775,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=262144,
         help="Maximum UDP packet size for --source bvh_stream.",
+    )
+    parser.add_argument(
+        "--bvh-stream-bonedata-coordinate-frame",
+        choices=SONY_BONEDATA_COORDINATE_FRAMES,
+        default="sonic_zup",
+        help=(
+            "Coordinate frame for raw sony_bonedata_json_v1 packets received by "
+            "--source bvh_stream."
+        ),
+    )
+    parser.add_argument(
+        "--bvh-stream-bonedata-position-scale",
+        type=float,
+        default=1.0,
+        help="Scale raw Sony BoneData positions on the receiver side before retargeting.",
+    )
+    parser.add_argument(
+        "--bvh-stream-bonedata-input-quat-order",
+        choices=SONY_BONEDATA_INPUT_QUAT_ORDERS,
+        default="xyzw",
+        help="Quaternion order for list rotations in raw Sony BoneData packets.",
+    )
+    parser.add_argument(
+        "--bvh-stream-bonedata-rotation-mode",
+        choices=SONY_BONEDATA_ROTATION_MODES,
+        default="input",
+        help="Use converted raw BoneData rotations, or identity rotations for diagnosis.",
+    )
+    parser.add_argument(
+        "--bvh-stream-bonedata-local-root",
+        action="store_true",
+        help="Subtract each raw BoneData frame's root position on the receiver side.",
     )
     parser.add_argument("--bvh-file", help="BVH file to replay when --source bvh or bvh_g1")
     parser.add_argument("--bvh-loop", action="store_true", help="Loop BVH playback")

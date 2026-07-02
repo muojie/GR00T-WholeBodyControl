@@ -35,6 +35,12 @@ DEFAULT_REPO_ROOT = Path.home() / "GR00T-WholeBodyControl"
 DEFAULT_ISAACLAB_ROOT = Path.home() / "xiaoyang_IssacLab" / "IsaacLab"
 DEFAULT_BVH_FILE = Path.home() / "RAYNOS_Motion1.bvh"
 DEFAULT_TASK = "Isaac-SonicSolo-Locomanipulation-G1-v0"
+BONEDATA_COORDINATE_FRAMES = (
+    "sonic_zup",
+    "left_handed_zup",
+    "left_handed_yup",
+    "zup_flip_xy",
+)
 
 
 @dataclass(frozen=True)
@@ -176,6 +182,30 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bvh-stream-host", default="0.0.0.0")
     parser.add_argument("--bvh-stream-port", type=int, default=12352)
     parser.add_argument("--bvh-stream-sender-host", default="127.0.0.1")
+    parser.add_argument(
+        "--bvh-stream-bonedata-coordinate-frame",
+        choices=BONEDATA_COORDINATE_FRAMES,
+        default="sonic_zup",
+        help="receiver-side coordinate conversion for raw sony_bonedata_json_v1 packets",
+    )
+    parser.add_argument(
+        "--bvh-stream-bonedata-position-scale",
+        type=float,
+        default=1.0,
+        help="receiver-side position scale for raw sony_bonedata_json_v1 packets",
+    )
+    parser.add_argument(
+        "--bvh-stream-bonedata-input-quat-order",
+        choices=("xyzw", "wxyz"),
+        default="xyzw",
+        help="receiver-side quaternion order for raw sony_bonedata_json_v1 list rotations",
+    )
+    parser.add_argument(
+        "--bvh-stream-bonedata-rotation-mode",
+        choices=("input", "identity"),
+        default="input",
+        help="receiver-side rotation handling for raw sony_bonedata_json_v1 packets",
+    )
     parser.add_argument(
         "--ask-bvh-stream-sender",
         action="store_true",
@@ -474,6 +504,14 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
         args.bvh_stream_host,
         "--bvh-stream-port",
         str(args.bvh_stream_port),
+        "--bvh-stream-bonedata-coordinate-frame",
+        args.bvh_stream_bonedata_coordinate_frame,
+        "--bvh-stream-bonedata-position-scale",
+        str(args.bvh_stream_bonedata_position_scale),
+        "--bvh-stream-bonedata-input-quat-order",
+        args.bvh_stream_bonedata_input_quat_order,
+        "--bvh-stream-bonedata-rotation-mode",
+        args.bvh_stream_bonedata_rotation_mode,
         "--control-mode",
         "pose",
         "--pose-window-size",
@@ -491,6 +529,7 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
         [
             f"cd {_quote(args.repo_root)}",
             "export PYTHONUNBUFFERED=1",
+            "export PYTHONPATH=$PWD:${PYTHONPATH:-}",
             " ".join(_quote(part) for part in mocap_args),
         ]
     )
@@ -521,6 +560,7 @@ def _bvh_sender_command(args: argparse.Namespace) -> str:
         [
             f"cd {_quote(args.repo_root)}",
             "export PYTHONUNBUFFERED=1",
+            "export PYTHONPATH=$PWD:${PYTHONPATH:-}",
             " ".join(_quote(part) for part in sender_args),
         ]
     )

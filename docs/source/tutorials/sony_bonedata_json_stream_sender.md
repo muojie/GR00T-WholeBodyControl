@@ -1,126 +1,82 @@
-# Sony BoneData JSON stream sender
+# Sony BoneData JSON raw stream sender
 
-本文说明当前 Sony mocopi BoneData JSON 是怎么送进 SONIC 的。重点是：JSON
-文件不是直接给 deploy 或 MuJoCo/IsaacLab 消费，而是先被转换成现有
-`bvh_stream_v1` UDP skeleton frame。
+本文说明当前 Sony mocopi `saveBoneData*.json` 是怎么送进 SONIC 的。重点是：
+sender 只负责把 JSON 按帧发出去；坐标系、四元数顺序、scale、root-local 等转换
+都在 `mocap_manager_server.py --source bvh_stream` 的接收侧完成。
 
 ## 数据链路
 
 ```text
 Sony BoneData JSON
   -> gear_sonic/scripts/sony_bonedata_json_stream_sender.py
-  -> UDP bvh_stream_v1, 默认 127.0.0.1:12352
+  -> UDP sony_bonedata_json_v1 raw frame, 默认 127.0.0.1:12352
   -> mocap_manager_server.py --source bvh_stream
+  -> BvhStreamUdpSource 接收侧转换为 bvh_stream_v1 skeleton frame
   -> skeleton retarget / BVH-G1 route
   -> ZMQ pose protocol v1, encoder_mode=g1, 默认 5556
   -> g1_deploy_onnx_ref
   -> MuJoCo / IsaacLab closed loop
 ```
 
-`mocap_manager_server.py` 里仍然使用 `--source bvh_stream`。这里的
-`bvh_stream` 指的是实时 skeleton wire protocol，不表示输入一定是 BVH 文件。
-BoneData JSON sender 复用这条协议，因此 manager 和 deploy 下游不需要新增一套
-JSON 专用输入类型。
+`--source bvh_stream` 这里表示复用实时 UDP skeleton 输入源，不表示输入文件必须是
+BVH。普通 BVH sender 仍可发送标准 `bvh_stream_v1`；BoneData sender 发送 raw
+`sony_bonedata_json_v1`，由 receiver 自动转换成同一个下游 skeleton frame。
 
 ## 输入 JSON 结构
 
-当前 sender 支持的 BoneData JSON 是一个顶层 dict，包含三组数组：
+BoneData JSON 顶层是 dict，包含三组数组：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `name` | string array | 每个 bone / joint 的名字 |
-| `position` | object array | 每项为 `{x, y, z}` |
-| `rotation` | object array | 每项为 `{x, y, z, w}`，即 `xyzw` 四元数 |
+| `name` | string array | bone / joint 名称 |
+| `position` | object/list array | 每项为 `{x, y, z}` 或 `[x, y, z]` |
+| `rotation` | object/list array | 每项为 `{x, y, z, w}` 或长度 4 的 list |
 
-`position` 和 `rotation` 必须按帧展平成一维数组。`name` 支持两种布局。
-
-布局 A：旧格式，`name` 也按帧重复：
+`position` 和 `rotation` 必须按帧展平成一维数组。`name` 支持两种布局：
 
 ```text
-len(name) == len(position) == len(rotation)
-frame_count = len(name) / 27
-frame[i] = entries[i * 27 : (i + 1) * 27]
+布局 A: len(name) == len(position) == len(rotation)，name 每帧重复
+布局 B: len(name) == 27，position/rotation 为 frame_count * 27
 ```
 
-布局 B：新格式，`name` 只保存一帧 27 个节点名：
+同一个 sender 会话中，每帧 27 个节点的顺序必须一致。
 
-```text
-len(name) == 27
-len(position) == len(rotation) == frame_count * 27
-frame[i] = position/rotation[i * 27 : (i + 1) * 27]
-```
+## UDP raw payload
 
-同一个 sender 会话中，每帧的 27 个 `name` 顺序必须一致。sender 会把第一帧的
-名字作为 `joint_names`，后续帧如果名字集合或顺序不一致，应视为输入数据错误。
-
-当前样例的 27 个节点为：
-
-```text
-root, torso_1, torso_2, torso_3, torso_4, torso_5, torso_6, torso_7,
-neck_1, neck_2, head,
-l_shoulder, l_up_arm, l_low_arm, l_hand,
-r_shoulder, r_up_arm, r_low_arm, r_hand,
-l_up_leg, l_low_leg, l_foot, l_toes,
-r_up_leg, r_low_leg, r_foot, r_toes
-```
-
-## sender 做的转换
-
-`sony_bonedata_json_stream_sender.py` 每次取一帧 27 个节点，生成一个
-`bvh_stream_v1` payload，并通过 UDP 发送。
-
-转换规则：
-
-| 输入 | 输出 | 规则 |
-|---|---|---|
-| `name[J]` | `joint_names[J]` | 保持同一帧内顺序 |
-| `position[J].x/y/z` | `world_positions[J,3]` | 转成 float，乘 `--position-scale` |
-| `rotation[J].x/y/z/w` | `world_quat_wxyz[J,4]` | 从 `xyzw` 改排为 `wxyz` |
-| JSON 帧号 | `source_frame_index` | 使用原始 JSON 帧号 |
-| sender 输出帧号 | `frame_index` | 从 0 开始单调递增，循环时继续递增 |
-
-默认假设 BoneData JSON 已经是 SONIC/MuJoCo 主线需要的 Z-up、米制世界坐标，
-所以 `--position-scale` 默认是 `1.0`。如果上游 app 输出厘米制，再显式使用
-`--position-scale 0.01`。
-
-默认保留全局 root translation。只有指定 `--local-root` 时，sender 才会用当前帧
-root 位置减掉所有节点的平移，输出 root-local positions。
-
-## UDP payload
-
-sender 输出的 payload 与 `bvh_stream_sender.py` 保持同一协议名：
+sender 每帧发送一个 UDP datagram，payload 只保留原始 BoneData 字段和帧元数据：
 
 ```json
 {
-  "format": "bvh_stream_v1",
+  "format": "sony_bonedata_json_v1",
   "schema_version": 1,
-  "path": "/home/nolo/下载/saveBoneData0629.json",
-  "motion_name": "saveBoneData0629",
-  "joint_names": ["root", "torso_1", "torso_2"],
+  "path": "/home/nolo/saveBoneData_Yup20260702.json",
+  "motion_name": "saveBoneData_Yup20260702",
+  "joints_per_frame": 27,
   "frame_index": 0,
   "source_frame_index": 0,
   "source_fps": 50.0,
   "fps": 50.0,
   "frame_stride": 1,
   "source_time_ns": 1782791000000000000,
-  "world_positions": [[0.0, 0.0, 1.86]],
-  "world_quat_wxyz": [[1.0, 0.0, 0.0, 0.0]],
+  "name": ["root", "torso_1", "torso_2"],
+  "position": [{"x": 0.0, "y": 1.0, "z": 0.0}],
+  "rotation": [{"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}],
   "packet_format": "msgpack"
 }
 ```
 
-真实 payload 的 `joint_names`、`world_positions`、`world_quat_wxyz` 长度应一致。
-默认包格式是 msgpack；`--format json` 只用于抓包或人工调试。
+sender 不再输出 `world_positions` / `world_quat_wxyz`。这些字段由接收侧生成。
 
-## 单独启动 JSON sender
-
-在仓库根目录运行：
+## 单独启动 sender
 
 ```bash
+cd /home/nolo/GR00T-WholeBodyControl-sony-json-stream-20260702
+export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+
 .venv_teleop/bin/python -u gear_sonic/scripts/sony_bonedata_json_stream_sender.py \
-  --json-file /home/nolo/下载/saveBoneData0629.json \
+  --json-file /home/nolo/saveBoneData_Yup20260702.json \
   --host 127.0.0.1 \
-  --port 12352 \
+  --port 12362 \
   --fps 50 \
   --loop
 ```
@@ -136,128 +92,103 @@ sender 输出的 payload 与 `bvh_stream_sender.py` 保持同一协议名：
 | `--fps` | `50` | 播放和发送频率 |
 | `--source-fps` | 同 `--fps` | 写入 payload 的源数据 FPS |
 | `--loop` | false | 文件播完后从第一帧继续循环 |
-| `--joints-per-frame` | 自动推断 | 当前 Sony 样例是 27 |
-| `--position-scale` | `1.0` | position 乘法缩放 |
-| `--input-quat-order` | `xyzw` | 当前 JSON rotation 字段顺序 |
-| `--coordinate-frame` | `sonic_zup` | 可选 `sonic_zup` / `left_handed_zup` / `left_handed_yup` / `zup_flip_xy` |
-| `--local-root` | false | 是否去掉每帧 root translation |
+| `--joints-per-frame` | `27` | 每帧骨骼/节点数 |
 | `--max-frames` | 不限制 | 调试时只发送前 N 帧 |
 
-## 坐标系选项
+坐标系相关参数不在 sender 上配置。
 
-默认 `--coordinate-frame sonic_zup` 表示 JSON 已经是 SONIC/MuJoCo 主线需要的
-右手 Z-up 米制世界坐标，sender 只做 position scale 和 quaternion `xyzw -> wxyz`。
+## 接收侧转换参数
 
-如果 JSON 是左手 Y-up，并且 position / rotation 没有提前转换，使用：
-
-```bash
-.venv_teleop/bin/python -u gear_sonic/scripts/sony_bonedata_json_stream_sender.py \
-  --json-file /home/nolo/saveBoneData_Yup.json \
-  --host 127.0.0.1 \
-  --port 12352 \
-  --fps 50 \
-  --loop \
-  --coordinate-frame left_handed_yup
-```
-
-`left_handed_yup` 的转换规则：
-
-```text
-position: (x, y, z) -> (-x, -z, y)
-rotation: source xyzw -> wxyz 后，再用同一个左手 Y-up 到右手 Z-up 基变换处理
-```
-
-如果 JSON 已经是 Z-up，只用 `left_handed_zup`；如果 JSON 是 Y-up，不要用
-`left_handed_zup`，否则只会做左右手镜像，不会把上轴从 Y 转到 Z。
-
-如果文件名或上游说明写的是 Y-up，但数值上 root/head/toes 的高度主要落在 `z`
-轴，并且机器人表现为连续倒退，优先使用：
+manager 仍走 BVH-G1 POSE v1 主线。BoneData raw frame 的转换参数现在放在
+receiver 侧：
 
 ```bash
-.venv_teleop/bin/python -u gear_sonic/scripts/sony_bonedata_json_stream_sender.py \
-  --json-file /home/nolo/saveBoneData_Yup.json \
-  --host 127.0.0.1 \
-  --port 12352 \
-  --fps 50 \
-  --loop \
-  --coordinate-frame zup_flip_xy
-```
-
-`zup_flip_xy` 的转换规则：
-
-```text
-position: (x, y, z) -> (-x, -y, z)
-rotation: source xyzw -> wxyz 后，用同一个 X/Y 水平轴反向基变换处理
-```
-
-这个模式保持 Z 高度不变，同时把左右轴和前后轴都翻到 SONIC/BVH-G1 约定。
-
-## manager / deploy 配套命令
-
-JSON sender 只负责发 UDP skeleton frame。manager 仍用 BVH-G1 POSE v1 主线：
-
-```bash
-.venv_teleop/bin/python -u gear_sonic/scripts/mocap_manager_server.py \
+PYTHONPATH="$PWD:${PYTHONPATH:-}" .venv_teleop/bin/python -u gear_sonic/scripts/mocap_manager_server.py \
   --source bvh_stream \
-  --bvh-stream-port 12352 \
+  --bvh-stream-port 12362 \
+  --bvh-stream-bonedata-coordinate-frame left_handed_yup \
+  --bvh-stream-bonedata-position-scale 1.0 \
+  --bvh-stream-bonedata-input-quat-order xyzw \
+  --bvh-stream-bonedata-rotation-mode input \
   --control-mode pose \
   --pose-window-size 80 \
   --pose-encoder-mode g1 \
   --pose-protocol-version 1 \
-  --zmq-port 5556 \
+  --zmq-port 5656 \
   --log-interval-s 1.0
 ```
 
-MuJoCo deploy 侧仍订阅 manager 的 ZMQ：
+接收侧支持的坐标模式：
+
+| 模式 | 说明 |
+|---|---|
+| `sonic_zup` | 输入已经是 SONIC/MuJoCo 的右手 Z-up |
+| `left_handed_zup` | 输入是左手 Z-up，镜像 X |
+| `left_handed_yup` | 输入是左手 Y-up，`position: (x,y,z)->(-x,-z,y)` |
+| `zup_flip_xy` | 输入数值已是 Z-up，但水平 X/Y 两轴相反 |
+
+`/home/nolo/saveBoneData_Yup20260702.json` 已按几何检查确认是 Y-up，高度主要在
+`y` 轴；当前一键脚本默认使用接收侧 `left_handed_yup`。
+
+## 一键 MuJoCo 验证
 
 ```bash
-cd gear_sonic_deploy
-stdbuf -oL -eL bash deploy.sh \
-  --input-type zmq_manager \
-  --zmq-host localhost \
-  --zmq-port 5556 \
-  sim
+cd /home/nolo/GR00T-WholeBodyControl-sony-json-stream-20260702
+
+# MuJoCo + manager + deploy + raw JSON sender
+scripts/launch_sonic_json_mujoco_closed_loop.sh
+
+# 只启动接收端，外部单独发 raw JSON
+scripts/launch_sonic_json_mujoco_closed_loop.sh --receiver-only
+
+# 只启动 raw JSON sender
+scripts/launch_sonic_json_mujoco_closed_loop.sh --sender-only /home/nolo/saveBoneData_Yup20260702.json
+
+# 打印 sender 命令
+scripts/launch_sonic_json_mujoco_closed_loop.sh --print-sender-command /home/nolo/saveBoneData_Yup20260702.json
 ```
 
-## 日志判断
+默认端口：
 
-sender 正常时会打印类似：
+| 项 | 默认值 |
+|---|---:|
+| raw JSON UDP / `bvh_stream` | `12362` |
+| manager ZMQ | `5656` |
+| deploy debug ZMQ | `5657` |
+| receiver coordinate frame | `left_handed_yup` |
+
+## 2026-07-02 验证记录
+
+验证文件：
 
 ```text
-[SonyBoneDataJsonStreamSender] frames=624 joints=27 loop=True position_scale=1 local_root=False
-[SonyBoneDataJsonStreamSender] sent=250 source_frame=249 bytes=2270
+/home/nolo/saveBoneData_Yup20260702.json
 ```
 
-manager 正常时应看到：
+静态检查：
+
+- `name` 长度 27；
+- `position` / `rotation` 长度 197235；
+- 共 7305 帧；
+- root / head / toes 高度主要落在 `y` 轴，因此接收侧使用 `left_handed_yup`。
+
+隔离端口验证：
 
 ```text
-[MocapManager] recv_fps=50.0 ... pose=sent:N encoder=g1 ... dropped=0 ... source_frame=...
+bvh_stream UDP: 12362
+manager ZMQ:   5656
+deploy debug:  5657
 ```
 
-deploy 正常时应看到：
+日志指纹：
+
+- sender 解析并按 50 Hz 发出 7305 帧 raw JSON；
+- manager `recv_fps` 接近 50，`pose=sent`，`dropped=0`；
+- deploy 看到 `Protocol version: 1`、`Merged streamed data`、`LowState age` 为毫秒级；
+- 未见 traceback、safety check failed、lost LowState。
+
+日志目录：
 
 ```text
-[ZMQEndpointInterface] Protocol version: 1
-[ZMQEndpointInterface] Requested encoder_mode: 0
-[ZMQEndpointInterface] Merged streamed data: ...
+logs/sony_json_yup_20260702_isolated/
 ```
-
-如果 manager 一直没有 `pose=sent`，优先检查 JSON sender 是否发到同一个端口
-`12352`，以及 JSON 中每帧 `name/position/rotation` 数量是否一致。
-
-## 给实时 app 的建议
-
-如果上游是实时 Sony mocopi app，不建议先持续写一个大 JSON 文件再让 Python
-读取。更稳的方式是直接在 app 内复刻本页的 sender 逻辑：
-
-```text
-每个采样时刻:
-  1. 生成稳定顺序的 joint_names
-  2. 生成 Z-up 米制 world_positions[J,3]
-  3. 生成归一化 world_quat_wxyz[J,4]
-  4. 组 bvh_stream_v1 payload
-  5. msgpack 后 UDP sendto(manager_host, 12352)
-```
-
-这样下游 manager、deploy、MuJoCo 和 IsaacLab 都不需要知道上游到底来自 BVH、
-保存的 JSON，还是实时 Sony mocopi app。
