@@ -225,6 +225,56 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bvh-stream-port", type=int, default=12352)
     parser.add_argument("--bvh-stream-sender-host", default="127.0.0.1")
     parser.add_argument(
+        "--bvh-stream-input-source",
+        choices=["bvh", "sony_json"],
+        default="bvh",
+        help="tmux sender input source for the bvh_stream UDP port.",
+    )
+    parser.add_argument(
+        "--sony-bonedata-json-file",
+        type=Path,
+        default=Path.home() / "saveBoneData_Yup20260702.json",
+        help="Sony mocopi saveBoneData JSON file when --bvh-stream-input-source sony_json.",
+    )
+    parser.add_argument(
+        "--sony-bonedata-packet-format",
+        choices=["msgpack", "json"],
+        default="msgpack",
+        help="UDP packet encoding for the Sony BoneData JSON sender.",
+    )
+    parser.add_argument("--sony-bonedata-joints-per-frame", type=int, default=27)
+    parser.add_argument("--sony-bonedata-fps", type=float, help="Sony BoneData sender FPS; defaults to --bvh-fps or 50.")
+    parser.add_argument("--sony-bonedata-source-fps", type=float, help="Original Sony BoneData capture FPS.")
+    parser.add_argument(
+        "--bvh-stream-bonedata-coordinate-frame",
+        choices=["sonic_zup", "left_handed_zup", "left_handed_yup", "zup_flip_xy"],
+        default="sonic_zup",
+        help="receiver-side coordinate conversion for raw sony_bonedata_json_v1 packets",
+    )
+    parser.add_argument(
+        "--bvh-stream-bonedata-position-scale",
+        type=float,
+        default=1.0,
+        help="receiver-side position scale for raw sony_bonedata_json_v1 packets",
+    )
+    parser.add_argument(
+        "--bvh-stream-bonedata-input-quat-order",
+        choices=["xyzw", "wxyz"],
+        default="xyzw",
+        help="receiver-side quaternion order for raw sony_bonedata_json_v1 list rotations",
+    )
+    parser.add_argument(
+        "--bvh-stream-bonedata-rotation-mode",
+        choices=["input", "identity"],
+        default="input",
+        help="receiver-side rotation handling for raw sony_bonedata_json_v1 packets",
+    )
+    parser.add_argument(
+        "--bvh-stream-bonedata-local-root",
+        action="store_true",
+        help="subtract each raw BoneData frame's root position on the receiver side",
+    )
+    parser.add_argument(
         "--ask-bvh-stream-sender",
         action="store_true",
         help="ask whether to launch bvh_stream_sender in tmux",
@@ -349,6 +399,7 @@ def _resolve_defaults(args: argparse.Namespace) -> None:
     args.isaaclab_root = args.isaaclab_root.expanduser().resolve()
     args.conda_sh = args.conda_sh.expanduser().resolve()
     args.bvh_file = args.bvh_file.expanduser().resolve()
+    args.sony_bonedata_json_file = args.sony_bonedata_json_file.expanduser().resolve()
 
     if args.proxy_bin is None:
         args.proxy_bin = (
@@ -385,6 +436,12 @@ def _preflight(args: argparse.Namespace) -> None:
         errors.append(f"C++ proxy binary not found: {args.proxy_bin}")
     if not (args.repo_root / ".venv_teleop" / "bin" / "python").exists():
         errors.append(f"teleop venv python not found: {args.repo_root / '.venv_teleop/bin/python'}")
+    if (
+        args.bvh_stream_input_source == "sony_json"
+        and (args.manual_bvh_stream_sender or _launches_bvh_stream_sender(args))
+        and not args.sony_bonedata_json_file.exists()
+    ):
+        errors.append(f"Sony BoneData JSON file not found: {args.sony_bonedata_json_file}")
 
     if not args.ignore_port_check:
         local_ports = [args.zmq_port, args.debug_port]
@@ -655,6 +712,14 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
         args.bvh_stream_host,
         "--bvh-stream-port",
         str(args.bvh_stream_port),
+        "--bvh-stream-bonedata-coordinate-frame",
+        args.bvh_stream_bonedata_coordinate_frame,
+        "--bvh-stream-bonedata-position-scale",
+        str(args.bvh_stream_bonedata_position_scale),
+        "--bvh-stream-bonedata-input-quat-order",
+        args.bvh_stream_bonedata_input_quat_order,
+        "--bvh-stream-bonedata-rotation-mode",
+        args.bvh_stream_bonedata_rotation_mode,
         "--control-mode",
         "pose",
         "--pose-window-size",
@@ -700,6 +765,8 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
             str(args.bvh_g1_joint_delta_limit_scale),
         ]
     )
+    if args.bvh_stream_bonedata_local_root:
+        mocap_args.append("--bvh-stream-bonedata-local-root")
     if args.pose_root_yaw_only:
         mocap_args.append("--pose-root-yaw-only")
     command = " && ".join(
@@ -713,25 +780,54 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
     return _with_log(command, "input")
 
 
+def _bvh_sender_window_name(args: argparse.Namespace) -> str:
+    return "sony_json_sender" if args.bvh_stream_input_source == "sony_json" else "bvh_sender"
+
+
 def _bvh_sender_command(args: argparse.Namespace) -> str:
     python = args.repo_root / ".venv_teleop" / "bin" / "python"
-    sender_args: list[str | Path] = [
-        python,
-        "-u",
-        "gear_sonic/scripts/bvh_stream_sender.py",
-        "--bvh-file",
-        args.bvh_file,
-        "--host",
-        args.bvh_stream_sender_host,
-        "--port",
-        str(args.bvh_stream_port),
-        "--log-interval-s",
-        "1",
-    ]
+    if args.bvh_stream_input_source == "sony_json":
+        fps = args.sony_bonedata_fps if args.sony_bonedata_fps is not None else (args.bvh_fps or 50.0)
+        sender_args: list[str | Path | float] = [
+            python,
+            "-u",
+            "gear_sonic/scripts/sony_bonedata_json_stream_sender.py",
+            "--json-file",
+            args.sony_bonedata_json_file,
+            "--host",
+            args.bvh_stream_sender_host,
+            "--port",
+            str(args.bvh_stream_port),
+            "--format",
+            args.sony_bonedata_packet_format,
+            "--fps",
+            str(fps),
+            "--joints-per-frame",
+            str(args.sony_bonedata_joints_per_frame),
+            "--log-interval-s",
+            "1",
+        ]
+        if args.sony_bonedata_source_fps is not None:
+            sender_args.extend(["--source-fps", str(args.sony_bonedata_source_fps)])
+    else:
+        sender_args = [
+            python,
+            "-u",
+            "gear_sonic/scripts/bvh_stream_sender.py",
+            "--bvh-file",
+            args.bvh_file,
+            "--host",
+            args.bvh_stream_sender_host,
+            "--port",
+            str(args.bvh_stream_port),
+            "--log-interval-s",
+            "1",
+        ]
     if not args.no_bvh_loop:
         sender_args.append("--loop")
     if args.bvh_fps is not None:
-        sender_args.extend(["--fps", str(args.bvh_fps)])
+        if args.bvh_stream_input_source == "bvh":
+            sender_args.extend(["--fps", str(args.bvh_fps)])
 
     command_parts = [
         f"cd {_quote(args.repo_root)}",
@@ -751,7 +847,7 @@ def _bvh_sender_command(args: argparse.Namespace) -> str:
         command_parts.append(f"sleep {float(args.bvh_start_delay_s):.3f}")
     command_parts.append(" ".join(_quote(part) for part in sender_args))
     command = " && ".join(command_parts)
-    return _with_log(command, "bvh_sender")
+    return _with_log(command, _bvh_sender_window_name(args))
 
 
 def _metrics_command(args: argparse.Namespace) -> str:
@@ -818,7 +914,7 @@ def _build_window_commands(args: argparse.Namespace) -> list[WindowCommand]:
         ]
     )
     if _launches_bvh_stream_sender(args):
-        commands.append(WindowCommand("bvh_sender", _bvh_sender_command(args)))
+        commands.append(WindowCommand(_bvh_sender_window_name(args), _bvh_sender_command(args)))
     if not args.no_metrics:
         commands.append(WindowCommand("metrics", _metrics_command(args)))
     return commands
@@ -827,7 +923,7 @@ def _build_window_commands(args: argparse.Namespace) -> list[WindowCommand]:
 def _print_manual_sender_command(args: argparse.Namespace) -> None:
     if not args.manual_bvh_stream_sender:
         return
-    print("\nManual bvh_stream_sender command:")
+    print(f"\nManual {_bvh_sender_window_name(args)} command:")
     print(_bvh_sender_command(args))
 
 

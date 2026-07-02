@@ -31,6 +31,10 @@ from gear_sonic.utils.teleop.sources.bvh_source import (
     build_full_body_reference_from_skeleton_frame,
     _resolve_selected_indices,
 )
+from gear_sonic.utils.teleop.sources.sony_bonedata_json import (
+    SONY_BONEDATA_JSON_FORMAT,
+    convert_sony_bonedata_payload_to_bvh_stream_payload,
+)
 
 
 BVH_STREAM_DEFAULT_PORT = 12352
@@ -52,7 +56,7 @@ def parse_bvh_stream_packet(packet: bytes, packet_format: str = "auto") -> dict[
 
     if not isinstance(payload, dict):
         raise ValueError(f"BVH stream payload must be a dict, got {type(payload).__name__}")
-    if payload.get("format") not in {BVH_STREAM_FORMAT, "bvh_stream"}:
+    if payload.get("format") not in {BVH_STREAM_FORMAT, "bvh_stream", SONY_BONEDATA_JSON_FORMAT}:
         raise ValueError(f"unsupported BVH stream format {payload.get('format')!r}")
     return payload
 
@@ -69,6 +73,11 @@ class BvhStreamUdpSource:
         socket_timeout_s: float = 0.5,
         retarget_config: BvhG1RetargetConfig | None = None,
         align_root: bool = True,
+        bonedata_position_scale: float = 1.0,
+        bonedata_input_quat_order: str = "xyzw",
+        bonedata_rotation_mode: str = "input",
+        bonedata_coordinate_frame: str = "sonic_zup",
+        bonedata_local_root: bool = False,
     ):
         self.bind_host = bind_host
         self.port = int(port)
@@ -77,6 +86,11 @@ class BvhStreamUdpSource:
         self.socket_timeout_s = float(socket_timeout_s)
         self.retarget_config = retarget_config or BvhG1RetargetConfig()
         self.align_root = bool(align_root)
+        self.bonedata_position_scale = float(bonedata_position_scale)
+        self.bonedata_input_quat_order = str(bonedata_input_quat_order)
+        self.bonedata_rotation_mode = str(bonedata_rotation_mode)
+        self.bonedata_coordinate_frame = str(bonedata_coordinate_frame)
+        self.bonedata_local_root = bool(bonedata_local_root)
 
         self._socket: socket.socket | None = None
         self._thread: threading.Thread | None = None
@@ -202,6 +216,21 @@ class BvhStreamUdpSource:
         receive_time_s: float,
         receive_sequence: int,
     ) -> MocapFrame:
+        if payload.get("format") == SONY_BONEDATA_JSON_FORMAT:
+            if "frame_index" not in payload:
+                payload = dict(payload)
+                payload["frame_index"] = receive_sequence
+                payload.setdefault("source_frame_index", receive_sequence)
+            payload = convert_sony_bonedata_payload_to_bvh_stream_payload(
+                payload,
+                output_format=BVH_STREAM_FORMAT,
+                position_scale=self.bonedata_position_scale,
+                input_quat_order=self.bonedata_input_quat_order,
+                rotation_mode=self.bonedata_rotation_mode,
+                coordinate_frame=self.bonedata_coordinate_frame,
+                local_root=self.bonedata_local_root,
+            )
+
         joint_names = tuple(str(name) for name in payload["joint_names"])
         positions = np.asarray(payload["world_positions"], dtype=np.float32)
         quats = np.asarray(payload["world_quat_wxyz"], dtype=np.float32)
@@ -327,11 +356,17 @@ class BvhStreamUdpSource:
             full_body=full_body,
             metadata={
                 "format": BVH_STREAM_FORMAT,
+                "input_format": payload.get("input_format"),
                 "path": payload.get("path"),
                 "motion_name": payload.get("motion_name"),
                 "source_frame_index": source_frame_idx,
                 "source_fps": source_fps,
                 "packet_format": payload.get("packet_format"),
                 "joint_count": len(joint_names),
+                "bonedata_coordinate_frame": payload.get("bonedata_coordinate_frame"),
+                "bonedata_position_scale": payload.get("bonedata_position_scale"),
+                "bonedata_input_quat_order": payload.get("bonedata_input_quat_order"),
+                "bonedata_rotation_mode": payload.get("bonedata_rotation_mode"),
+                "bonedata_local_root": payload.get("bonedata_local_root"),
             },
         )

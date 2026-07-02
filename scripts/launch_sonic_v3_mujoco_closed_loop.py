@@ -17,6 +17,7 @@ from pathlib import Path
 DEFAULT_SESSION = "sonic_v3_mujoco_tuning"
 DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BVH_FILE = Path.home() / "RAYNOS_Motion1.bvh"
+DEFAULT_JSON_FILE = Path.home() / "saveBoneData_Yup20260702.json"
 ORIGINAL_REPO_ROOT = Path.home() / "GR00T-WholeBodyControl"
 
 DEFAULT_ZMQ_PORT = 6156
@@ -146,11 +147,32 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bvh-stream-sender-host", default="127.0.0.1")
     parser.add_argument("--bvh-stream-port", type=int, default=DEFAULT_BVH_STREAM_PORT)
 
+    parser.add_argument("--input-source", choices=["bvh", "sony_json"], default="bvh")
     parser.add_argument("--bvh-file", type=Path, default=DEFAULT_BVH_FILE)
     parser.add_argument("--bvh-fps", type=float)
     parser.add_argument("--no-bvh-loop", action="store_true")
     parser.add_argument("--bvh-wait-timeout-s", type=float, default=180.0)
     parser.add_argument("--bvh-start-delay-s", type=float, default=1.0)
+    parser.add_argument(
+        "--json-file",
+        type=Path,
+        default=DEFAULT_JSON_FILE,
+        help="Sony mocopi saveBoneData JSON file when --input-source sony_json.",
+    )
+    parser.add_argument("--sony-bonedata-packet-format", choices=["msgpack", "json"], default="msgpack")
+    parser.add_argument("--sony-bonedata-joints-per-frame", type=int, default=27)
+    parser.add_argument("--sony-bonedata-fps", type=float, help="Sony BoneData sender FPS; defaults to --bvh-fps or 50.")
+    parser.add_argument("--sony-bonedata-source-fps", type=float, help="Original Sony BoneData capture FPS.")
+    parser.add_argument(
+        "--bvh-stream-bonedata-coordinate-frame",
+        choices=["sonic_zup", "left_handed_zup", "left_handed_yup", "zup_flip_xy"],
+        default="left_handed_yup",
+        help="receiver-side coordinate conversion for raw sony_bonedata_json_v1 packets.",
+    )
+    parser.add_argument("--bvh-stream-bonedata-position-scale", type=float, default=1.0)
+    parser.add_argument("--bvh-stream-bonedata-input-quat-order", choices=["xyzw", "wxyz"], default="xyzw")
+    parser.add_argument("--bvh-stream-bonedata-rotation-mode", choices=["input", "identity"], default="input")
+    parser.add_argument("--bvh-stream-bonedata-local-root", action="store_true")
 
     parser.add_argument("--onscreen", action="store_true", help="show the MuJoCo viewer")
     parser.add_argument("--offscreen", action="store_true", help="enable MuJoCo offscreen rendering")
@@ -212,6 +234,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def _normalize_args(args: argparse.Namespace) -> None:
     args.repo_root = args.repo_root.expanduser().resolve()
     args.bvh_file = args.bvh_file.expanduser().resolve()
+    args.json_file = args.json_file.expanduser().resolve()
     deploy_root = args.repo_root / "gear_sonic_deploy"
     if args.decoder is None:
         args.decoder = _resolve_release_file(args.repo_root, "policy/release/model_decoder.onnx")
@@ -248,7 +271,14 @@ def _preflight(args: argparse.Namespace) -> None:
         errors.append(f"sim venv python not found: {args.repo_root / '.venv_sim/bin/python'}")
     if not args.deploy_bin.exists():
         errors.append(f"deploy binary not found: {args.deploy_bin}; run `cd gear_sonic_deploy && just build`")
-    for path_name in ["bvh_file", "decoder", "encoder", "planner_file", "obs_config", "motion_data"]:
+    required_paths = ["decoder", "encoder", "planner_file", "obs_config", "motion_data"]
+    if args.input_source == "bvh":
+        required_paths.append("bvh_file")
+    else:
+        required_paths.append("json_file")
+        if not (args.repo_root / "gear_sonic" / "scripts" / "sony_bonedata_json_stream_sender.py").exists():
+            errors.append("Sony BoneData JSON sender script not found in repo")
+    for path_name in required_paths:
         path = getattr(args, path_name)
         if not path.exists():
             errors.append(f"{path_name.replace('_', '-')} not found: {path}")
@@ -336,6 +366,14 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
         args.bvh_stream_host,
         "--bvh-stream-port",
         args.bvh_stream_port,
+        "--bvh-stream-bonedata-coordinate-frame",
+        args.bvh_stream_bonedata_coordinate_frame,
+        "--bvh-stream-bonedata-position-scale",
+        args.bvh_stream_bonedata_position_scale,
+        "--bvh-stream-bonedata-input-quat-order",
+        args.bvh_stream_bonedata_input_quat_order,
+        "--bvh-stream-bonedata-rotation-mode",
+        args.bvh_stream_bonedata_rotation_mode,
         "--control-mode",
         "pose",
         "--pose-window-size",
@@ -362,6 +400,8 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
         "--log-interval-s",
         args.mocap_log_interval_s,
     ]
+    if args.bvh_stream_bonedata_local_root:
+        mocap_args.append("--bvh-stream-bonedata-local-root")
     if not args.no_root_yaw_only:
         mocap_args.append("--pose-root-yaw-only")
     command = " && ".join(
@@ -419,24 +459,52 @@ def _deploy_command(args: argparse.Namespace) -> str:
     return _with_log(command, "deploy")
 
 
+def _sender_window_name(args: argparse.Namespace) -> str:
+    return "json_sender" if args.input_source == "sony_json" else "bvh_sender"
+
+
 def _bvh_sender_command(args: argparse.Namespace) -> str:
     python = args.repo_root / ".venv_teleop" / "bin" / "python"
-    sender_args: list[str | Path | int | float] = [
-        python,
-        "-u",
-        "gear_sonic/scripts/bvh_stream_sender.py",
-        "--bvh-file",
-        args.bvh_file,
-        "--host",
-        args.bvh_stream_sender_host,
-        "--port",
-        args.bvh_stream_port,
-        "--log-interval-s",
-        1,
-    ]
+    if args.input_source == "sony_json":
+        fps = args.sony_bonedata_fps if args.sony_bonedata_fps is not None else (args.bvh_fps or 50.0)
+        sender_args: list[str | Path | int | float] = [
+            python,
+            "-u",
+            "gear_sonic/scripts/sony_bonedata_json_stream_sender.py",
+            "--json-file",
+            args.json_file,
+            "--host",
+            args.bvh_stream_sender_host,
+            "--port",
+            args.bvh_stream_port,
+            "--format",
+            args.sony_bonedata_packet_format,
+            "--fps",
+            fps,
+            "--joints-per-frame",
+            args.sony_bonedata_joints_per_frame,
+            "--log-interval-s",
+            1,
+        ]
+        if args.sony_bonedata_source_fps is not None:
+            sender_args.extend(["--source-fps", args.sony_bonedata_source_fps])
+    else:
+        sender_args = [
+            python,
+            "-u",
+            "gear_sonic/scripts/bvh_stream_sender.py",
+            "--bvh-file",
+            args.bvh_file,
+            "--host",
+            args.bvh_stream_sender_host,
+            "--port",
+            args.bvh_stream_port,
+            "--log-interval-s",
+            1,
+        ]
     if not args.no_bvh_loop:
         sender_args.append("--loop")
-    if args.bvh_fps is not None:
+    if args.input_source == "bvh" and args.bvh_fps is not None:
         sender_args.extend(["--fps", args.bvh_fps])
     command_parts = [
         f"cd {_quote(args.repo_root)}",
@@ -447,7 +515,7 @@ def _bvh_sender_command(args: argparse.Namespace) -> str:
     if args.bvh_start_delay_s > 0.0:
         command_parts.append(f"sleep {float(args.bvh_start_delay_s):.3f}")
     command_parts.append(" ".join(_quote(part) for part in sender_args))
-    return _with_log(" && ".join(command_parts), "bvh_sender")
+    return _with_log(" && ".join(command_parts), _sender_window_name(args))
 
 
 def _metrics_command(args: argparse.Namespace) -> str:
@@ -528,7 +596,7 @@ def _build_window_commands(args: argparse.Namespace) -> list[WindowCommand]:
         WindowCommand("mujoco", _mujoco_command(args)),
         WindowCommand("input", _mocap_manager_command(args)),
         WindowCommand("deploy", _deploy_command(args)),
-        WindowCommand("bvh_sender", _bvh_sender_command(args)),
+        WindowCommand(_sender_window_name(args), _bvh_sender_command(args)),
     ]
     if not args.no_metrics:
         commands.append(WindowCommand("metrics", _metrics_command(args)))

@@ -74,6 +74,26 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--domain-id", type=int, help="proxy DDS domain; baseline stack profile defaults to 0")
 
     parser.add_argument("--bvh-file", type=Path, default=DEFAULT_BVH_FILE)
+    parser.add_argument("--input-source", choices=["bvh", "sony_json"], default="bvh")
+    parser.add_argument(
+        "--json-file",
+        type=Path,
+        default=Path.home() / "saveBoneData_Yup20260702.json",
+        help="Sony mocopi saveBoneData JSON file when --input-source sony_json.",
+    )
+    parser.add_argument("--sony-bonedata-packet-format", choices=["msgpack", "json"], default="msgpack")
+    parser.add_argument("--sony-bonedata-joints-per-frame", type=int, default=27)
+    parser.add_argument("--sony-bonedata-fps", type=float)
+    parser.add_argument("--sony-bonedata-source-fps", type=float)
+    parser.add_argument(
+        "--bvh-stream-bonedata-coordinate-frame",
+        choices=["sonic_zup", "left_handed_zup", "left_handed_yup", "zup_flip_xy"],
+        default="left_handed_yup",
+    )
+    parser.add_argument("--bvh-stream-bonedata-position-scale", type=float, default=1.0)
+    parser.add_argument("--bvh-stream-bonedata-input-quat-order", choices=["xyzw", "wxyz"], default="xyzw")
+    parser.add_argument("--bvh-stream-bonedata-rotation-mode", choices=["input", "identity"], default="input")
+    parser.add_argument("--bvh-stream-bonedata-local-root", action="store_true")
     parser.add_argument(
         "--pose-filter-profile",
         choices=["stable", "balanced", "responsive", "off"],
@@ -260,6 +280,14 @@ def _launcher_command(args: argparse.Namespace, extra_args: list[str]) -> list[s
         str(args.state_port),
         "--bvh-stream-port",
         str(args.bvh_stream_port),
+        "--bvh-stream-bonedata-coordinate-frame",
+        args.bvh_stream_bonedata_coordinate_frame,
+        "--bvh-stream-bonedata-position-scale",
+        str(args.bvh_stream_bonedata_position_scale),
+        "--bvh-stream-bonedata-input-quat-order",
+        args.bvh_stream_bonedata_input_quat_order,
+        "--bvh-stream-bonedata-rotation-mode",
+        args.bvh_stream_bonedata_rotation_mode,
         "--sony-pose-line",
         "v3",
         "--pose-filter-profile",
@@ -315,6 +343,25 @@ def _launcher_command(args: argparse.Namespace, extra_args: list[str]) -> list[s
         "--isaac-env",
         f"SONIC_DEPLOY_TARGET_FIELD={args.isaac_target_field}",
     ]
+    if args.input_source == "sony_json":
+        cmd.extend(
+            [
+                "--bvh-stream-input-source",
+                "sony_json",
+                "--sony-bonedata-json-file",
+                str(args.json_file.expanduser()),
+                "--sony-bonedata-packet-format",
+                args.sony_bonedata_packet_format,
+                "--sony-bonedata-joints-per-frame",
+                str(args.sony_bonedata_joints_per_frame),
+            ]
+        )
+        if args.sony_bonedata_fps is not None:
+            cmd.extend(["--sony-bonedata-fps", str(args.sony_bonedata_fps)])
+        if args.sony_bonedata_source_fps is not None:
+            cmd.extend(["--sony-bonedata-source-fps", str(args.sony_bonedata_source_fps)])
+        if args.bvh_stream_bonedata_local_root:
+            cmd.append("--bvh-stream-bonedata-local-root")
     if args.auto_reset_on_fall:
         cmd.append("--auto-reset-on-fall")
     if args.fall_reset_min_height is not None:
