@@ -152,6 +152,8 @@ PYTHONPATH="$PWD:${PYTHONPATH:-}" .venv_teleop/bin/python -u gear_sonic/scripts/
 
 ## v3 MuJoCo / IsaacLab 验证
 
+当前 v3 分支借鉴了 `feature/sony-bonedata-json-stream` 的一键启动思路（JSON sender 独立 pane、接收侧 BoneData 转换、`left_handed_yup` 默认），但没有直接使用该分支的 `launch_sonic_json_*.sh`。v3 入口统一挂在现有 Python launcher 的 `--input-source sony_json` 上，保证 manager 仍显式运行 `--pose-protocol-version 3 --pose-encoder-mode smpl --allow-sony-pose-v3`。
+
 ```bash
 cd /home/nolo/GR00T-WholeBodyControl-v3-old-effect-20260702
 
@@ -230,8 +232,8 @@ recv_fps=70.6 recv=5654 ... pose=buf:0/80 ... frame=0 source_ts=None
 
 - 外部 raw `sony_bonedata_json_v1` 发送端必须每帧携带递增 `frame_index`
   （建议同时带 `source_time_ns`，便于丢包/乱序诊断）；
-- 接收侧对缺失的 `frame_index` 仍默认 0，不做 `receive_sequence` 回填——发送端
-  缺失或只带常量 `frame_index=0` 都会复现本症状，属发送端 bug；
+- 接收侧对缺失的 `frame_index` 会用 `receive_sequence` 兜底；外部发送端若显式带
+  常量 `frame_index=0`，仍会复现本症状，属发送端 bug；
 - `joint_vel` 差分依赖 `source_frame_index` 递增，发送端带递增帧号后该差分同时
   恢复正常。
 

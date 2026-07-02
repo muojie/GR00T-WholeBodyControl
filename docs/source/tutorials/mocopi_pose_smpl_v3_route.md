@@ -113,7 +113,8 @@ cd /home/nolo/GR00T-WholeBodyControl-v3-tuning
 scripts/launch_sonic_v3_mujoco_closed_loop.py --no-attach
 ```
 
-该脚本启动 `mujoco/input/deploy/bvh_sender/metrics` 五个 tmux 窗口，不启动 IsaacLab/proxy。默认隔离参数：
+该脚本默认启动 `mujoco/input/deploy/bvh_sender/metrics` 五个 tmux 窗口，不启动 IsaacLab/proxy；
+`--input-source sony_json` 时把 `bvh_sender` 窗口替换为 `json_sender`，其余 v3 参数保持不变。默认隔离参数：
 
 | 通道 | 值 |
 |------|----|
@@ -124,6 +125,54 @@ scripts/launch_sonic_v3_mujoco_closed_loop.py --no-attach
 | MuJoCo viewer | 默认 `--no-enable-onscreen` |
 
 deploy 侧同样传入 `--domain-id 4`，MuJoCo 侧通过 `run_sim_loop.py --domain-id 4` 覆盖 WBC YAML 中的 `DOMAIN_ID`。
+
+### 2026-07-02 BoneData JSON feature 分支移植到 v3 一键脚本
+
+`feature/sony-bonedata-json-stream` 的一键脚本提供了两项可复用经验：
+
+- raw JSON sender 单独作为 tmux pane 启动,并在 deploy debug port 就绪后开始发包;
+- BoneData 的坐标系、四元数顺序、scale、local-root 都放到 `mocap_manager_server.py --source bvh_stream` 的接收侧参数里处理。
+
+当前 v3 分支没有原样合入 feature 分支的 `scripts/launch_sonic_json_isaaclab_closed_loop.sh` / `scripts/launch_sonic_json_mujoco_closed_loop.sh`。原因是那两个脚本以旧 v1/通用 JSON 路线为主,而当前分支需要保持 **POSE v3 + `encoder_mode=smpl` + `--allow-sony-pose-v3`**。实际移植点是:
+
+- `scripts/launch_sonic_v3_mujoco_closed_loop.py --input-source sony_json`
+- `scripts/launch_sonic_v3_tuning_closed_loop.py --input-source sony_json`
+- 通用底座 `scripts/launch_sonic_local_isaaclab_closed_loop.py --bvh-stream-input-source sony_json`
+
+配对 tag:
+
+| tag | 指向 | 说明 |
+|---|---|---|
+| `sony-bonedata-json-stream/source-feature-20260702` | `dba0b7d` | `feature/sony-bonedata-json-stream` 当前 HEAD |
+| `sony-bonedata-json-stream/v3-old-effect-port-20260702` | `44d9e18` | 当前 v3 old-effect 分支的 JSON 移植提交 |
+
+v3 MuJoCo JSON smoke:
+
+```bash
+cd /home/nolo/GR00T-WholeBodyControl-v3-old-effect-20260702
+scripts/launch_sonic_v3_mujoco_closed_loop.py \
+  --session sonic_v3_mujoco_json_validation \
+  --replace \
+  --no-attach \
+  --input-source sony_json \
+  --json-file /home/nolo/saveBoneData_Yup20260702.json \
+  --metrics-duration-s 20 \
+  --metrics-summary-json /tmp/sonic_v3_json_validation_summary.json \
+  --metrics-samples-jsonl /tmp/sonic_v3_json_validation_samples.jsonl
+```
+
+验证结果:
+
+| 项 | 值 |
+|---|---:|
+| summary | `/tmp/sonic_v3_json_validation_summary.json` |
+| pass | `True` |
+| deploy FPS | `49.99` |
+| samples / eval samples | `947 / 852` |
+| fall frames | `0` |
+| manager input | `recv_fps≈50`, `pose=sent`, `frame` 持续递增, `dropped=0` |
+
+结论:当前 v3 一键脚本确实吸收了 JSON feature 分支的启动方式,但作为 **v3 launcher 的输入源选项**存在;默认仍是 BVH,只有显式 `--input-source sony_json` 才切到 BoneData JSON。
 
 ### 2026-06-29 MuJoCo 20s 验证结果
 
