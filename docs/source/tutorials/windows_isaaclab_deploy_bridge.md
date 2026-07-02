@@ -196,6 +196,8 @@ powershell -ExecutionPolicy Bypass -File "<GR00T_ROOT>\scripts\start_windows_isa
   -IsaacLabRoot "D:\path\to\IsaacLab"
 ```
 
+需要 viewport 出现 AR/VR 按钮（PICO 头显遥操）时，在末尾追加 `-Xr`。
+
 脚本参数说明：
 
 - `-UbuntuIp`：Ubuntu / deploy 机器 IP（必填）
@@ -206,6 +208,7 @@ powershell -ExecutionPolicy Bypass -File "<GR00T_ROOT>\scripts\start_windows_isa
 - `-DebugPort`：`SONIC_DEPLOY_ENDPOINT` 中使用的端口，默认 `5557`
 - `-StatePort`：`SONIC_STATE_ZMQ_BIND` 中使用的端口，默认 `5560`
 - `-Headless`：是否 headless
+- `-Xr`：以 XR 模式启动。AppLauncher 会改用 `isaaclab.python.xr.openxr.kit` experience，加载 `omni.kit.xr.profile.ar` 等扩展，viewport 才会出现 AR/VR 按钮（PICO 头显遥操需要）。默认不启用。
 - `-EnablePinocchio`：是否启用 `--enable_pinocchio`
 
 #### 手工启动（等价）
@@ -239,6 +242,12 @@ $env:SONIC_DEPLOY_TARGET_RATE_LIMIT="0.04"
   --device cpu `
   --kit_args "--/app/vsync=false --/app/runLoops/main/rateLimitEnabled=false"
 ```
+
+需要 AR/VR 按钮（PICO 头显遥操）时，在上面 `teleop_se3_agent.py` 的参数里追加 `--xr`（对应启动脚本的 `-Xr` 开关）。注意：
+
+- `--xr` 是 AppLauncher 的 Python 参数，不能塞进 `--kit_args` 字符串（Kit 不会把它回传给 argparse）。
+- AR 按钮出现后，真正进入 XR 会话还要求 Windows 上有活动的 OpenXR runtime：PICO 一般走 PICO Connect 串流 → SteamVR，需把系统默认 OpenXR runtime 设为 SteamVR。
+- XR experience 的渲染开销高于默认 kit；启用后需重新实测 env_hz 是否仍钉在 50Hz 实时，否则闭环步态相位会畸变。
 
 ### Ubuntu 端 1：C++ LowState proxy
 
