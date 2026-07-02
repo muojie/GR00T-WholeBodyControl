@@ -135,11 +135,14 @@ PYTHONPATH="$PWD:${PYTHONPATH:-}" .venv_teleop/bin/python -u gear_sonic/scripts/
 ```bash
 cd /home/nolo/GR00T-WholeBodyControl-sony-json-stream-20260702
 
-# MuJoCo + manager + deploy + raw JSON sender
-scripts/launch_sonic_json_mujoco_closed_loop.sh
+# MuJoCo + manager + deploy + raw JSON sender，默认 backend
+scripts/launch_sonic_json_mujoco_closed_loop.sh --backend mujoco
+
+# IsaacLab + manager + deploy + raw JSON sender
+scripts/launch_sonic_json_mujoco_closed_loop.sh --backend isaaclab
 
 # 只启动接收端，外部单独发 raw JSON
-scripts/launch_sonic_json_mujoco_closed_loop.sh --receiver-only
+scripts/launch_sonic_json_mujoco_closed_loop.sh --backend mujoco --receiver-only
 
 # 只启动 raw JSON sender
 scripts/launch_sonic_json_mujoco_closed_loop.sh --sender-only /home/nolo/saveBoneData_Yup20260702.json
@@ -156,6 +159,15 @@ scripts/launch_sonic_json_mujoco_closed_loop.sh --print-sender-command /home/nol
 | manager ZMQ | `5656` |
 | deploy debug ZMQ | `5657` |
 | receiver coordinate frame | `left_handed_yup` |
+
+选择 `--backend isaaclab` 时默认端口切到 IsaacLab 闭环常用值：
+
+| 项 | 默认值 |
+|---|---:|
+| raw JSON UDP / `bvh_stream` | `12352` |
+| manager ZMQ | `5556` |
+| deploy debug ZMQ | `5557` |
+| IsaacLab state ZMQ | `5560` |
 
 ## 2026-07-02 验证记录
 

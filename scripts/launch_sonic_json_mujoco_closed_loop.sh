@@ -8,11 +8,25 @@ SESSION_WAS_SET=0
 if [[ -n "${SESSION+x}" ]]; then
   SESSION_WAS_SET=1
 fi
+BVH_STREAM_PORT_WAS_SET=0
+if [[ -n "${BVH_STREAM_PORT+x}" ]]; then
+  BVH_STREAM_PORT_WAS_SET=1
+fi
+MOCAP_ZMQ_PORT_WAS_SET=0
+if [[ -n "${MOCAP_ZMQ_PORT+x}" ]]; then
+  MOCAP_ZMQ_PORT_WAS_SET=1
+fi
+DEBUG_PORT_WAS_SET=0
+if [[ -n "${DEBUG_PORT+x}" ]]; then
+  DEBUG_PORT_WAS_SET=1
+fi
 SESSION=${SESSION:-sonic_json_yup_mujoco}
+BACKEND=${BACKEND:-mujoco}
 JSON_FILE=${JSON_FILE:-/home/nolo/saveBoneData_Yup20260702.json}
 BVH_STREAM_PORT=${BVH_STREAM_PORT:-12362}
 MOCAP_ZMQ_PORT=${MOCAP_ZMQ_PORT:-5656}
 DEBUG_PORT=${DEBUG_PORT:-5657}
+STATE_PORT=${STATE_PORT:-5560}
 FPS=${FPS:-50}
 COORDINATE_FRAME=${COORDINATE_FRAME:-left_handed_yup}
 BONEDATA_POSITION_SCALE=${BONEDATA_POSITION_SCALE:-1.0}
@@ -33,6 +47,9 @@ Usage:
   $0 [OPTIONS] [JSON_FILE]
 
 Options:
+  --backend mujoco|isaaclab  Select simulation backend. Default: mujoco.
+  --mujoco                   Alias for --backend mujoco.
+  --isaaclab                 Alias for --backend isaaclab.
   --receiver-only          Start MuJoCo, manager, and deploy, but do not start JSON sender.
   --no-json-sender         Alias for --receiver-only.
   --sender-only            Start only the Sony BoneData JSON sender in tmux.
@@ -42,10 +59,12 @@ Options:
 
 Environment overrides:
   SESSION=${SESSION}
+  BACKEND=${BACKEND}
   MODE=${MODE}
   BVH_STREAM_PORT=${BVH_STREAM_PORT}
   MOCAP_ZMQ_PORT=${MOCAP_ZMQ_PORT}
   DEBUG_PORT=${DEBUG_PORT}
+  STATE_PORT=${STATE_PORT}                  # IsaacLab backend only
   FPS=${FPS}
   COORDINATE_FRAME=${COORDINATE_FRAME}       # receiver-side raw BoneData conversion
   BONEDATA_POSITION_SCALE=${BONEDATA_POSITION_SCALE}
@@ -54,7 +73,8 @@ Environment overrides:
   REPLACE=${REPLACE}
 
 Examples:
-  $0 /home/nolo/saveBoneData_Yup20260702.json
+  $0 --backend mujoco /home/nolo/saveBoneData_Yup20260702.json
+  $0 --backend isaaclab /home/nolo/saveBoneData_Yup20260702.json
   $0 --receiver-only
   $0 --sender-only /home/nolo/saveBoneData_Yup20260702.json
   $0 --print-sender-command /home/nolo/saveBoneData_Yup20260702.json
@@ -81,6 +101,22 @@ while [[ $# -gt 0 ]]; do
 	    --print-sender-command)
 	      MODE=print_sender
 	      shift
+      ;;
+    --backend)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --backend requires mujoco or isaaclab" >&2
+        exit 2
+      fi
+      BACKEND=$2
+      shift 2
+      ;;
+    --mujoco)
+      BACKEND=mujoco
+      shift
+      ;;
+    --isaaclab|--isaac)
+      BACKEND=isaaclab
+      shift
       ;;
     --json-file)
       if [[ $# -lt 2 ]]; then
@@ -135,12 +171,49 @@ case "${MODE}" in
     ;;
 esac
 
-if [[ "${MODE}" == "sender" && "${SESSION_WAS_SET}" == "0" ]]; then
-  SESSION=sonic_json_yup_sender
+case "${BACKEND}" in
+  mujoco|isaaclab)
+    ;;
+  isaac)
+    BACKEND=isaaclab
+    ;;
+  *)
+    echo "ERROR: unsupported BACKEND=${BACKEND}; expected mujoco or isaaclab" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "${BACKEND}" == "isaaclab" ]]; then
+  if [[ "${SESSION_WAS_SET}" == "0" ]]; then
+    SESSION=sonic_json_isaaclab
+  fi
+  if [[ "${BVH_STREAM_PORT_WAS_SET}" == "0" ]]; then
+    BVH_STREAM_PORT=12352
+  fi
+  if [[ "${MOCAP_ZMQ_PORT_WAS_SET}" == "0" ]]; then
+    MOCAP_ZMQ_PORT=5556
+  fi
+  if [[ "${DEBUG_PORT_WAS_SET}" == "0" ]]; then
+    DEBUG_PORT=5557
+  fi
+else
+  if [[ "${SESSION_WAS_SET}" == "0" ]]; then
+    SESSION=sonic_json_yup_mujoco
+  fi
 fi
 
-LOG_DIR=${LOG_DIR:-${REPO_ROOT}/logs/sony_json_mujoco_${SESSION}}
-RUNTIME_DIR=${RUNTIME_DIR:-/tmp/sony_json_mujoco_${SESSION}}
+if [[ "${MODE}" == "sender" && "${SESSION_WAS_SET}" == "0" ]]; then
+  SESSION=sonic_json_${BACKEND}_sender
+fi
+
+if [[ "${BACKEND}" == "isaaclab" && "${MODE}" == "receiver" ]]; then
+  echo "ERROR: --backend isaaclab currently supports full launch and sender-only modes." >&2
+  echo "Use --backend mujoco --receiver-only for a receiver-only MuJoCo stack." >&2
+  exit 2
+fi
+
+LOG_DIR=${LOG_DIR:-${REPO_ROOT}/logs/sony_json_${BACKEND}_${SESSION}}
+RUNTIME_DIR=${RUNTIME_DIR:-/tmp/sony_json_${BACKEND}_${SESSION}}
 
 quote_arg() {
   printf "%q" "$1"
@@ -177,6 +250,22 @@ if [[ "${MODE}" != "receiver" && ! -f "${SENDER_SCRIPT}" ]]; then
 fi
 if [[ "${MODE}" == "print_sender" ]]; then
   print_sender_command
+  exit 0
+fi
+if [[ "${BACKEND}" == "isaaclab" && "${MODE}" == "all" ]]; then
+  SESSION="${SESSION}" \
+    JSON_FILE="${JSON_FILE}" \
+    BVH_STREAM_PORT="${BVH_STREAM_PORT}" \
+    MOCAP_ZMQ_PORT="${MOCAP_ZMQ_PORT}" \
+    DEBUG_PORT="${DEBUG_PORT}" \
+    STATE_PORT="${STATE_PORT}" \
+    FPS="${FPS}" \
+    COORDINATE_FRAME="${COORDINATE_FRAME}" \
+    BONEDATA_POSITION_SCALE="${BONEDATA_POSITION_SCALE}" \
+    BONEDATA_INPUT_QUAT_ORDER="${BONEDATA_INPUT_QUAT_ORDER}" \
+    BONEDATA_ROTATION_MODE="${BONEDATA_ROTATION_MODE}" \
+    REPLACE="${REPLACE}" \
+    "${SCRIPT_DIR}/launch_sonic_json_isaaclab_closed_loop.sh" "${JSON_FILE}"
   exit 0
 fi
 if [[ "${MODE}" != "sender" && ! -x "${SIM_PY}" ]]; then
@@ -321,6 +410,7 @@ if [[ "${MODE}" != "sender" ]]; then
 fi
 
 echo "[sonic-json-mujoco] session=${SESSION}"
+echo "[sonic-json-mujoco] backend=${BACKEND}"
 echo "[sonic-json-mujoco] mode=${MODE}"
 echo "[sonic-json-mujoco] json=${JSON_FILE}"
 echo "[sonic-json-mujoco] receiver_coordinate_frame=${COORDINATE_FRAME}"
