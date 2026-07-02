@@ -42,6 +42,7 @@ class PoseStreamPublisher:
     _buffers: dict[str, deque] = field(init=False, repr=False)
     _last_frame_index: int | None = field(default=None, init=False)
     _generated_frame_index: int = field(default=0, init=False)
+    _window_frame_counter: int = field(default=0, init=False)
     _last_filter_time_s: float | None = field(default=None, init=False, repr=False)
     _last_filtered_reference: FullBodyReference | None = field(
         default=None, init=False, repr=False
@@ -106,7 +107,14 @@ class PoseStreamPublisher:
             self.reset_filter()
 
         filtered_reference = self._filter_reference(reference, timestamp_s)
-        self._append_reference(filtered_reference, resolved_frame_index)
+        # Window indices use an internal contiguous counter instead of the raw
+        # source frame index: a skipped source frame would otherwise leave a
+        # gap in the published window, and the deploy-side merger infers the
+        # whole window's frame step from the first two indices — one gap makes
+        # it misread the window as stride-2 and force a catch-up reset
+        # (playback rewind + heading re-anchor) on the next message.
+        self._window_frame_counter += 1
+        self._append_reference(filtered_reference, self._window_frame_counter)
         self._last_frame_index = resolved_frame_index
         if not self.is_ready:
             return False
@@ -161,8 +169,9 @@ class PoseStreamPublisher:
         self._diagnostics.update(self._last_filter_metrics)
 
         frame_index_window = (
-            np.arange(self.window_size, dtype=np.int64) + int(resolved_frame_index)
+            np.arange(self.window_size, dtype=np.int64) + self._window_frame_counter + 1
         )
+        self._window_frame_counter += self.window_size
         data = {
             "body_pos": np.repeat(
                 _reference_body_pos(filtered_reference)[None, ...],
