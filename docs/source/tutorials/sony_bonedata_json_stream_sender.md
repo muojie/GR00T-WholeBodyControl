@@ -169,6 +169,48 @@ scripts/launch_sonic_json_mujoco_closed_loop.sh --print-sender-command /home/nol
 | deploy debug ZMQ | `5557` |
 | IsaacLab state ZMQ | `5560` |
 
+## 故障排查：帧持续到达但机器人定格在第一帧姿势
+
+**症状**：UDP JSON 帧持续收到（`recv` 持续增长、`recv_fps` 正常），机器人摆出的
+姿势本身是对的，但之后一直保持不动。
+
+**日志指纹**（manager.log，2026-07-02 实机定位）：
+
+```text
+recv_fps=70.6 recv=5654 ... pose=buf:0/80 ... frame=0 source_ts=None
+```
+
+三个信号同时出现即可确诊：
+
+- `frame=0` 恒定不变——每个包解析出的 `frame_index` 都是 0；
+- `pose=buf:0/80` 永远不涨——POSE 滑窗一帧都没进；
+- `source_ts=None`——包不是仓库自带 sender 发的。仓库
+  `sony_bonedata_json_stream_sender.py` 每帧必填递增 `frame_index` 和
+  `source_time_ns`；外部 Unity/Sony 端 raw payload 若缺 `frame_index` 就会命中
+  此问题。
+
+**根因链**：
+
+1. raw payload 缺 `frame_index`，接收侧转换函数把它默认成 **0**
+   （`gear_sonic/utils/teleop/sources/sony_bonedata_json.py` 中
+   `int(payload.get("frame_index", 0))`）。
+2. `bvh_stream_source.py` 的 `_payload_to_frame` 本有兜底
+   `payload.get("frame_index", receive_sequence)`，但转换先执行、payload 已被塞进
+   `frame_index=0`，兜底永远不触发。
+3. `PoseStreamPublisher.publish()`（`zmq_pose_sender.py`）按 `frame_index` 去重：
+   与上一帧相同直接丢弃。首帧走 bootstrap 通道把机器人摆到正确姿势，之后每帧都被
+   判为重复帧丢掉，POSE 缓冲永远 `0/window`，机器人定格。
+
+坐标转换、retarget 链路全部正常——"姿势是对的"正说明只有去重环节卡死。
+
+**修复方向**（截至 2026-07-02 尚未落码）：
+
+- 接收侧：`_payload_to_frame` 在转换前记录原始包是否带 `frame_index`；缺失时转换后
+  用 `receive_sequence` 回填 `frame_index` / `source_frame_index`。顺带修复
+  `joint_vel` 差分恒为零的问题（差分依赖 `source_frame_index` 递增）。
+- 发送端：外部 sender 每帧应带递增 `frame_index`（可选 `source_time_ns`）。注意
+  发送端只带常量 `frame_index=0` 与完全缺失是同一症状。
+
 ## 2026-07-02 验证记录
 
 验证文件：
