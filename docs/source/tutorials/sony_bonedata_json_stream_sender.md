@@ -41,6 +41,22 @@ BoneData JSON 顶层是 dict，包含三组数组：
 
 同一个 sender 会话中，每帧 27 个节点的顺序必须一致。
 
+除 `name/position/rotation` 外的顶层字段（如 `playbackFps`、`frameStride`）会被
+加载器忽略，不会报错。实际播放/发送帧率以 sender 的 `--fps` / `--source-fps` 为准。
+
+### 旧格式文件兼容性
+
+转换迁到接收侧（commit `62c4afc`）只改变了 Y-up、四元数顺序等处理的位置，**输入
+JSON 文件格式本身没有变化**。为旧版 sender 准备的 `saveBoneData*.json`（布局 B +
+dict 形式 `{x,y,z}` / `{x,y,z,w}`）无需任何转换即可直接用当前 sender 发送；Y-up
+数据改为在 manager 侧用 `--bvh-stream-bonedata-coordinate-frame left_handed_yup`
+处理。2026-07-02 已用 `/home/nolo/saveBoneData_Yup20260702.json`（7305 帧 × 27
+节点）验证：加载、单帧 `left_handed_yup` 转换、UDP 端到端收发解包均通过，单帧
+msgpack 包约 2.7 KB。
+
+如需逐帧 JSONL（每行一个 payload，供其他工具消费），可用
+`scripts/convert_savebonedata_to_per_frame_jsonl.py`；发送链路本身不需要这一步。
+
 ## UDP raw payload
 
 sender 每帧发送一个 UDP datagram，payload 只保留原始 BoneData 字段和帧元数据：
@@ -66,6 +82,9 @@ sender 每帧发送一个 UDP datagram，payload 只保留原始 BoneData 字段
 ```
 
 sender 不再输出 `world_positions` / `world_quat_wxyz`。这些字段由接收侧生成。
+
+`frame_index` 必须逐帧递增（外部发送端同样适用）。POSE 发布器按 `frame_index`
+去重，缺失或恒为常量会导致机器人定格在第一帧，见下文"故障排查"。
 
 ## 单独启动 sender
 
@@ -203,13 +222,15 @@ recv_fps=70.6 recv=5654 ... pose=buf:0/80 ... frame=0 source_ts=None
 
 坐标转换、retarget 链路全部正常——"姿势是对的"正说明只有去重环节卡死。
 
-**修复方向**（截至 2026-07-02 尚未落码）：
+**处理结果**（2026-07-02）：在外部 Unity/Sony 发送端修复——每帧携带递增
+`frame_index`；接收侧代码不改。由此固化为**协议要求**：
 
-- 接收侧：`_payload_to_frame` 在转换前记录原始包是否带 `frame_index`；缺失时转换后
-  用 `receive_sequence` 回填 `frame_index` / `source_frame_index`。顺带修复
-  `joint_vel` 差分恒为零的问题（差分依赖 `source_frame_index` 递增）。
-- 发送端：外部 sender 每帧应带递增 `frame_index`（可选 `source_time_ns`）。注意
-  发送端只带常量 `frame_index=0` 与完全缺失是同一症状。
+- 外部 raw `sony_bonedata_json_v1` 发送端必须每帧携带递增 `frame_index`
+  （建议同时带 `source_time_ns`，便于丢包/乱序诊断）；
+- 接收侧对缺失的 `frame_index` 仍默认 0，不做 `receive_sequence` 回填——发送端
+  缺失或只带常量 `frame_index=0` 都会复现本症状，属发送端 bug；
+- `joint_vel` 差分依赖 `source_frame_index` 递增，发送端带递增帧号后该差分同时
+  恢复正常。
 
 ## 2026-07-02 验证记录
 
