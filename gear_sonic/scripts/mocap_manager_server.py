@@ -487,6 +487,9 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
 
     dt = 1.0 / max(1.0, float(args.target_fps))
     last_log_s = 0.0
+    planner_root_last_pos: np.ndarray | None = None
+    planner_root_last_time_s: float | None = None
+    planner_root_velocity_xy = np.zeros(2, dtype=np.float32)
 
     try:
         while True:
@@ -561,6 +564,56 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
                                 vr_orientation=vr_orientation,
                                 timestamp_s=frame.host_time_s,
                             )
+
+            planner_from_root_desc = ""
+            if (
+                args.planner_from_root
+                and control_uses_planner
+                and frame is not None
+                and frame.full_body is not None
+            ):
+                root_pos = np.asarray(frame.full_body.body_pos_w, dtype=np.float32).reshape(3)
+                if planner_root_last_pos is None or planner_root_last_time_s is None:
+                    planner_root_last_pos = root_pos.copy()
+                    planner_root_last_time_s = float(frame.host_time_s)
+                else:
+                    sample_dt = max(1e-3, float(frame.host_time_s) - planner_root_last_time_s)
+                    raw_velocity_xy = (root_pos[:2] - planner_root_last_pos[:2]) / sample_dt
+                    raw_speed = float(np.linalg.norm(raw_velocity_xy))
+                    if np.isfinite(raw_speed):
+                        scale = max(float(args.planner_root_speed_scale), 1e-6)
+                        max_raw_speed = max(float(args.planner_root_speed_max) / scale, 1e-6)
+                        if raw_speed > max_raw_speed:
+                            raw_velocity_xy *= max_raw_speed / raw_speed
+                        alpha = min(1.0, max(0.0, float(args.planner_root_speed_alpha)))
+                        planner_root_velocity_xy = (
+                            alpha * raw_velocity_xy + (1.0 - alpha) * planner_root_velocity_xy
+                        ).astype(np.float32)
+
+                    planner_root_last_pos = root_pos.copy()
+                    planner_root_last_time_s = float(frame.host_time_s)
+
+                    speed = float(np.linalg.norm(planner_root_velocity_xy)) * float(args.planner_root_speed_scale)
+                    if speed < float(args.planner_root_speed_deadband):
+                        control.mode = int(LocomotionMode.IDLE)
+                        control.movement = np.zeros(3, dtype=np.float32)
+                        control.speed = -1.0
+                    else:
+                        movement_xy = planner_root_velocity_xy / max(
+                            float(np.linalg.norm(planner_root_velocity_xy)), 1e-6
+                        )
+                        control.mode = int(args.planner_root_locomotion_mode)
+                        control.movement = np.array([movement_xy[0], movement_xy[1], 0.0], dtype=np.float32)
+                        control.facing = control.movement.copy()
+                        control.speed = min(
+                            max(speed, float(args.planner_root_speed_min)),
+                            float(args.planner_root_speed_max),
+                        )
+                    planner_from_root_desc = (
+                        f" planner_root_speed={control.speed:.3f}"
+                        f" move=[{control.movement[0]:.2f},{control.movement[1]:.2f}]"
+                        f" mode={int(control.mode)}"
+                    )
 
             start_allowed = control.enabled and (
                 control_uses_planner
@@ -689,7 +742,7 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
                 print(
                     f"[MocapManager] recv_fps={diag['fps']:.1f} recv={diag['received_packets']} "
                     f"vr_3pt={vr_desc} pose={pose_desc}{metrics_desc}{ik_desc} "
-                    f"dropped={diag['dropped_packets']} {frame_desc}"
+                    f"dropped={diag['dropped_packets']} {frame_desc}{planner_from_root_desc}"
                 )
                 if diag["last_error"]:
                     print(f"[MocapManager] last packet error: {diag['last_error']}")
@@ -1042,6 +1095,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--planner-from-root",
+        action="store_true",
+        help=(
+            "In --control-mode planner, derive locomotion mode/movement/speed from the "
+            "streamed full-body root position. This is an experimental MuJoCo validation path."
+        ),
+    )
+    parser.add_argument("--planner-root-speed-scale", type=float, default=1.0)
+    parser.add_argument("--planner-root-speed-alpha", type=float, default=0.25)
+    parser.add_argument("--planner-root-speed-deadband", type=float, default=0.04)
+    parser.add_argument("--planner-root-speed-min", type=float, default=0.12)
+    parser.add_argument("--planner-root-speed-max", type=float, default=0.8)
+    parser.add_argument("--planner-root-locomotion-mode", type=int, default=int(LocomotionMode.WALK))
+    parser.add_argument(
         "--enable-pose-stream",
         action="store_true",
         help=(
@@ -1309,8 +1376,10 @@ def _validate_args(
     user_set_target_fps: bool,
     user_set_pose_filter_profile: bool,
 ) -> None:
+    if args.planner_from_root and args.control_mode != "planner":
+        parser.error("--planner-from-root requires --control-mode planner")
     if args.source in {"pkl", "bvh_g1", "bvh_stream"}:
-        if args.control_mode != "pose":
+        if args.control_mode != "pose" and args.source != "bvh_stream" and not args.planner_from_root:
             parser.error(f"--source {args.source} requires --control-mode pose")
         if not user_set_target_fps:
             if args.source == "pkl":
@@ -1329,6 +1398,7 @@ def _validate_args(
     if args.source in {"bvh_g1", "bvh_stream"}:
         uses_g1_v1 = args.pose_protocol_version == 1 and args.pose_encoder_mode == "g1"
         uses_smpl_v3 = args.pose_protocol_version == 3 and args.pose_encoder_mode == "smpl"
+        uses_teleop_v3 = args.pose_protocol_version == 3 and args.pose_encoder_mode == "teleop"
         if uses_g1_v1:
             if not user_set_pose_filter_profile:
                 args.pose_filter_profile = "off"
@@ -1343,11 +1413,18 @@ def _validate_args(
                     "--bvh-g1-smpl-joints-source g1_fk requires body FK; remove "
                     "--bvh-g1-no-body-fk or use --bvh-g1-smpl-joints-source skeleton"
                 )
+        elif uses_teleop_v3:
+            if not args.allow_teleop_pose_experiment:
+                parser.error(
+                    "--pose-encoder-mode teleop is unstable for POSE playback; "
+                    "add --allow-teleop-pose-experiment only for controlled experiments"
+                )
         else:
             parser.error(
                 f"--source {args.source} supports either "
                 "--pose-protocol-version 1 --pose-encoder-mode g1, or "
-                "--pose-protocol-version 3 --pose-encoder-mode smpl --allow-sony-pose-v3"
+                "--pose-protocol-version 3 --pose-encoder-mode smpl --allow-sony-pose-v3, or "
+                "--pose-protocol-version 3 --pose-encoder-mode teleop --allow-teleop-pose-experiment"
             )
     if args.pose_encoder_mode == "teleop" and args.pose_protocol_version != 3:
         parser.error("--pose-encoder-mode teleop requires --pose-protocol-version 3")

@@ -177,6 +177,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--onscreen", action="store_true", help="show the MuJoCo viewer")
     parser.add_argument("--offscreen", action="store_true", help="enable MuJoCo offscreen rendering")
+    parser.add_argument(
+        "--no-mujoco-elastic-band",
+        action="store_true",
+        help="disable the MuJoCo root elastic band for free-root walking diagnostics",
+    )
     parser.add_argument("--sim-frequency", type=int, default=200)
     parser.add_argument("--control-frequency", type=int, default=50)
 
@@ -184,6 +189,27 @@ def _build_parser() -> argparse.ArgumentParser:
         "--pose-filter-profile",
         choices=["stable", "balanced", "responsive", "off"],
         default="stable",
+    )
+    parser.add_argument("--control-mode", choices=["pose", "planner"], default="pose")
+    parser.add_argument("--planner-from-root", action="store_true")
+    parser.add_argument("--planner-root-speed-scale", type=float, default=1.0)
+    parser.add_argument("--planner-root-speed-alpha", type=float, default=0.25)
+    parser.add_argument("--planner-root-speed-deadband", type=float, default=0.04)
+    parser.add_argument("--planner-root-speed-min", type=float, default=0.12)
+    parser.add_argument("--planner-root-speed-max", type=float, default=0.8)
+    parser.add_argument("--planner-root-locomotion-mode", type=int, default=2)
+    parser.add_argument(
+        "--pose-encoder-mode",
+        choices=["g1", "teleop", "smpl"],
+        default="smpl",
+        help="encoder branch requested in the streamed POSE v3 messages",
+    )
+    parser.add_argument(
+        "--pose-protocol-version",
+        type=int,
+        choices=[1, 3],
+        default=3,
+        help="POSE stream protocol version sent to deploy",
     )
     parser.add_argument(
         "--no-root-yaw-only",
@@ -201,6 +227,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bvh-g1-max-joint-step", type=float, default=0.0)
     parser.add_argument("--bvh-g1-joint-filter-alpha", type=float, default=0.35)
     parser.add_argument("--bvh-g1-joint-delta-limit-scale", type=float, default=0.8)
+    parser.add_argument("--bvh-g1-min-root-height", type=float, default=0.74)
 
     parser.add_argument("--decoder", type=Path)
     parser.add_argument("--encoder", type=Path)
@@ -338,6 +365,8 @@ def _mujoco_command(args: argparse.Namespace) -> str:
     sim_args.append("--enable-onscreen" if args.onscreen else "--no-enable-onscreen")
     if args.offscreen:
         sim_args.append("--enable-offscreen")
+    if args.no_mujoco_elastic_band:
+        sim_args.append("--no-enable-elastic-band")
     if not args.no_metrics and not args.no_sim_metrics:
         sim_args.extend(
             [
@@ -381,14 +410,13 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
         "--bvh-stream-bonedata-rotation-mode",
         args.bvh_stream_bonedata_rotation_mode,
         "--control-mode",
-        "pose",
+        args.control_mode,
         "--pose-window-size",
         args.pose_window_size,
         "--pose-encoder-mode",
-        "smpl",
+        args.pose_encoder_mode,
         "--pose-protocol-version",
-        3,
-        "--allow-sony-pose-v3",
+        args.pose_protocol_version,
         "--bvh-g1-smpl-joints-source",
         "g1_fk",
         "--pose-filter-profile",
@@ -411,15 +439,39 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
         args.bvh_g1_joint_filter_alpha,
         "--bvh-g1-joint-delta-limit-scale",
         args.bvh_g1_joint_delta_limit_scale,
+        "--bvh-g1-min-root-height",
+        args.bvh_g1_min_root_height,
         "--zmq-port",
         args.zmq_port,
         "--log-interval-s",
         args.mocap_log_interval_s,
     ]
+    if args.planner_from_root:
+        mocap_args.extend(
+            [
+                "--planner-from-root",
+                "--planner-root-speed-scale",
+                args.planner_root_speed_scale,
+                "--planner-root-speed-alpha",
+                args.planner_root_speed_alpha,
+                "--planner-root-speed-deadband",
+                args.planner_root_speed_deadband,
+                "--planner-root-speed-min",
+                args.planner_root_speed_min,
+                "--planner-root-speed-max",
+                args.planner_root_speed_max,
+                "--planner-root-locomotion-mode",
+                args.planner_root_locomotion_mode,
+            ]
+        )
+    if args.pose_protocol_version == 3 and args.pose_encoder_mode == "smpl":
+        mocap_args.append("--allow-sony-pose-v3")
     if args.bvh_stream_bonedata_local_root:
         mocap_args.append("--bvh-stream-bonedata-local-root")
     if not args.no_root_yaw_only:
         mocap_args.append("--pose-root-yaw-only")
+    if args.pose_encoder_mode == "teleop":
+        mocap_args.append("--allow-teleop-pose-experiment")
     command = " && ".join(
         [
             f"cd {_quote(args.repo_root)}",

@@ -90,6 +90,7 @@ def override_wbc_config(
         "waist_pitch_limit": config.waist_pitch_limit,
         "hand_torque_limit": config.hand_torque_limit,
         "enable_natural_walk": config.enable_natural_walk,
+        "ENABLE_ELASTIC_BAND": config.enable_elastic_band,
         "MUJOCO_METRICS_ZMQ_BIND": config.mujoco_metrics_zmq_bind,
         "MUJOCO_METRICS_ZMQ_TOPIC": config.mujoco_metrics_zmq_topic,
         "MUJOCO_METRICS_HZ": config.mujoco_metrics_hz,
@@ -211,6 +212,9 @@ class BaseConfig(ArgsConfigTemplate):
 
     enable_natural_walk: bool = False
     """Enable natural walk mode."""
+
+    enable_elastic_band: bool = True
+    """Enable the MuJoCo elastic band that keeps the floating root near its anchor."""
 
     mujoco_metrics_zmq_bind: str = ""
     """Optional ZMQ PUB bind endpoint for MuJoCo-only diagnostic metrics."""
