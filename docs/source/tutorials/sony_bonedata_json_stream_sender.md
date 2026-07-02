@@ -232,6 +232,71 @@ recv_fps=70.6 recv=5654 ... pose=buf:0/80 ... frame=0 source_ts=None
 - `joint_vel` 差分依赖 `source_frame_index` 递增，发送端带递增帧号后该差分同时
   恢复正常。
 
+## 故障排查:上肢/转身正常但走路不动、转身角度偏差(2026-07-03 定位)
+
+在 frame_index 问题修复后,MuJoCo 闭环仍表现为:上肢跟踪完美、原地转身基本正常
+(角度略差)、走路完全不行。用 g1_debug(target vs measured)+ 仿真底座真值双通道
+量化,定位出三个互相独立的根因,全部已修复:
+
+**根因 1:MuJoCo 虚拟弹力带默认吊着机器人(仿真侧,影响最大)**
+
+`ENABLE_ELASTIC_BAND: True` 且 `ElasticBand.enable` 默认 True,唯一手动释放方式
+是 MuJoCo viewer 窗口按键 `9`。被吊着的机器人:上肢/原地转身正常,但脚不吃地,
+永远走不了路——真值显示走路段 pelvis z 恒 0.949 m(悬挂)、水平位移 0.00 m。
+修复:`base_sim.py` 新增 `SONIC_SIM_BAND_RELEASE_S`(仿真时间定时自动释放),
+一键脚本默认 `BAND_RELEASE_S=90`(此时 deploy 已进入跟踪、参考正处站立段)。
+
+**根因 2:catch-up 风暴(manager→deploy 链路)**
+
+manager 主循环与 sender 各自 50Hz 不同步,拍频导致每 ~5.8s 跳过一个源帧号;
+deploy 端 `StreamedMotionMerger` 只用窗口前两个帧号推断 `frame_step`,一个空洞
+就把整窗误判为 stride-2,下一条消息触发强制 catch-up:回放倒带 ~1.6s + 朝向
+重锚。实测 2 小时 1469 次;走路变成走-倒带循环,快速转身时重锚把瞬时 yaw 烘进
+锚点(转身角度偏差的来源之一)。
+修复:`zmq_pose_sender.py` 的 POSE 窗口帧号改用内部连续计数(commit `c47577a`),
+修复后跨 JSON 回绕 catch-up 新增为 0。
+
+**根因 3:deploy 流式稳态下朝向锚点被逐 tick 重置(deploy 侧)**
+
+`UpdateHeadingState` 在 `current_frame_==0` 时重置参考朝向锚点。流式回放稳态
+游标恰好停在滑窗起点(current_frame 在 0↔1 抖动),锚点逐 tick 重置 → 策略看到
+的朝向误差恒为 0 → 底座永不转身。catch-up 风暴消失后该 bug 完全暴露(修复前
+旋转段 target +355° / measured 恒 0°)。
+修复:仅预加载动作保留 frame-0 重锚,流式动作(`name=="streamed"`)只经
+`reinitialize_heading_` 锚定(`g1_deploy_onnx_ref.cpp`,commit `3f9e2ad`,
+需重编译:`cmake -S . -B build_fix && cmake --build build_fix --target
+g1_deploy_onnx_ref`,产物直接落 `target/release/`)。
+
+**修复后实测**(saveBoneData_Yup20260702,`--bvh-g1-min-root-height 0.55
+--bvh-g1-lower-scale 0.75`,弹力带 90s 释放):
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| catch-up 次数 | ~每 5.8s 一次 | 启动 1 次后为 0 |
+| 参考瞬移 | 每圈多次 6.1 m 级 | 仅回绕点 1.92 m(数据固有) |
+| 走路段转身 180° | 悬挂/不转 | GT +178°(目标 +182°) |
+| 末段 365° 旋转 | measured 0° | GT +365°(目标 +355°) |
+| 下蹲参考 z_min | 0.740(钳位) | 0.550(钳位=0.55) |
+| 关节误差均值 | 0.108 rad(吊着) | 0.114 rad(落地) |
+
+**推荐参数**:`MANAGER_EXTRA_ARGS="--bvh-g1-min-root-height 0.55
+--bvh-g1-lower-scale 0.75"`。lower 提到 0.9 走路距离 0.57→0.83 m,但整体跟踪
+变差(0.114→0.179 rad)且深蹲+旋转段更易瘫,不推荐。
+
+**遗留问题**:
+
+- 走路距离仍只有参考的 ~20-30%(0.57-0.83 m / 2.92 m),方向与转身正确。平移在
+  该链路是开环的(deploy 无里程计,`base_trans_measured` 是固定常量),距离误差
+  无法闭环修正;进一步提升需要 planner 模式承担移动、或参考步态合成/里程计。
+- 深蹲(参考 z 0.51)+ 快速旋转的组合段超出策略能力,会瘫倒(自动复位后恢复);
+  单纯浅蹲(z≈0.84)正常。
+- deploy 回放稳态滞后流头 ~3.2s(启动瞬态遗留,merger 窗口顶格 160 帧),
+  影响实时性但不影响跟踪正确性,待后续优化。
+
+**量化验证工具**:`SONIC_SIM_BASE_POSE_PORT`(默认 5658)输出仿真底座真值
+UDP JSON;g1_debug 的 `base_quat_*` 为 wxyz 序;对齐 JSON 循环用参考 z 曲线
+互相关。
+
 ## 2026-07-02 验证记录
 
 验证文件：
