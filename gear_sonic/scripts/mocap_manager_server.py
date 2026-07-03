@@ -36,6 +36,10 @@ from gear_sonic.utils.teleop.sources.sony_bonedata_json import (
     SONY_BONEDATA_INPUT_QUAT_ORDERS,
     SONY_BONEDATA_ROTATION_MODES,
 )
+from gear_sonic.utils.teleop.root_trajectory_follower import (
+    FACING_SOURCES,
+    StreamRootTrajectoryFollower,
+)
 from gear_sonic.utils.teleop.zmq.zmq_planner_sender import (
     build_command_message,
     build_planner_message,
@@ -458,6 +462,13 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
         and pose_window_size > 1
     )
     control_uses_planner = args.control_mode == "planner"
+    stream_root_follower = None
+    if control_uses_planner and args.planner_follow_stream_root:
+        stream_root_follower = StreamRootTrajectoryFollower(
+            facing_source=args.planner_follow_facing_source,
+            speed_scale=args.planner_follow_speed_scale,
+            speed_max=args.planner_follow_speed_max,
+        )
     current_stream_mode = StreamMode.PLANNER_VR_3PT if control_uses_planner else StreamMode.POSE
     socket.send(
         build_command_message(
@@ -567,12 +578,33 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
             )
 
             if control_uses_planner:
+                planner_mode = int(control.mode)
+                planner_movement = control.movement.tolist()
+                planner_facing = control.facing.tolist()
+                planner_speed = control.speed
+                if (
+                    stream_root_follower is not None
+                    and frame is not None
+                    and "root" in frame.joints
+                    and (time.time() - frame.host_time_s) <= args.mocap_timeout_s
+                ):
+                    root_pose = frame.joints["root"]
+                    follow_cmd = stream_root_follower.update(
+                        root_pose.position,
+                        root_pose.quat_wxyz,
+                        time_s=frame.host_time_s,
+                        frame_key=frame.metadata.get("receive_sequence", frame.frame_index),
+                    )
+                    planner_mode = int(follow_cmd.mode)
+                    planner_movement = follow_cmd.movement.tolist()
+                    planner_facing = follow_cmd.facing.tolist()
+                    planner_speed = float(follow_cmd.speed)
                 socket.send(
                     build_planner_message(
-                        int(control.mode),
-                        control.movement.tolist(),
-                        control.facing.tolist(),
-                        speed=control.speed,
+                        planner_mode,
+                        planner_movement,
+                        planner_facing,
+                        speed=planner_speed,
                         height=control.height,
                         upper_body_position=(
                             upper_body_position.tolist() if upper_body_position is not None else None
@@ -677,9 +709,18 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
                         )
                     else:
                         ik_desc = " ik=0"
+                follow_desc = ""
+                if stream_root_follower is not None:
+                    follow_metrics = stream_root_follower.diagnostics
+                    follow_desc = (
+                        f" follow_v={follow_metrics['follow_speed_mps']:.2f}m/s"
+                        f" follow_yaw={follow_metrics['follow_heading_deg']:+.0f}deg"
+                        f" follow_moving={int(follow_metrics['follow_moving'])}"
+                        f" follow_aligned={int(follow_metrics['follow_aligned'])}"
+                    )
                 print(
                     f"[MocapManager] recv_fps={diag['fps']:.1f} recv={diag['received_packets']} "
-                    f"vr_3pt={vr_desc} pose={pose_desc}{metrics_desc}{ik_desc} "
+                    f"vr_3pt={vr_desc} pose={pose_desc}{metrics_desc}{ik_desc}{follow_desc} "
                     f"dropped={diag['dropped_packets']} {frame_desc}"
                 )
                 if diag["last_error"]:
@@ -1169,6 +1210,37 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--start-paused", action="store_true")
+    parser.add_argument(
+        "--planner-follow-stream-root",
+        action="store_true",
+        help=(
+            "In --control-mode planner, derive mode/movement/facing/speed from the "
+            "streamed skeleton root trajectory (port of BVH --follow-trajectory) "
+            "instead of stdin move/face commands."
+        ),
+    )
+    parser.add_argument(
+        "--planner-follow-facing-source",
+        choices=FACING_SOURCES,
+        default="travel",
+        help=(
+            "Facing for --planner-follow-stream-root: 'travel' follows the direction "
+            "of travel (stable, no in-place turns); 'root_yaw' follows the reference "
+            "root yaw (reproduces in-place turns, experimental)."
+        ),
+    )
+    parser.add_argument(
+        "--planner-follow-speed-scale",
+        type=float,
+        default=1.0,
+        help="Scale streamed root speed before sending it as the planner speed command.",
+    )
+    parser.add_argument(
+        "--planner-follow-speed-max",
+        type=float,
+        default=0.6,
+        help="Upper clamp for the planner speed command from the streamed root.",
+    )
     parser.add_argument("--publisher-warmup-s", type=float, default=0.2)
     parser.add_argument("--log-interval-s", type=float, default=2.0)
     parser.add_argument(
@@ -1302,7 +1374,16 @@ def _validate_args(
 ) -> None:
     if args.source in {"pkl", "bvh_g1", "bvh_stream"}:
         if args.control_mode != "pose":
-            parser.error(f"--source {args.source} requires --control-mode pose")
+            planner_follow_ok = (
+                args.source == "bvh_stream"
+                and args.control_mode == "planner"
+                and args.planner_follow_stream_root
+            )
+            if not planner_follow_ok:
+                parser.error(
+                    f"--source {args.source} requires --control-mode pose "
+                    "(or planner with --planner-follow-stream-root for bvh_stream)"
+                )
         if not user_set_target_fps:
             if args.source == "pkl":
                 args.target_fps = args.pkl_fps
