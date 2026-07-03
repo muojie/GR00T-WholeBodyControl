@@ -35,6 +35,7 @@ DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ISAACLAB_ROOT = Path.home() / "xiaoyang_IssacLab" / "IsaacLab"
 DEFAULT_BVH_FILE = Path.home() / "RAYNOS_Motion1.bvh"
 DEFAULT_TASK = "Isaac-SonicSolo-Locomanipulation-G1-v0"
+PROXY_BINARY_NAME = "sonic_unitree_lowstate_cpp_proxy"
 BONEDATA_COORDINATE_FRAMES = (
     "sonic_zup",
     "left_handed_zup",
@@ -251,13 +252,11 @@ def _resolve_defaults(args: argparse.Namespace) -> None:
     args.bvh_file = args.bvh_file.expanduser().resolve()
 
     if args.proxy_bin is None:
-        args.proxy_bin = (
-            args.repo_root
-            / "gear_sonic_deploy"
-            / "build"
-            / "tools"
-            / "sonic_unitree_lowstate_cpp_proxy"
-        )
+        proxy_candidates = [
+            args.repo_root / "gear_sonic_deploy" / "build" / "tools" / PROXY_BINARY_NAME,
+            args.repo_root / "gear_sonic_deploy" / "prebuilt" / "linux-x86_64" / PROXY_BINARY_NAME,
+        ]
+        args.proxy_bin = next((path for path in proxy_candidates if path.exists()), proxy_candidates[0])
     args.proxy_bin = args.proxy_bin.expanduser().resolve()
 
     if args.sdk_root is None:
