@@ -78,7 +78,11 @@ class StreamRootTrajectoryFollower:
             "follow_speed_mps": float(self._last_cmd.speed if self._last_cmd.moving else 0.0),
             "follow_heading_deg": float(np.degrees(self._heading)),
             "follow_moving": float(self._last_cmd.moving),
-            "follow_aligned": float(self._align_yaw is not None),
+            "follow_aligned": float(
+                self._root_yaw_raw_prev is not None
+                if self.facing_source == "root_yaw"
+                else self._align_yaw is not None
+            ),
         }
 
     def update(
@@ -88,6 +92,7 @@ class StreamRootTrajectoryFollower:
         *,
         time_s: float,
         frame_key: Any = None,
+        facing_yaw: float | None = None,
     ) -> RootFollowCommand:
         """Feed one streamed root pose; returns the current planner command.
 
@@ -129,35 +134,24 @@ class StreamRootTrajectoryFollower:
         raw_speed = float(np.linalg.norm(self._vel_ema))
         moving = raw_speed > self.move_threshold_mps
 
-        # First-move alignment: lock the frame rotation so the first
-        # meaningfully-moving direction maps to robot +X (robot starts facing +X).
-        if self._align_yaw is None:
-            if not moving:
-                return self._last_cmd
-            self._align_yaw = float(np.arctan2(self._vel_ema[1], self._vel_ema[0]))
-            # Root-yaw facing needs its own zero so that at the first moving
-            # frame facing == +X regardless of how the reference root yaw
-            # relates to the direction of travel.
-            self._align_root_yaw = self._root_yaw(root_quat_wxyz)
-
-        cos_a = np.cos(-self._align_yaw)
-        sin_a = np.sin(-self._align_yaw)
-        vel_aligned = np.array(
-            [
-                cos_a * self._vel_ema[0] - sin_a * self._vel_ema[1],
-                sin_a * self._vel_ema[0] + cos_a * self._vel_ema[1],
-            ]
-        )
-
         max_dyaw = self.max_yaw_rate_radps * dt
         if self.facing_source == "root_yaw":
-            # Track the reference yaw on an unwrapped scale: a fast full spin
-            # would otherwise lap the rate-limited heading and the wrapped
-            # shortest-path delta would flip sign and oscillate.
-            raw_yaw = self._root_yaw(root_quat_wxyz)
+            # Prefer an externally supplied person-facing yaw (e.g. derived
+            # from the shoulder line, convention-free); fall back to the root
+            # quaternion yaw. Zero everything at the first frame: facing is
+            # offset by -yaw0 and velocity rotated by -yaw0, so the command
+            # frame starts with facing == +X == robot's initial facing while
+            # movement and facing stay mutually consistent.
+            raw_yaw = (
+                float(facing_yaw) if facing_yaw is not None else self._root_yaw(root_quat_wxyz)
+            )
             if self._root_yaw_raw_prev is None:
                 self._root_yaw_unwrapped = raw_yaw
+                self._align_root_yaw = raw_yaw
             else:
+                # Track the reference yaw on an unwrapped scale: a fast full
+                # spin would otherwise lap the rate-limited heading and the
+                # wrapped shortest-path delta would flip sign and oscillate.
                 self._root_yaw_unwrapped += (
                     (raw_yaw - self._root_yaw_raw_prev + np.pi) % (2.0 * np.pi) - np.pi
                 )
@@ -165,12 +159,36 @@ class StreamRootTrajectoryFollower:
             heading_target = self._root_yaw_unwrapped - self._align_root_yaw
             delta = heading_target - self._heading
             self._heading += float(np.clip(delta, -max_dyaw, max_dyaw))
-        elif moving:
-            # Only steer while moving: near-zero velocity direction is noise and
-            # chasing it makes the robot spin in place.
-            heading_target = float(np.arctan2(vel_aligned[1], vel_aligned[0]))
-            delta = (heading_target - self._heading + np.pi) % (2.0 * np.pi) - np.pi
-            self._heading += float(np.clip(delta, -max_dyaw, max_dyaw))
+            cos_a = np.cos(-self._align_root_yaw)
+            sin_a = np.sin(-self._align_root_yaw)
+            vel_aligned = np.array(
+                [
+                    cos_a * self._vel_ema[0] - sin_a * self._vel_ema[1],
+                    sin_a * self._vel_ema[0] + cos_a * self._vel_ema[1],
+                ]
+            )
+        else:
+            # Travel mode: facing follows the direction of travel, so the
+            # world direction only needs a one-time zero. Lock it on the first
+            # meaningfully-moving frame.
+            if self._align_yaw is None:
+                if not moving:
+                    return self._last_cmd
+                self._align_yaw = float(np.arctan2(self._vel_ema[1], self._vel_ema[0]))
+            cos_a = np.cos(-self._align_yaw)
+            sin_a = np.sin(-self._align_yaw)
+            vel_aligned = np.array(
+                [
+                    cos_a * self._vel_ema[0] - sin_a * self._vel_ema[1],
+                    sin_a * self._vel_ema[0] + cos_a * self._vel_ema[1],
+                ]
+            )
+            if moving:
+                # Only steer while moving: near-zero velocity direction is
+                # noise and chasing it makes the robot spin in place.
+                heading_target = float(np.arctan2(vel_aligned[1], vel_aligned[0]))
+                delta = (heading_target - self._heading + np.pi) % (2.0 * np.pi) - np.pi
+                self._heading += float(np.clip(delta, -max_dyaw, max_dyaw))
 
         facing = np.array(
             [np.cos(self._heading), np.sin(self._heading), 0.0], dtype=np.float32

@@ -594,6 +594,7 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
                         root_pose.quat_wxyz,
                         time_s=frame.host_time_s,
                         frame_key=frame.metadata.get("receive_sequence", frame.frame_index),
+                        facing_yaw=frame.metadata.get("person_facing_yaw"),
                     )
                     planner_mode = int(follow_cmd.mode)
                     planner_movement = follow_cmd.movement.tolist()

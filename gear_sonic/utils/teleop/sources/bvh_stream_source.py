@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import socket
 import threading
 import time
@@ -39,6 +40,20 @@ from gear_sonic.utils.teleop.sources.sony_bonedata_json import (
 
 BVH_STREAM_DEFAULT_PORT = 12352
 BVH_STREAM_FORMAT = "bvh_stream_v1"
+
+
+def _quat_mul_wxyz(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    aw, ax, ay, az = (float(v) for v in a)
+    bw, bx, by, bz = (float(v) for v in b)
+    return np.array(
+        [
+            aw * bw - ax * bx - ay * by - az * bz,
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+        ],
+        dtype=np.float32,
+    )
 
 
 def parse_bvh_stream_packet(packet: bytes, packet_format: str = "auto") -> dict[str, Any]:
@@ -316,6 +331,74 @@ class BvhStreamUdpSource:
             position=self._context.root_pos[0],
             quat_wxyz=self._context.root_quat[0],
         )
+        # Expose head/hand source joints so the VR 3-point retargeter (and thus
+        # upper-body targets in planner mode) works on streamed skeletons too.
+        # They are expressed relative to the skeleton root's horizontal position
+        # and yaw ("operator on a treadmill"): the VR3pt calibration subtracts a
+        # constant offset, so if the walking translation stayed in these poses
+        # the arm targets would drift meters away from the robot as the person
+        # walks and drag it over.
+        frame_joints: dict[str, Pose7D] = {"root": root_pose}
+        person_facing_yaw: float | None = None
+        try:
+            source_root_idx = joint_names.index("root")
+        except ValueError:
+            source_root_idx = None
+        if source_root_idx is not None:
+            anchor_pos = positions[source_root_idx]
+            # Person facing from the shoulder line: the mocopi root quaternion's
+            # +X is rotated a constant ~90 deg away from where the person
+            # actually faces, which would rotate both the treadmill-local hand
+            # frame and the planner facing command. The shoulder-line normal is
+            # convention-free.
+            anchor_yaw = None
+            try:
+                l_sh = positions[joint_names.index("l_up_arm")]
+                r_sh = positions[joint_names.index("r_up_arm")]
+                side = r_sh - l_sh
+                if float(np.hypot(side[0], side[1])) > 1e-6:
+                    anchor_yaw = math.atan2(float(side[0]), -float(side[1]))
+            except ValueError:
+                pass
+            if anchor_yaw is None:
+                aw, ax, ay, az = (float(v) for v in quats[source_root_idx])
+                anchor_yaw = math.atan2(
+                    2.0 * (aw * az + ax * ay), 1.0 - 2.0 * (ay * ay + az * az)
+                )
+            forward = np.array([math.cos(anchor_yaw), math.sin(anchor_yaw), 0.0])
+            if self._context is not None and self._context.root0_inv is not None:
+                forward_aligned = self._context.root0_inv.apply(forward)
+            else:
+                forward_aligned = forward
+            person_facing_yaw = float(
+                math.atan2(float(forward_aligned[1]), float(forward_aligned[0]))
+            )
+            cos_y = math.cos(-anchor_yaw)
+            sin_y = math.sin(-anchor_yaw)
+            yaw_inv_wxyz = np.array(
+                [math.cos(-anchor_yaw / 2.0), 0.0, 0.0, math.sin(-anchor_yaw / 2.0)],
+                dtype=np.float32,
+            )
+            for source_name in ("head", "l_hand", "r_hand"):
+                try:
+                    source_idx = joint_names.index(source_name)
+                except ValueError:
+                    continue
+                rel = positions[source_idx] - np.array(
+                    [anchor_pos[0], anchor_pos[1], 0.0], dtype=np.float32
+                )
+                local_pos = np.array(
+                    [
+                        cos_y * rel[0] - sin_y * rel[1],
+                        sin_y * rel[0] + cos_y * rel[1],
+                        rel[2],
+                    ],
+                    dtype=np.float32,
+                )
+                frame_joints[source_name] = Pose7D(
+                    position=local_pos,
+                    quat_wxyz=_quat_mul_wxyz(yaw_inv_wxyz, quats[source_idx]),
+                )
         smpl_joints = None
         smpl_joints_source = str(self.retarget_config.smpl_joints_source or "skeleton").lower()
         if smpl_joints_source == "g1_fk" and body_pos is not None:
@@ -348,7 +431,7 @@ class BvhStreamUdpSource:
             source_time_ns=payload.get("source_time_ns"),
             frame_index=stream_frame_idx,
             fps=playback_fps,
-            joints={"root": root_pose},
+            joints=frame_joints,
             full_body=full_body,
             metadata={
                 "format": BVH_STREAM_FORMAT,
@@ -364,5 +447,6 @@ class BvhStreamUdpSource:
                 "bonedata_input_quat_order": payload.get("bonedata_input_quat_order"),
                 "bonedata_rotation_mode": payload.get("bonedata_rotation_mode"),
                 "bonedata_local_root": payload.get("bonedata_local_root"),
+                "person_facing_yaw": person_facing_yaw,
             },
         )
