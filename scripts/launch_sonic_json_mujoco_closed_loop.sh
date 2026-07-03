@@ -36,6 +36,9 @@ BONEDATA_INPUT_QUAT_ORDER=${BONEDATA_INPUT_QUAT_ORDER:-xyzw}
 BONEDATA_ROTATION_MODE=${BONEDATA_ROTATION_MODE:-input}
 REPLACE=${REPLACE:-1}
 MODE=${MODE:-all}
+NO_ISAACLAB=${NO_ISAACLAB:-0}
+ISAAC_STATE_HOST=${ISAAC_STATE_HOST:-127.0.0.1}
+ISAAC_STATE_ENDPOINT=${ISAAC_STATE_ENDPOINT:-}
 
 SIM_PY=${SIM_PY:-${REPO_ROOT}/.venv_sim/bin/python}
 TELEOP_PY=${TELEOP_PY:-${REPO_ROOT}/.venv_teleop/bin/python}
@@ -55,6 +58,11 @@ Options:
   --isaaclab                 Alias for --backend isaaclab.
   --receiver-only          Start MuJoCo, manager, and deploy, but do not start JSON sender.
   --no-json-sender         Alias for --receiver-only.
+  --no-isaaclab            IsaacLab backend only: do not add local IsaacLab window.
+  --isaac-state-host HOST  IsaacLab backend only: external sonic_state host/IP.
+  --windows-ip HOST        Alias for --isaac-state-host.
+  --isaac-state-endpoint ENDPOINT
+                            IsaacLab backend only: full sonic_state endpoint.
   --sender-only            Start only the Sony BoneData JSON sender in tmux.
   --print-sender-command   Print the standalone sender command and exit.
   --json-file PATH         JSON file path. A positional JSON_FILE is also accepted.
@@ -64,6 +72,9 @@ Environment overrides:
   SESSION=${SESSION}
   BACKEND=${BACKEND}
   MODE=${MODE}
+  NO_ISAACLAB=${NO_ISAACLAB}              # IsaacLab backend only
+  ISAAC_STATE_HOST=${ISAAC_STATE_HOST}    # IsaacLab backend only
+  ISAAC_STATE_ENDPOINT=${ISAAC_STATE_ENDPOINT}
   BVH_STREAM_PORT=${BVH_STREAM_PORT}
   MOCAP_ZMQ_PORT=${MOCAP_ZMQ_PORT}
   DEBUG_PORT=${DEBUG_PORT}
@@ -78,6 +89,8 @@ Environment overrides:
 Examples:
   $0 --backend mujoco /home/nolo/saveBoneData_Yup20260702.json
   $0 --backend isaaclab /home/nolo/saveBoneData_Yup20260702.json
+  $0 --backend isaaclab --no-isaaclab --windows-ip 192.168.1.20
+  $0 --backend isaaclab --no-json-sender
   $0 --receiver-only
   $0 --sender-only /home/nolo/saveBoneData_Yup20260702.json
   $0 --print-sender-command /home/nolo/saveBoneData_Yup20260702.json
@@ -93,17 +106,41 @@ while [[ $# -gt 0 ]]; do
       usage
       exit 0
       ;;
-	    --sender-only)
-	      MODE=sender
-	      shift
-	      ;;
-	    --receiver-only|--no-json-sender)
-	      MODE=receiver
-	      shift
-	      ;;
-	    --print-sender-command)
-	      MODE=print_sender
-	      shift
+    --sender-only)
+      MODE=sender
+      shift
+      ;;
+    --receiver-only|--no-json-sender)
+      MODE=receiver
+      shift
+      ;;
+    --no-isaaclab)
+      NO_ISAACLAB=1
+      shift
+      ;;
+    --with-isaaclab)
+      NO_ISAACLAB=0
+      shift
+      ;;
+    --isaac-state-host|--windows-ip)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: $1 requires a host/IP" >&2
+        exit 2
+      fi
+      ISAAC_STATE_HOST=$2
+      shift 2
+      ;;
+    --isaac-state-endpoint)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --isaac-state-endpoint requires an endpoint" >&2
+        exit 2
+      fi
+      ISAAC_STATE_ENDPOINT=$2
+      shift 2
+      ;;
+    --print-sender-command)
+      MODE=print_sender
+      shift
       ;;
     --backend)
       if [[ $# -lt 2 ]]; then
@@ -209,12 +246,6 @@ if [[ "${MODE}" == "sender" && "${SESSION_WAS_SET}" == "0" ]]; then
   SESSION=sonic_json_${BACKEND}_sender
 fi
 
-if [[ "${BACKEND}" == "isaaclab" && "${MODE}" == "receiver" ]]; then
-  echo "ERROR: --backend isaaclab currently supports full launch and sender-only modes." >&2
-  echo "Use --backend mujoco --receiver-only for a receiver-only MuJoCo stack." >&2
-  exit 2
-fi
-
 LOG_DIR=${LOG_DIR:-${REPO_ROOT}/logs/sony_json_${BACKEND}_${SESSION}}
 RUNTIME_DIR=${RUNTIME_DIR:-/tmp/sony_json_${BACKEND}_${SESSION}}
 
@@ -255,8 +286,23 @@ if [[ "${MODE}" == "print_sender" ]]; then
   print_sender_command
   exit 0
 fi
-if [[ "${BACKEND}" == "isaaclab" && "${MODE}" == "all" ]]; then
+if [[ "${BACKEND}" == "isaaclab" && "${MODE}" != "sender" && "${MODE}" != "print_sender" ]]; then
+  isaaclab_args=()
+  if [[ "${MODE}" == "receiver" ]]; then
+    isaaclab_args+=(--no-json-sender)
+  fi
+  if [[ "${NO_ISAACLAB}" == "1" ]]; then
+    isaaclab_args+=(--no-isaaclab)
+  fi
+  if [[ -n "${ISAAC_STATE_ENDPOINT}" ]]; then
+    isaaclab_args+=(--isaac-state-endpoint "${ISAAC_STATE_ENDPOINT}")
+  else
+    isaaclab_args+=(--isaac-state-host "${ISAAC_STATE_HOST}")
+  fi
   SESSION="${SESSION}" \
+    NO_ISAACLAB="${NO_ISAACLAB}" \
+    ISAAC_STATE_HOST="${ISAAC_STATE_HOST}" \
+    ISAAC_STATE_ENDPOINT="${ISAAC_STATE_ENDPOINT}" \
     JSON_FILE="${JSON_FILE}" \
     BVH_STREAM_PORT="${BVH_STREAM_PORT}" \
     MOCAP_ZMQ_PORT="${MOCAP_ZMQ_PORT}" \
@@ -268,7 +314,7 @@ if [[ "${BACKEND}" == "isaaclab" && "${MODE}" == "all" ]]; then
     BONEDATA_INPUT_QUAT_ORDER="${BONEDATA_INPUT_QUAT_ORDER}" \
     BONEDATA_ROTATION_MODE="${BONEDATA_ROTATION_MODE}" \
     REPLACE="${REPLACE}" \
-    "${SCRIPT_DIR}/launch_sonic_json_isaaclab_closed_loop.sh" "${JSON_FILE}"
+    "${SCRIPT_DIR}/launch_sonic_json_isaaclab_closed_loop.sh" "${isaaclab_args[@]}" --json-file "${JSON_FILE}"
   exit 0
 fi
 if [[ "${MODE}" != "sender" && ! -x "${SIM_PY}" ]]; then
