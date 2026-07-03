@@ -328,11 +328,24 @@ scripts/launch_sonic_json_mujoco_closed_loop.sh --backend mujoco /home/nolo/save
 | 原地 365° 旋转 | +365°(但位置漂 3-4 m) | **+347°,原地(漂移 0.26 m)** |
 | 摔倒 | 深蹲+旋转段偶发 | 0 |
 
-**取舍**:planner 模式下肢步态由策略自主生成,不再跟参考的腿部姿态——**下蹲、
-上肢跟踪在此模式暂不生效**(上肢因 bvh_stream 源无 vr_3pt 目标而保持默认摆臂)。
-后续方向:从 `full_body` 的 FK 头/双手位姿生成 vr_3pt 目标接入同一条 planner
-消息(deploy 的 PLANNER_VR_3PT 通道现成);下蹲可实验 planner `height` 指令或
-参考 root z 低于阈值时切 `IDLE_SQUAT` 模式。
+**两个后续修复(2026-07-03 同日,已并入本分支)**:
+
+1. **横向行走**:mocopi root 四元数 +X 与人的真实朝向恒差 ~90°(骨盆轴约定)。
+   facing 用 root yaw、movement 用行进方向 → 两者恒差固定角,机器人横着走
+   (实测行进-朝向差中位 +87°)。修复:用**双肩连线法向**推真实朝向(约定无关),
+   follower 的 facing 与 movement 同减首帧朝向保持同系。修复后中位 +3°,
+   走路段 +11°/+19°。
+2. **planner 模式手臂**:bvh_stream 帧现在携带 head/l_hand/r_hand 关节
+   (跑步机局部化:减 root 水平位移 + 按肩线朝向反旋),VR3PointRetargeter
+   直接工作,vr_3pt 目标进 planner 消息(同 PICO 的 PLANNER_VR_3PT 通道)。
+   **注意必须局部化**——VR3pt 标定只减常量偏移,若保留行走平移,手臂目标会
+   随人走远漂几米,把机器人拽倒(实测 181 次摔倒的事故就是这个)。
+
+**精度取舍**:planner 模式手臂走 3 点(头+双手)IK,方向正确、形态近似,
+不如 pose 模式的全身逐关节跟踪精细;下蹲在 planner 模式仍不生效。
+**要手臂/下蹲最准用 pose 模式,要真走路用 planner 模式**。后续方向:
+`upper_body_position`(PLANNER_FROZEN_UPPER_BODY 字段)接 pose 级上肢参考、
+下蹲试 planner `height` 指令或参考 root z 低时切 `IDLE_SQUAT`。
 
 ## 2026-07-02 验证记录
 
