@@ -297,6 +297,43 @@ g1_deploy_onnx_ref`,产物直接落 `target/release/`)。
 UDP JSON;g1_debug 的 `base_quat_*` 为 wxyz 序;对齐 JSON 循环用参考 z 曲线
 互相关。
 
+## planner 跟随模式:走路距离问题的解法(2026-07-03,分支 feature/json-stream-planner-follow)
+
+pose 模式的平移是开环的(deploy 无里程计),走路距离只能到参考的 20-30%。
+参照 PICO 的驱动方式(速度指令走 planner 闭环、姿态只管上肢),把 BVH 分支的
+`--follow-trajectory` 因果化移植到了 JSON 流:
+
+- `gear_sonic/utils/teleop/root_trajectory_follower.py`:在线把流式 root 轨迹
+  差分成 planner 的 `mode/movement/facing/speed`——EMA 平滑速度、首移方向对齐
+  +X、限速(1.5 rad/s)稳定朝向、sender 循环回绕防护;
+- 朝向源两档:`travel`(跟行进方向,稳,默认)/`root_yaw`(跟参考 root yaw,
+  连续解卷绕,能复现原地整圈旋转);
+- manager 加 `--planner-follow-stream-root`(planner 模式下替代 stdin move/face),
+  一键脚本 `CONTROL_MODE=planner` 直接启用。
+
+启动:
+
+```bash
+REPLACE=1 CONTROL_MODE=planner \
+MANAGER_EXTRA_ARGS="--planner-follow-facing-source root_yaw" \
+scripts/launch_sonic_json_mujoco_closed_loop.sh --backend mujoco /home/nolo/saveBoneData_Yup20260702.json
+```
+
+实测(saveBoneData_Yup20260702,底座真值):
+
+| 指标 | pose 模式 | planner 跟随模式 |
+|---|---|---|
+| 走路段净位移(参考 2.92 m) | 0.57–0.83 m | **2.88 m(99%)** |
+| 走路段转身(参考 ~180°) | +178° | +177°(指令 +181°) |
+| 原地 365° 旋转 | +365°(但位置漂 3-4 m) | **+347°,原地(漂移 0.26 m)** |
+| 摔倒 | 深蹲+旋转段偶发 | 0 |
+
+**取舍**:planner 模式下肢步态由策略自主生成,不再跟参考的腿部姿态——**下蹲、
+上肢跟踪在此模式暂不生效**(上肢因 bvh_stream 源无 vr_3pt 目标而保持默认摆臂)。
+后续方向:从 `full_body` 的 FK 头/双手位姿生成 vr_3pt 目标接入同一条 planner
+消息(deploy 的 PLANNER_VR_3PT 通道现成);下蹲可实验 planner `height` 指令或
+参考 root z 低于阈值时切 `IDLE_SQUAT` 模式。
+
 ## 2026-07-02 验证记录
 
 验证文件：
