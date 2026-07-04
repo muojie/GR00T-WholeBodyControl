@@ -18,8 +18,10 @@ R_HEADSET_TO_WORLD = np.array(
 
 class PicoStreamer(BaseStreamer):
     def __init__(self):
+        self.pico_service_pid = None
         self.xr_client = XrClient()
-        self.run_pico_service()
+        if self.xr_client.uses_sdk_service:
+            self.run_pico_service()
 
         self.reset_status()
 
@@ -32,9 +34,10 @@ class PicoStreamer(BaseStreamer):
 
     def stop_pico_service(self):
         # find pid and kill it
-        if self.pico_service_pid:
+        if self.pico_service_pid is not None:
             subprocess.Popen(["kill", "-9", str(self.pico_service_pid.pid)])
             print(f"Pico service killed with pid {self.pico_service_pid.pid}")
+            self.pico_service_pid = None
         else:
             print("Pico service not running")
 
