@@ -72,9 +72,122 @@ except ImportError:
     smpl_root_ytoz_up = None
 
 try:
-    import xrobotoolkit_sdk as xrt
+    import xrobotoolkit_sdk as _xrt_sdk
 except ImportError:
-    xrt = None
+    _xrt_sdk = None
+
+try:
+    from decoupled_wbc.control.teleop.device.pico.xr_client import XrClient as _UdpXrClient
+except ImportError:
+    _UdpXrClient = None
+
+
+class XRoboToolkitBackend:
+    """Compatibility facade matching the xrobotoolkit_sdk functions used below."""
+
+    def __init__(self, sdk_module, udp_client_cls):
+        self._sdk = sdk_module
+        self._udp_client_cls = udp_client_cls
+        self._udp_client = None
+        self._transport = os.environ.get("XROBO_TRANSPORT", "udp").lower()
+
+    def uses_sdk_service(self) -> bool:
+        return self._transport == "sdk"
+
+    def init(self):
+        if self.uses_sdk_service():
+            if self._sdk is None:
+                raise ImportError("xrobotoolkit_sdk is not available for XROBO_TRANSPORT=sdk")
+            self._sdk.init()
+            return
+
+        if self._udp_client_cls is None:
+            raise ImportError(
+                "UDP XRoboToolkit client is not available. "
+                "Ensure decoupled_wbc.control.teleop.device.pico.xr_client is importable."
+            )
+
+        if self._udp_client is None:
+            self._udp_client = self._udp_client_cls(transport="udp")
+
+    def is_body_data_available(self):
+        if self.uses_sdk_service():
+            return self._sdk.is_body_data_available()
+        return self._udp_client is not None and self._udp_client.get_body_tracking_data() is not None
+
+    def get_time_stamp_ns(self):
+        if self.uses_sdk_service():
+            return self._sdk.get_time_stamp_ns()
+        return self._udp_client.get_timestamp_ns()
+
+    def get_body_joints_pose(self):
+        if self.uses_sdk_service():
+            return self._sdk.get_body_joints_pose()
+
+        body = self._udp_client.get_body_tracking_data()
+        if body is None:
+            return []
+        return body["poses"]
+
+    def get_left_trigger(self):
+        return self._get_key_value("left_trigger", "get_left_trigger")
+
+    def get_right_trigger(self):
+        return self._get_key_value("right_trigger", "get_right_trigger")
+
+    def get_left_grip(self):
+        return self._get_key_value("left_grip", "get_left_grip")
+
+    def get_right_grip(self):
+        return self._get_key_value("right_grip", "get_right_grip")
+
+    def get_left_menu_button(self):
+        return self._get_button("left_menu_button", "get_left_menu_button")
+
+    def get_right_menu_button(self):
+        return self._get_button("right_menu_button", "get_right_menu_button")
+
+    def get_left_axis_click(self):
+        return self._get_button("left_axis_click", "get_left_axis_click")
+
+    def get_right_axis_click(self):
+        return self._get_button("right_axis_click", "get_right_axis_click")
+
+    def get_A_button(self):
+        return self._get_button("A", "get_A_button")
+
+    def get_B_button(self):
+        return self._get_button("B", "get_B_button")
+
+    def get_X_button(self):
+        return self._get_button("X", "get_X_button")
+
+    def get_Y_button(self):
+        return self._get_button("Y", "get_Y_button")
+
+    def get_left_axis(self):
+        return self._get_axis("left", "get_left_axis")
+
+    def get_right_axis(self):
+        return self._get_axis("right", "get_right_axis")
+
+    def _get_key_value(self, udp_name, sdk_name):
+        if self.uses_sdk_service():
+            return getattr(self._sdk, sdk_name)()
+        return self._udp_client.get_key_value_by_name(udp_name)
+
+    def _get_button(self, udp_name, sdk_name):
+        if self.uses_sdk_service():
+            return getattr(self._sdk, sdk_name)()
+        return self._udp_client.get_button_state_by_name(udp_name)
+
+    def _get_axis(self, udp_name, sdk_name):
+        if self.uses_sdk_service():
+            return getattr(self._sdk, sdk_name)()
+        return self._udp_client.get_joystick_state(udp_name)
+
+
+xrt = XRoboToolkitBackend(_xrt_sdk, _UdpXrClient) if (_xrt_sdk is not None or _UdpXrClient is not None) else None
 
 try:
     from gear_sonic.utils.teleop.solver.hand.g1_gripper_ik_solver import (
@@ -361,9 +474,8 @@ def run_vr3pt_live_visualizer():
     print("VR 3-Point Pose Live Visualizer (PyVista)")
     print("=" * 60)
 
-    # Initialize XRT
-    _start_robotics_service_if_available()
-    xrt.init()
+    # Initialize XR backend
+    _init_xrt_backend()
     print("Waiting for body tracking data...")
     while not xrt.is_body_data_available():
         print("waiting for body data...")
@@ -411,9 +523,8 @@ def run_vr3pt_realtime_visualizer(update_hz: int = 10):
     print("VR 3-Point Pose Real-time Visualizer (PyVista)")
     print("=" * 60)
 
-    # Initialize XRT
-    _start_robotics_service_if_available()
-    xrt.init()
+    # Initialize XR backend
+    _init_xrt_backend()
     print("Waiting for body tracking data...")
     while not xrt.is_body_data_available():
         print("waiting for body data...")
@@ -529,6 +640,20 @@ def _start_robotics_service_if_available():
         flush=True,
     )
     return None
+
+
+def _init_xrt_backend():
+    if xrt is None:
+        raise ImportError(
+            "XRoboToolkit backend is not available. "
+            "Use UDP mode with decoupled_wbc.control.teleop.device.pico.xr_client "
+            "or install xrobotoolkit_sdk for XROBO_TRANSPORT=sdk."
+        )
+
+    if hasattr(xrt, "uses_sdk_service") and xrt.uses_sdk_service():
+        _start_robotics_service_if_available()
+
+    xrt.init()
 
 
 class YawAccumulator:
@@ -1525,8 +1650,7 @@ def run_pico(
         raise ImportError(
             "XRoboToolkit SDK not available. Install xrobotoolkit_sdk to run Pico streaming."
         )
-    _start_robotics_service_if_available()
-    xrt.init()
+    _init_xrt_backend()
     print("Waiting for body tracking data...")
     while not xrt.is_body_data_available():
         print("waiting for body data...")
@@ -1840,8 +1964,7 @@ def run_pico_manager(
         raise ImportError(
             "XRoboToolkit SDK not available. Install xrobotoolkit_sdk to run the manager."
         )
-    _start_robotics_service_if_available()
-    xrt.init()
+    _init_xrt_backend()
     print("Waiting for body tracking data...")
     while not xrt.is_body_data_available():
         print("waiting for body data...")
