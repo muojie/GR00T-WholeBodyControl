@@ -93,6 +93,51 @@ is_ip_address() {
     return 1
 }
 
+# Repair Unitree/CycloneDDS SONAME links when checkout/LFS produced broken links.
+repair_unitree_dds_links() {
+    local lib_root="$SCRIPT_DIR/thirdparty/unitree_sdk2/thirdparty/lib"
+    local repaired=0
+    local missing=0
+    local arch_dir
+
+    for arch_dir in "$lib_root"/*; do
+        [[ -d "$arch_dir" ]] || continue
+
+        local lib link target
+        for lib in libddsc.so libddscxx.so; do
+            target="$arch_dir/$lib"
+            link="$arch_dir/$lib.0"
+
+            if [[ ! -f "$target" ]]; then
+                echo -e "${RED}❌ Missing Unitree DDS library: $target${NC}" >&2
+                missing=$((missing + 1))
+                continue
+            fi
+
+            if [[ ! -e "$link" ]]; then
+                ln -s "$lib" "$link"
+                repaired=$((repaired + 1))
+            elif [[ -L "$link" && "$(readlink "$link")" != "$lib" ]]; then
+                ln -sfn "$lib" "$link"
+                repaired=$((repaired + 1))
+            elif [[ ! -L "$link" ]]; then
+                echo -e "${YELLOW}⚠️  $link exists but is not a symlink; leaving it unchanged${NC}" >&2
+            fi
+        done
+    done
+
+    if [[ "$missing" -gt 0 ]]; then
+        echo -e "${RED}❌ Unitree DDS dependencies are incomplete. Try: git lfs pull${NC}" >&2
+        return 1
+    fi
+
+    if [[ "$repaired" -gt 0 ]]; then
+        echo -e "${GREEN}✅ Repaired $repaired Unitree DDS SONAME symlink(s)${NC}"
+    else
+        echo -e "${GREEN}✅ Unitree DDS SONAME symlinks are valid${NC}"
+    fi
+}
+
 # Check if interface has a specific IP
 interface_has_ip() {
     local iface="$1"
@@ -437,6 +482,8 @@ fi
 # ============================================================================
 
 echo -e "${BLUE}[Step 1/4]${NC} Checking prerequisites..."
+
+repair_unitree_dds_links
 
 # Check for TensorRT
 if [ -z "$TensorRT_ROOT" ]; then

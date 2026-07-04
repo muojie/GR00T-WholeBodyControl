@@ -7,3 +7,7 @@
 *.onnx filter=lfs diff=lfs merge=lfs -text
 *.pkl filter=lfs diff=lfs merge=lfs -text
 *.csv filter=lfs diff=lfs merge=lfs -text
+
+# Keep DDS SONAME compatibility links as real symlinks, not LFS pointer links.
+thirdparty/unitree_sdk2/thirdparty/lib/**/libddsc.so.0 filter= diff= merge=
+thirdparty/unitree_sdk2/thirdparty/lib/**/libddscxx.so.0 filter= diff= merge=
