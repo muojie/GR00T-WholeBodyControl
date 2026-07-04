@@ -603,16 +603,37 @@ def quaternion_multiply_np(a, b):
 
 
 def decompose_rotation_aa(rotation_aa, v2):
-    angle = np.linalg.norm(rotation_aa, axis=1)[:, None]
-    w = np.cos(angle / 2)
-    v = np.sin(angle / 2) * rotation_aa / angle
+    rotation_aa = np.asarray(rotation_aa, dtype=np.float64)
+    v2 = np.asarray(v2, dtype=np.float64)
+    v2_norm = np.linalg.norm(v2)
+    if v2_norm <= 1e-8:
+        raise ValueError("twist axis must be non-zero")
+    v2 = v2 / v2_norm
+
+    angle = np.linalg.norm(rotation_aa, axis=1, keepdims=True)
+    half_angle = angle / 2.0
+    w = np.cos(half_angle)
+
+    # For zero rotation, sin(angle / 2) / angle approaches 0.5.
+    scale = np.empty_like(angle)
+    valid_angle = angle > 1e-8
+    np.divide(np.sin(half_angle), angle, out=scale, where=valid_angle)
+    scale[~valid_angle] = 0.5
+    v = rotation_aa * scale
     q = np.concatenate([w, v], axis=1)
 
     v_twist = np.dot(v, v2)[:, None] * v2
     q_twist = np.concatenate([w, v_twist], axis=1)
-    q_twist = q_twist / np.linalg.norm(q_twist, axis=1)[:, None]
+    twist_norm = np.linalg.norm(q_twist, axis=1, keepdims=True)
+    valid_twist = np.isfinite(twist_norm) & (twist_norm > 1e-8)
+    q_twist = np.divide(q_twist, twist_norm, out=np.zeros_like(q_twist), where=valid_twist)
+    q_twist[~valid_twist[:, 0]] = np.array([1.0, 0.0, 0.0, 0.0])
 
     q_twist_inv = q_twist * np.array([1, -1, -1, -1])
     q_swing = quaternion_multiply_np(q_twist_inv, q)
+    swing_norm = np.linalg.norm(q_swing, axis=1, keepdims=True)
+    valid_swing = np.isfinite(swing_norm) & (swing_norm > 1e-8)
+    q_swing = np.divide(q_swing, swing_norm, out=np.zeros_like(q_swing), where=valid_swing)
+    q_swing[~valid_swing[:, 0]] = np.array([1.0, 0.0, 0.0, 0.0])
 
     return q_twist, q_swing

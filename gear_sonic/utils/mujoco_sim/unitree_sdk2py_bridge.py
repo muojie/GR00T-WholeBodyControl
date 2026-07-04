@@ -208,7 +208,33 @@ class UnitreeSdk2Bridge:
                 "root_quat_w": pose[3:7].tolist(),
                 "root_lin_vel_w": vel[:3].tolist(),
                 "root_ang_vel_w": vel[3:6].tolist(),
+                "joint_order": "mujoco",
+                "state_source": "mujoco_bridge",
             }
+            if "body_q" in obs:
+                body_q = np.asarray(obs["body_q"], dtype=np.float64)
+                payload["body_q"] = body_q.tolist()
+                payload["body_q_measured"] = body_q.tolist()
+            if "body_dq" in obs:
+                body_dq = np.asarray(obs["body_dq"], dtype=np.float64)
+                payload["body_dq"] = body_dq.tolist()
+                payload["body_dq_measured"] = body_dq.tolist()
+            if "left_hand_q" in obs:
+                left_hand_q = np.asarray(obs["left_hand_q"], dtype=np.float64)
+                payload["left_hand_q"] = left_hand_q.tolist()
+                payload["left_hand_q_measured"] = left_hand_q.tolist()
+            if "left_hand_dq" in obs:
+                left_hand_dq = np.asarray(obs["left_hand_dq"], dtype=np.float64)
+                payload["left_hand_dq"] = left_hand_dq.tolist()
+                payload["left_hand_dq_measured"] = left_hand_dq.tolist()
+            if "right_hand_q" in obs:
+                right_hand_q = np.asarray(obs["right_hand_q"], dtype=np.float64)
+                payload["right_hand_q"] = right_hand_q.tolist()
+                payload["right_hand_q_measured"] = right_hand_q.tolist()
+            if "right_hand_dq" in obs:
+                right_hand_dq = np.asarray(obs["right_hand_dq"], dtype=np.float64)
+                payload["right_hand_dq"] = right_hand_dq.tolist()
+                payload["right_hand_dq_measured"] = right_hand_dq.tolist()
             packed = msgpack.packb(payload, use_bin_type=True)
             self.root_zmq_socket.send_multipart([self.root_zmq_topic, packed], flags=self.root_zmq.NOBLOCK)
         except self.root_zmq.Again:
