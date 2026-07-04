@@ -319,6 +319,9 @@ if [[ "${BACKEND}" == "isaaclab" && "${MODE}" != "sender" && "${MODE}" != "print
     BONEDATA_POSITION_SCALE="${BONEDATA_POSITION_SCALE}" \
     BONEDATA_INPUT_QUAT_ORDER="${BONEDATA_INPUT_QUAT_ORDER}" \
     BONEDATA_ROTATION_MODE="${BONEDATA_ROTATION_MODE}" \
+    CONTROL_MODE="${CONTROL_MODE}" \
+    PLANNER_FOLLOW="${PLANNER_FOLLOW}" \
+    MANAGER_EXTRA_ARGS="${MANAGER_EXTRA_ARGS}" \
     REPLACE="${REPLACE}" \
     "${SCRIPT_DIR}/launch_sonic_json_isaaclab_closed_loop.sh" "${isaaclab_args[@]}" --json-file "${JSON_FILE}"
   exit 0

@@ -226,6 +226,28 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bvh-fps", type=float)
     parser.add_argument("--pose-window-size", type=int, default=80)
     parser.add_argument("--mocap-log-interval-s", type=float, default=1.0)
+    parser.add_argument(
+        "--control-mode",
+        choices=["planner", "pose"],
+        default="pose",
+        help="mocap manager control mode; 'pose' streams motion, 'planner' uses the deploy planner",
+    )
+    parser.add_argument(
+        "--planner-follow-stream-root",
+        action="store_true",
+        help=(
+            "in --control-mode planner, derive mode/movement/facing/speed from the "
+            "streamed skeleton root trajectory instead of stdin move/face commands"
+        ),
+    )
+    parser.add_argument(
+        "--manager-extra-args",
+        default="",
+        help=(
+            "extra CLI args appended verbatim to mocap_manager_server.py, "
+            "for example '--planner-follow-facing-source root_yaw'; parsed with shlex"
+        ),
+    )
 
     parser.add_argument("--lowstate-hz", type=float, default=500.0)
     parser.add_argument("--follow-alpha", type=float, default=0.35)
@@ -512,7 +534,7 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
         "--bvh-stream-bonedata-rotation-mode",
         args.bvh_stream_bonedata_rotation_mode,
         "--control-mode",
-        "pose",
+        args.control_mode,
         "--pose-window-size",
         str(args.pose_window_size),
         "--pose-encoder-mode",
@@ -524,6 +546,10 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
         "--log-interval-s",
         str(args.mocap_log_interval_s),
     ]
+    if args.planner_follow_stream_root:
+        mocap_args.append("--planner-follow-stream-root")
+    if args.manager_extra_args:
+        mocap_args.extend(shlex.split(args.manager_extra_args))
     command = " && ".join(
         [
             f"cd {_quote(args.repo_root)}",
