@@ -297,6 +297,56 @@ g1_deploy_onnx_ref`,产物直接落 `target/release/`)。
 UDP JSON;g1_debug 的 `base_quat_*` 为 wxyz 序;对齐 JSON 循环用参考 z 曲线
 互相关。
 
+## planner 跟随模式:走路距离问题的解法(2026-07-03,分支 feature/json-stream-planner-follow)
+
+pose 模式的平移是开环的(deploy 无里程计),走路距离只能到参考的 20-30%。
+参照 PICO 的驱动方式(速度指令走 planner 闭环、姿态只管上肢),把 BVH 分支的
+`--follow-trajectory` 因果化移植到了 JSON 流:
+
+- `gear_sonic/utils/teleop/root_trajectory_follower.py`:在线把流式 root 轨迹
+  差分成 planner 的 `mode/movement/facing/speed`——EMA 平滑速度、首移方向对齐
+  +X、限速(1.5 rad/s)稳定朝向、sender 循环回绕防护;
+- 朝向源两档:`travel`(跟行进方向,稳,默认)/`root_yaw`(跟参考 root yaw,
+  连续解卷绕,能复现原地整圈旋转);
+- manager 加 `--planner-follow-stream-root`(planner 模式下替代 stdin move/face),
+  一键脚本 `CONTROL_MODE=planner` 直接启用。
+
+启动:
+
+```bash
+REPLACE=1 CONTROL_MODE=planner \
+MANAGER_EXTRA_ARGS="--planner-follow-facing-source root_yaw" \
+scripts/launch_sonic_json_mujoco_closed_loop.sh --backend mujoco /home/nolo/saveBoneData_Yup20260702.json
+```
+
+实测(saveBoneData_Yup20260702,底座真值):
+
+| 指标 | pose 模式 | planner 跟随模式 |
+|---|---|---|
+| 走路段净位移(参考 2.92 m) | 0.57–0.83 m | **2.88 m(99%)** |
+| 走路段转身(参考 ~180°) | +178° | +177°(指令 +181°) |
+| 原地 365° 旋转 | +365°(但位置漂 3-4 m) | **+347°,原地(漂移 0.26 m)** |
+| 摔倒 | 深蹲+旋转段偶发 | 0 |
+
+**两个后续修复(2026-07-03 同日,已并入本分支)**:
+
+1. **横向行走**:mocopi root 四元数 +X 与人的真实朝向恒差 ~90°(骨盆轴约定)。
+   facing 用 root yaw、movement 用行进方向 → 两者恒差固定角,机器人横着走
+   (实测行进-朝向差中位 +87°)。修复:用**双肩连线法向**推真实朝向(约定无关),
+   follower 的 facing 与 movement 同减首帧朝向保持同系。修复后中位 +3°,
+   走路段 +11°/+19°。
+2. **planner 模式手臂**:bvh_stream 帧现在携带 head/l_hand/r_hand 关节
+   (跑步机局部化:减 root 水平位移 + 按肩线朝向反旋),VR3PointRetargeter
+   直接工作,vr_3pt 目标进 planner 消息(同 PICO 的 PLANNER_VR_3PT 通道)。
+   **注意必须局部化**——VR3pt 标定只减常量偏移,若保留行走平移,手臂目标会
+   随人走远漂几米,把机器人拽倒(实测 181 次摔倒的事故就是这个)。
+
+**精度取舍**:planner 模式手臂走 3 点(头+双手)IK,方向正确、形态近似,
+不如 pose 模式的全身逐关节跟踪精细;下蹲在 planner 模式仍不生效。
+**要手臂/下蹲最准用 pose 模式,要真走路用 planner 模式**。后续方向:
+`upper_body_position`(PLANNER_FROZEN_UPPER_BODY 字段)接 pose 级上肢参考、
+下蹲试 planner `height` 指令或参考 root z 低时切 `IDLE_SQUAT`。
+
 ## 2026-07-02 验证记录
 
 验证文件：

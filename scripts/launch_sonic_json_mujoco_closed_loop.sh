@@ -28,6 +28,12 @@ MOCAP_ZMQ_PORT=${MOCAP_ZMQ_PORT:-5656}
 DEBUG_PORT=${DEBUG_PORT:-5657}
 BASE_POSE_PORT=${BASE_POSE_PORT:-5658}
 BAND_RELEASE_S=${BAND_RELEASE_S:-90}
+CONTROL_MODE=${CONTROL_MODE:-pose}
+PLANNER_FOLLOW=${PLANNER_FOLLOW:-1}
+PLANNER_FOLLOW_ARGS=""
+if [[ "${CONTROL_MODE}" == "planner" && "${PLANNER_FOLLOW}" == "1" ]]; then
+  PLANNER_FOLLOW_ARGS="--planner-follow-stream-root"
+fi
 STATE_PORT=${STATE_PORT:-5560}
 FPS=${FPS:-50}
 COORDINATE_FRAME=${COORDINATE_FRAME:-left_handed_yup}
@@ -388,12 +394,12 @@ export PYTHONPATH="${REPO_ROOT}:\${PYTHONPATH:-}"
   --bvh-stream-bonedata-position-scale "${BONEDATA_POSITION_SCALE}" \
   --bvh-stream-bonedata-input-quat-order "${BONEDATA_INPUT_QUAT_ORDER}" \
   --bvh-stream-bonedata-rotation-mode "${BONEDATA_ROTATION_MODE}" \
-  --control-mode pose \
+  --control-mode "${CONTROL_MODE}" \
   --pose-window-size 80 \
   --pose-encoder-mode g1 \
   --pose-protocol-version 1 \
   --zmq-port "${MOCAP_ZMQ_PORT}" \
-  --log-interval-s 1.0 ${MANAGER_EXTRA_ARGS} \
+  --log-interval-s 1.0 ${PLANNER_FOLLOW_ARGS} ${MANAGER_EXTRA_ARGS} \
   2>&1 | tee "${LOG_DIR}/manager.log"
 status=\$?
 echo

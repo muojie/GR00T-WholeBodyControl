@@ -36,12 +36,28 @@ from gear_sonic.utils.teleop.sources.sony_bonedata_json import (
     SONY_BONEDATA_INPUT_QUAT_ORDERS,
     SONY_BONEDATA_ROTATION_MODES,
 )
+from gear_sonic.utils.teleop.root_trajectory_follower import (
+    FACING_SOURCES,
+    StreamRootTrajectoryFollower,
+)
 from gear_sonic.utils.teleop.zmq.zmq_planner_sender import (
     build_command_message,
     build_planner_message,
     pack_pose_message,
 )
 from gear_sonic.utils.teleop.zmq.zmq_pose_sender import PoseStreamPublisher
+
+
+# IsaacLab-order joint indices of the 17 upper-body DOF (waist yaw/roll/pitch +
+# both arms), in the exact order the deploy binary scatters an incoming
+# `upper_body_position` back into the 29-DOF reference
+# (policy_parameters.hpp: upper_body_joint_isaaclab_order_in_isaaclab_index).
+# Forwarding frame.full_body.joint_pos[these] as upper_body_position gives the
+# planner robot the same directly-retargeted arm joints that pose mode uses,
+# instead of reconstructing arms from a lossy 3-point VR target.
+UPPER_BODY_JOINT_ISAACLAB_IDX = (
+    2, 5, 8, 11, 12, 15, 16, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
+)
 
 
 class LocomotionMode(IntEnum):
@@ -458,6 +474,13 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
         and pose_window_size > 1
     )
     control_uses_planner = args.control_mode == "planner"
+    stream_root_follower = None
+    if control_uses_planner and args.planner_follow_stream_root:
+        stream_root_follower = StreamRootTrajectoryFollower(
+            facing_source=args.planner_follow_facing_source,
+            speed_scale=args.planner_follow_speed_scale,
+            speed_max=args.planner_follow_speed_max,
+        )
     current_stream_mode = StreamMode.PLANNER_VR_3PT if control_uses_planner else StreamMode.POSE
     socket.send(
         build_command_message(
@@ -478,6 +501,7 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
 
     dt = 1.0 / max(1.0, float(args.target_fps))
     last_log_s = 0.0
+    last_upper_body_source = "none"
 
     try:
         while True:
@@ -567,23 +591,78 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
             )
 
             if control_uses_planner:
+                planner_mode = int(control.mode)
+                planner_movement = control.movement.tolist()
+                planner_facing = control.facing.tolist()
+                planner_speed = control.speed
+                if (
+                    stream_root_follower is not None
+                    and frame is not None
+                    and "root" in frame.joints
+                    and (time.time() - frame.host_time_s) <= args.mocap_timeout_s
+                ):
+                    root_pose = frame.joints["root"]
+                    follow_cmd = stream_root_follower.update(
+                        root_pose.position,
+                        root_pose.quat_wxyz,
+                        time_s=frame.host_time_s,
+                        frame_key=frame.metadata.get("receive_sequence", frame.frame_index),
+                        facing_yaw=frame.metadata.get("person_facing_yaw"),
+                    )
+                    planner_mode = int(follow_cmd.mode)
+                    planner_movement = follow_cmd.movement.tolist()
+                    planner_facing = follow_cmd.facing.tolist()
+                    planner_speed = float(follow_cmd.speed)
+
+                planner_upper_body = (
+                    upper_body_position.tolist() if upper_body_position is not None else None
+                )
+                planner_vr_position = vr_position.tolist() if vr_position is not None else None
+                planner_vr_orientation = (
+                    vr_orientation.tolist() if vr_orientation is not None else None
+                )
+                last_upper_body_source = (
+                    "vr_3pt" if planner_vr_position is not None else "ik" if planner_upper_body else "none"
+                )
+                # Forward the full-fidelity upper-body joints straight from the
+                # streamed skeleton retarget (identical to what pose mode sends
+                # and what made the arms track perfectly), so the deploy splices
+                # them into the reference instead of reconstructing arms from the
+                # 3-point VR target. This overrides the vr_3pt arm path, which is
+                # inherently lossy for a 7-DOF arm.
+                if (
+                    stream_root_follower is not None
+                    and args.planner_follow_upper_body_from_stream
+                    and frame is not None
+                    and frame.full_body is not None
+                    and getattr(frame.full_body, "joint_pos", None) is not None
+                    and (time.time() - frame.host_time_s) <= args.mocap_timeout_s
+                ):
+                    joint_pos = np.asarray(frame.full_body.joint_pos, dtype=np.float32).reshape(-1)
+                    if joint_pos.shape[0] >= 29:
+                        planner_upper_body = joint_pos[
+                            list(UPPER_BODY_JOINT_ISAACLAB_IDX)
+                        ].tolist()
+                        # Direct joint targets fully define the arms; don't also
+                        # send a conflicting 3-point target.
+                        planner_vr_position = None
+                        planner_vr_orientation = None
+                        last_upper_body_source = "stream_full_body"
                 socket.send(
                     build_planner_message(
-                        int(control.mode),
-                        control.movement.tolist(),
-                        control.facing.tolist(),
-                        speed=control.speed,
+                        planner_mode,
+                        planner_movement,
+                        planner_facing,
+                        speed=planner_speed,
                         height=control.height,
-                        upper_body_position=(
-                            upper_body_position.tolist() if upper_body_position is not None else None
-                        ),
+                        upper_body_position=planner_upper_body,
                         upper_body_velocity=(
                             upper_body_velocity.tolist() if upper_body_velocity is not None else None
                         ),
                         left_hand_position=np.zeros(7, dtype=np.float32).tolist(),
                         right_hand_position=np.zeros(7, dtype=np.float32).tolist(),
-                        vr_3pt_position=vr_position.tolist() if vr_position is not None else None,
-                        vr_3pt_orientation=vr_orientation.tolist() if vr_orientation is not None else None,
+                        vr_3pt_position=planner_vr_position,
+                        vr_3pt_orientation=planner_vr_orientation,
                     )
                 )
 
@@ -677,9 +756,19 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
                         )
                     else:
                         ik_desc = " ik=0"
+                follow_desc = ""
+                if stream_root_follower is not None:
+                    follow_metrics = stream_root_follower.diagnostics
+                    follow_desc = (
+                        f" follow_v={follow_metrics['follow_speed_mps']:.2f}m/s"
+                        f" follow_yaw={follow_metrics['follow_heading_deg']:+.0f}deg"
+                        f" follow_moving={int(follow_metrics['follow_moving'])}"
+                        f" follow_aligned={int(follow_metrics['follow_aligned'])}"
+                        f" arms={last_upper_body_source}"
+                    )
                 print(
                     f"[MocapManager] recv_fps={diag['fps']:.1f} recv={diag['received_packets']} "
-                    f"vr_3pt={vr_desc} pose={pose_desc}{metrics_desc}{ik_desc} "
+                    f"vr_3pt={vr_desc} pose={pose_desc}{metrics_desc}{ik_desc}{follow_desc} "
                     f"dropped={diag['dropped_packets']} {frame_desc}"
                 )
                 if diag["last_error"]:
@@ -1169,6 +1258,55 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--start-paused", action="store_true")
+    parser.add_argument(
+        "--planner-follow-stream-root",
+        action="store_true",
+        help=(
+            "In --control-mode planner, derive mode/movement/facing/speed from the "
+            "streamed skeleton root trajectory (port of BVH --follow-trajectory) "
+            "instead of stdin move/face commands."
+        ),
+    )
+    parser.add_argument(
+        "--planner-follow-facing-source",
+        choices=FACING_SOURCES,
+        default="travel",
+        help=(
+            "Facing for --planner-follow-stream-root: 'travel' follows the direction "
+            "of travel (stable, no in-place turns); 'root_yaw' follows the reference "
+            "root yaw (reproduces in-place turns, experimental)."
+        ),
+    )
+    parser.add_argument(
+        "--planner-follow-speed-scale",
+        type=float,
+        default=1.0,
+        help="Scale streamed root speed before sending it as the planner speed command.",
+    )
+    parser.add_argument(
+        "--planner-follow-speed-max",
+        type=float,
+        default=0.6,
+        help="Upper clamp for the planner speed command from the streamed root.",
+    )
+    parser.add_argument(
+        "--planner-follow-upper-body-from-stream",
+        dest="planner_follow_upper_body_from_stream",
+        action="store_true",
+        default=True,
+        help=(
+            "In planner follow mode, send the streamed skeleton's directly-"
+            "retargeted 17 upper-body joint angles as upper_body_position "
+            "(same fidelity as pose mode), instead of a 3-point VR target. "
+            "On by default."
+        ),
+    )
+    parser.add_argument(
+        "--no-planner-follow-upper-body-from-stream",
+        dest="planner_follow_upper_body_from_stream",
+        action="store_false",
+        help="Disable full-body upper-body forwarding; fall back to the 3-point VR arm path.",
+    )
     parser.add_argument("--publisher-warmup-s", type=float, default=0.2)
     parser.add_argument("--log-interval-s", type=float, default=2.0)
     parser.add_argument(
@@ -1302,7 +1440,16 @@ def _validate_args(
 ) -> None:
     if args.source in {"pkl", "bvh_g1", "bvh_stream"}:
         if args.control_mode != "pose":
-            parser.error(f"--source {args.source} requires --control-mode pose")
+            planner_follow_ok = (
+                args.source == "bvh_stream"
+                and args.control_mode == "planner"
+                and args.planner_follow_stream_root
+            )
+            if not planner_follow_ok:
+                parser.error(
+                    f"--source {args.source} requires --control-mode pose "
+                    "(or planner with --planner-follow-stream-root for bvh_stream)"
+                )
         if not user_set_target_fps:
             if args.source == "pkl":
                 args.target_fps = args.pkl_fps
