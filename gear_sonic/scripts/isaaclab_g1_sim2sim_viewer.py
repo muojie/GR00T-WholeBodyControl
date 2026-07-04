@@ -18,6 +18,9 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
+import socket
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +33,58 @@ from isaaclab.app import AppLauncher
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_USD = REPO_ROOT / "gear_sonic/data/robots/g1/g1_43dof.usd"
 DEFAULT_TRAJECTORY_DIR = REPO_ROOT / "gear_sonic_deploy/reference/example/macarena_001__A545"
+
+
+def _load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
+
+
+def _arg_value(argv: list[str], name: str) -> str | None:
+    prefix = f"{name}="
+    for index, arg in enumerate(argv):
+        if arg.startswith(prefix):
+            return arg[len(prefix) :]
+        if arg == name and index + 1 < len(argv):
+            return argv[index + 1]
+    return None
+
+
+def _load_default_network_config() -> None:
+    candidates = []
+    cli_config = _arg_value(sys.argv[1:], "--network-config")
+    if cli_config:
+        candidates.append(Path(cli_config).expanduser())
+    for env_name in ("ISAACLAB_G1_NETWORK_CONFIG", "G1_NETWORK_CONFIG"):
+        if os.environ.get(env_name):
+            candidates.append(Path(os.environ[env_name]).expanduser())
+    candidates.append(REPO_ROOT / "config/g1_udp_network.env")
+    for path in candidates:
+        _load_env_file(path)
+
+
+def _env_int(name: str, default: int) -> int:
+    return int(os.environ.get(name, str(default)))
+
+
+def _env_float(name: str, default: float) -> float:
+    return float(os.environ.get(name, str(default)))
+
+
+_load_default_network_config()
 
 # MuJoCo / Unitree / SONIC 29-DoF motor order used by this repository.
 MUJOCO_29DOF_JOINT_NAMES = [
@@ -103,10 +158,16 @@ DEFAULT_MUJOCO_29DOF_Q = np.array(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--network-config",
+        type=Path,
+        default=Path(os.environ.get("ISAACLAB_G1_NETWORK_CONFIG", REPO_ROOT / "config/g1_udp_network.env")),
+        help="UDP network config file. It is loaded before argument parsing.",
+    )
+    parser.add_argument(
         "--source",
-        choices=("csv", "zmq", "sine", "idle"),
-        default="csv",
-        help="State source. csv replays reference/example by default; zmq subscribes real-time targets.",
+        choices=("csv", "zmq", "udp", "sine", "idle"),
+        default=os.environ.get("ISAACLAB_G1_VIEWER_SOURCE", "csv"),
+        help="State source. csv replays reference/example by default; zmq/udp subscribe real-time targets.",
     )
     parser.add_argument("--robot-usd", type=Path, default=DEFAULT_USD, help="G1 USD file to load.")
     parser.add_argument(
@@ -125,10 +186,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--print-interval", type=int, default=120, help="Print status every N steps. 0 disables logs.")
     parser.add_argument("--no-camera-follow", action="store_true", help="Keep the camera fixed.")
     parser.add_argument("--camera-update-interval", type=int, default=20, help="Update follow camera every N steps.")
-    parser.add_argument("--zmq-host", default="127.0.0.1", help="ZMQ publisher host.")
-    parser.add_argument("--zmq-port", type=int, default=5557, help="ZMQ publisher port.")
-    parser.add_argument("--zmq-topic", default="g1_debug", help="ZMQ topic prefix.")
-    parser.add_argument("--zmq-timeout", type=float, default=0.5, help="Seconds before warning about stale ZMQ data.")
+    parser.add_argument("--zmq-host", default=os.environ.get("ISAACLAB_G1_ZMQ_HOST", "127.0.0.1"), help="ZMQ publisher host.")
+    parser.add_argument("--zmq-port", type=int, default=_env_int("ISAACLAB_G1_ZMQ_PORT", 5557), help="ZMQ publisher port.")
+    parser.add_argument("--zmq-topic", default=os.environ.get("ISAACLAB_G1_ZMQ_TOPIC", "g1_debug"), help="ZMQ topic prefix.")
+    parser.add_argument("--zmq-timeout", type=float, default=_env_float("ISAACLAB_G1_TIMEOUT", 0.5), help="Seconds before warning about stale ZMQ data.")
+    parser.add_argument("--udp-bind-host", default=os.environ.get("ISAACLAB_G1_UDP_BIND_HOST", "0.0.0.0"), help="UDP local address to bind for state packets.")
+    parser.add_argument("--udp-port", type=int, default=_env_int("ISAACLAB_G1_UDP_PORT", 5557), help="UDP local port for state packets.")
+    parser.add_argument("--udp-topic", default=os.environ.get("ISAACLAB_G1_UDP_TOPIC", "g1_debug"), help="UDP topic prefix.")
+    parser.add_argument("--udp-timeout", type=float, default=_env_float("ISAACLAB_G1_TIMEOUT", 0.5), help="Seconds before warning about stale UDP data.")
+    parser.add_argument(
+        "--udp-rcvbuf",
+        type=int,
+        default=_env_int("ISAACLAB_G1_UDP_RCVBUF", 262144),
+        help="UDP receive socket SO_RCVBUF in bytes. The kernel may round or double this value.",
+    )
     AppLauncher.add_app_launcher_args(parser)
     return parser.parse_args()
 
@@ -323,6 +394,60 @@ class ZmqStateSource:
         return self.last_sample
 
 
+class UdpStateSource(ZmqStateSource):
+    def __init__(
+        self,
+        bind_host: str,
+        port: int,
+        topic: str,
+        timeout: float,
+        rcvbuf: int,
+        follow_root: bool,
+        root_z_offset: float,
+    ):
+        import msgpack
+
+        self.msgpack = msgpack
+        self.topic = topic.encode("utf-8")
+        self.timeout = timeout
+        self.follow_root = follow_root
+        self.root_z_offset = root_z_offset
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, int(rcvbuf))
+        self.socket.bind((bind_host, port))
+        self.socket.setblocking(False)
+        actual_rcvbuf = self.socket.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+        self.last_sample = StateSample(DEFAULT_MUJOCO_29DOF_Q.copy(), np.zeros(29, dtype=np.float32), fresh=False)
+        self.last_rx_time = 0.0
+        print(
+            f"[INFO] UDP listening: udp://{bind_host}:{port}/{topic} "
+            f"SO_RCVBUF={actual_rcvbuf}"
+        )
+
+    def close(self) -> None:
+        self.socket.close()
+
+    def _decode_packet(self, packet: bytes) -> dict[str, Any] | None:
+        if not packet:
+            return None
+        if not packet.startswith(self.topic):
+            return None
+        payload = packet[len(self.topic) :]
+        return self.msgpack.unpackb(payload, raw=False)
+
+    def _poll_latest(self) -> dict[str, Any] | None:
+        latest = None
+        while True:
+            try:
+                packet, _ = self.socket.recvfrom(65535)
+            except BlockingIOError:
+                return latest
+            decoded = self._decode_packet(packet)
+            if decoded is not None:
+                latest = decoded
+
+
 class SineSource:
     def __init__(self, follow_root: bool):
         self.follow_root = follow_root
@@ -366,6 +491,16 @@ def build_source() -> Any:
             port=args_cli.zmq_port,
             topic=args_cli.zmq_topic,
             timeout=args_cli.zmq_timeout,
+            follow_root=follow_root,
+            root_z_offset=args_cli.root_z_offset,
+        )
+    if args_cli.source == "udp":
+        return UdpStateSource(
+            bind_host=args_cli.udp_bind_host,
+            port=args_cli.udp_port,
+            topic=args_cli.udp_topic,
+            timeout=args_cli.udp_timeout,
+            rcvbuf=args_cli.udp_rcvbuf,
             follow_root=follow_root,
             root_z_offset=args_cli.root_z_offset,
         )

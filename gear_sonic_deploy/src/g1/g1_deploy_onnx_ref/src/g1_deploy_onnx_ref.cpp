@@ -40,7 +40,7 @@
  *   --encoder-model       | Encoder ONNX model (for token_state)
  *   --planner-model       | Locomotion planner ONNX model
  *   --input-type          | keyboard / gamepad / zmq / ros2 / interface_manager / gamepad_manager / zmq_manager
- *   --output-type         | zmq / ros2 / all
+ *   --output-type         | zmq / udp / ros2 / all
  *   --disable-crc-check   | Skip CRC validation (for MuJoCo sim)
  *   --planner-fp16        | Use FP16 for planner TensorRT engine
  *   --policy-fp16         | Use FP16 for policy TensorRT engine
@@ -2157,6 +2157,10 @@ class G1Deploy {
       bool zmq_verbose = false,
       int zmq_out_port = 5557,
       std::string zmq_out_topic = "g1_debug",
+      std::string udp_out_host = "127.0.0.1",
+      int udp_out_port = 5557,
+      std::string udp_out_topic = "g1_debug",
+      std::string udp_out_bind_host = "",
       bool enable_motion_recording = false,
       std::array<double, 3> initial_compliance = {0.05, 0.05, 0.0},
       double initial_max_close_ratio = 1.0)
@@ -2565,14 +2569,26 @@ class G1Deploy {
       // Initialize output interfaces based on type (now that state_logger_ is ready)
       // Supports multiple simultaneous outputs with --output-type all
       bool create_zmq = (output_type == "zmq" || output_type == "all");
+      bool create_udp = (output_type == "udp" || output_type == "all");
       bool create_ros2 = false;
 #if HAS_ROS2
       create_ros2 = (output_type == "ros2" || output_type == "all");
 #endif
 
-      if (create_zmq) {
-        auto zmq_handler = std::make_unique<ZMQOutputHandler>(*state_logger_, zmq_out_port, zmq_out_topic);
-        std::cout << "Initialized ZMQ output interface" << std::endl;
+      if (create_zmq || create_udp) {
+        auto zmq_handler = std::make_unique<ZMQOutputHandler>(
+          *state_logger_,
+          zmq_out_port,
+          zmq_out_topic,
+          create_zmq,
+          create_udp ? udp_out_host : "",
+          udp_out_port,
+          udp_out_topic,
+          create_udp ? udp_out_bind_host : ""
+        );
+        std::cout << "Initialized realtime network output interface"
+                  << " (ZMQ=" << (create_zmq ? "on" : "off")
+                  << ", UDP=" << (create_udp ? "on" : "off") << ")" << std::endl;
         // Publish robot config so subscribers can receive it before control loop starts
         zmq_handler->publish_config();
         output_interfaces_.push_back(std::move(zmq_handler));
@@ -4126,7 +4142,7 @@ int main(int argc, char const* argv[]) {
     std::cout << "|ros2";
 #endif
     std::cout << ">: input interface type (default: keyboard)" << std::endl;
-    std::cout << "  --output-type <zmq|all";
+    std::cout << "  --output-type <zmq|udp|all";
 #if HAS_ROS2
     std::cout << "|ros2";
 #endif
@@ -4146,6 +4162,10 @@ int main(int argc, char const* argv[]) {
     std::cout << "  --zmq-verbose: enable ZMQ subscriber verbose logs" << std::endl;
     std::cout << "  --zmq-out-port <port>: ZMQ port for output (default: 5557)" << std::endl;
     std::cout << "  --zmq-out-topic <topic>: ZMQ topic/prefix for output (default: g1_debug)" << std::endl;
+    std::cout << "  --udp-out-host <host>: UDP destination host for output (default: 127.0.0.1)" << std::endl;
+    std::cout << "  --udp-out-bind-host <host>: UDP local source address to bind (default: auto)" << std::endl;
+    std::cout << "  --udp-out-port <port>: UDP destination port for output (default: 5557)" << std::endl;
+    std::cout << "  --udp-out-topic <topic>: UDP topic/prefix for output (default: g1_debug)" << std::endl;
     std::cout << "  --logs-dir <path>: optional logs output base directory (default: logs/<timestamp>/)" << std::endl;
     std::cout << "  --enable-csv-logs: enable writing CSV logs (default: OFF)" << std::endl;
     std::cout << "  --enable-motion-recording: enable motion recording for ZMQ/planner (default: OFF)" << std::endl;
@@ -4196,6 +4216,10 @@ int main(int argc, char const* argv[]) {
   bool enableMotionRecording = false;  // default off; enable with --enable-motion-recording
   int zmq_out_port = 5557;
   std::string zmq_out_topic = "g1_debug";
+  std::string udp_out_host = "127.0.0.1";
+  int udp_out_port = 5557;
+  std::string udp_out_topic = "g1_debug";
+  std::string udp_out_bind_host;
   std::array<double, 3> initial_compliance = {0.5, 0.5, 0.0}; // initial compliance is 0.5 for both hands (keyboard controllable)
   double initial_max_close_ratio = 1.0; // default allows full closure, use --max-close-ratio to limit
   for (int i = 4; i < argc; i++) {
@@ -4276,12 +4300,12 @@ int main(int argc, char const* argv[]) {
     } else if (std::string(argv[i]) == "--output-type") {
       if (i + 1 < argc) {
         outputType = argv[i + 1];
-        bool valid_output = (outputType == "zmq" || outputType == "all");
+        bool valid_output = (outputType == "zmq" || outputType == "udp" || outputType == "all");
 #if HAS_ROS2
         valid_output = valid_output || (outputType == "ros2");
 #endif
         if (!valid_output) {
-          std::cerr << "Error: --output-type must be 'zmq', 'all'";
+          std::cerr << "Error: --output-type must be 'zmq', 'udp', 'all'";
 #if HAS_ROS2
           std::cerr << ", or 'ros2'";
 #endif
@@ -4291,7 +4315,7 @@ int main(int argc, char const* argv[]) {
         std::cout << "[INFO] Using output type: " << outputType << std::endl;
         i++; // Skip the next argument since it's the output type
       } else {
-        std::cerr << "Error: --output-type requires a type argument (zmq, all";
+        std::cerr << "Error: --output-type requires a type argument (zmq, udp, all";
 #if HAS_ROS2
         std::cerr << ", or ros2";
 #endif
@@ -4302,6 +4326,14 @@ int main(int argc, char const* argv[]) {
       if (i + 1 < argc) { zmq_out_port = std::stoi(argv[i + 1]); i++; }
     } else if (std::string(argv[i]) == "--zmq-out-topic") {
       if (i + 1 < argc) { zmq_out_topic = argv[i + 1]; i++; }
+    } else if (std::string(argv[i]) == "--udp-out-host") {
+      if (i + 1 < argc) { udp_out_host = argv[i + 1]; i++; }
+    } else if (std::string(argv[i]) == "--udp-out-bind-host") {
+      if (i + 1 < argc) { udp_out_bind_host = argv[i + 1]; i++; }
+    } else if (std::string(argv[i]) == "--udp-out-port") {
+      if (i + 1 < argc) { udp_out_port = std::stoi(argv[i + 1]); i++; }
+    } else if (std::string(argv[i]) == "--udp-out-topic") {
+      if (i + 1 < argc) { udp_out_topic = argv[i + 1]; i++; }
     } else if (std::string(argv[i]) == "--record-input-file") {
       if (i + 1 < argc) {
         recordInputFile = argv[i + 1];
@@ -4457,6 +4489,10 @@ int main(int argc, char const* argv[]) {
     zmq_verbose,
     zmq_out_port,
     zmq_out_topic,
+    udp_out_host,
+    udp_out_port,
+    udp_out_topic,
+    udp_out_bind_host,
     enableMotionRecording,
     initial_compliance,
     initial_max_close_ratio

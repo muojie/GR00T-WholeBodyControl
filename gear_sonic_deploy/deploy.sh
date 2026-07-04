@@ -29,6 +29,46 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$SCRIPT_DIR"
 
+NETWORK_CONFIG_FILE="${G1_NETWORK_CONFIG:-$ROOT_DIR/config/g1_udp_network.env}"
+for arg in "$@"; do
+    case "$arg" in
+        --network-config=*)
+            NETWORK_CONFIG_FILE="${arg#*=}"
+            ;;
+    esac
+done
+for ((idx = 1; idx <= $#; idx++)); do
+    if [[ "${!idx}" == "--network-config" ]]; then
+        next_idx=$((idx + 1))
+        if [[ $next_idx -le $# ]]; then
+            NETWORK_CONFIG_FILE="${!next_idx}"
+        fi
+        break
+    fi
+done
+
+if [[ -f "$NETWORK_CONFIG_FILE" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        [[ "$line" == export\ * ]] && line="${line#export }"
+        [[ "$line" != *=* ]] && continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        key="${key%"${key##*[![:space:]]}"}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        value="${value%\"}"
+        value="${value#\"}"
+        value="${value%\'}"
+        value="${value#\'}"
+        [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && export "$key=$value"
+    done < "$NETWORK_CONFIG_FILE"
+    echo -e "${CYAN}Loaded network config: $NETWORK_CONFIG_FILE${NC}"
+fi
+
 # ============================================================================
 # Interface Resolution Functions
 # ============================================================================
@@ -264,6 +304,7 @@ show_usage() {
     echo ""
     echo "Options:"
     echo "  -h, --help              Show this help message"
+    echo "  --network-config PATH   Load UDP network config file (default: $NETWORK_CONFIG_FILE)"
     echo "  --cp, --checkpoint PATH Set the checkpoint path (default: $CHECKPOINT_DEFAULT)"
     echo "  --obs-config PATH       Set the observation config file (default: $OBS_CONFIG_DEFAULT)"
     echo "  --planner PATH          Set the planner model path (default: $PLANNER_DEFAULT)"
@@ -273,6 +314,10 @@ show_usage() {
     echo "  --zmq-host HOST         Set the ZMQ host (default: $ZMQ_HOST_DEFAULT)"
     echo "  --zmq-port PORT         Set the ZMQ input port (default: $ZMQ_PORT_DEFAULT)"
     echo "  --zmq-topic TOPIC       Set the ZMQ input topic (default: $ZMQ_TOPIC_DEFAULT)"
+    echo "  --udp-out-host HOST     Set the UDP output destination host (default: $UDP_OUT_HOST_DEFAULT)"
+    echo "  --udp-out-bind-host IP  Set the UDP output local source IP (default: $UDP_OUT_BIND_HOST_DEFAULT)"
+    echo "  --udp-out-port PORT     Set the UDP output destination port (default: $UDP_OUT_PORT_DEFAULT)"
+    echo "  --udp-out-topic TOPIC   Set the UDP output topic prefix (default: $UDP_OUT_TOPIC_DEFAULT)"
     echo ""
     echo "Interface modes:"
     echo "  sim              Use loopback interface for simulation (MuJoCo)"
@@ -310,10 +355,14 @@ else
 fi
 MOTION_DATA_DEFAULT="reference/example/"
 INPUT_TYPE_DEFAULT="manager"
-OUTPUT_TYPE_DEFAULT="all"
+OUTPUT_TYPE_DEFAULT="${G1_OUTPUT_TYPE:-all}"
 ZMQ_HOST_DEFAULT="localhost"
 ZMQ_PORT_DEFAULT="5556"
 ZMQ_TOPIC_DEFAULT="pose"
+UDP_OUT_HOST_DEFAULT="${G1_UDP_OUT_HOST:-127.0.0.1}"
+UDP_OUT_BIND_HOST_DEFAULT="${G1_UDP_OUT_BIND_HOST:-192.168.10.230}"
+UDP_OUT_PORT_DEFAULT="${G1_UDP_OUT_PORT:-5557}"
+UDP_OUT_TOPIC_DEFAULT="${G1_UDP_OUT_TOPIC:-g1_debug}"
 
 # Initialize with defaults (will be set after parsing)
 CHECKPOINT="$CHECKPOINT_DEFAULT"
@@ -325,6 +374,10 @@ OUTPUT_TYPE="$OUTPUT_TYPE_DEFAULT"
 ZMQ_HOST="$ZMQ_HOST_DEFAULT"
 ZMQ_PORT="$ZMQ_PORT_DEFAULT"
 ZMQ_TOPIC="$ZMQ_TOPIC_DEFAULT"
+UDP_OUT_HOST="$UDP_OUT_HOST_DEFAULT"
+UDP_OUT_BIND_HOST="$UDP_OUT_BIND_HOST_DEFAULT"
+UDP_OUT_PORT="$UDP_OUT_PORT_DEFAULT"
+UDP_OUT_TOPIC="$UDP_OUT_TOPIC_DEFAULT"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -332,6 +385,16 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             show_usage
             exit 0
+            ;;
+        --network-config)
+            if [[ -z "$2" ]]; then
+                echo -e "${RED}Error: --network-config requires a path argument${NC}" >&2
+                exit 1
+            fi
+            shift 2
+            ;;
+        --network-config=*)
+            shift
             ;;
         --cp|--checkpoint)
             if [[ -z "$2" ]]; then
@@ -403,6 +466,38 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             ZMQ_TOPIC="$2"
+            shift 2
+            ;;
+        --udp-out-host)
+            if [[ -z "$2" ]]; then
+                echo -e "${RED}Error: --udp-out-host requires a host argument${NC}" >&2
+                exit 1
+            fi
+            UDP_OUT_HOST="$2"
+            shift 2
+            ;;
+        --udp-out-bind-host)
+            if [[ -z "$2" ]]; then
+                echo -e "${RED}Error: --udp-out-bind-host requires an IP argument${NC}" >&2
+                exit 1
+            fi
+            UDP_OUT_BIND_HOST="$2"
+            shift 2
+            ;;
+        --udp-out-port)
+            if [[ -z "$2" ]]; then
+                echo -e "${RED}Error: --udp-out-port requires a port argument${NC}" >&2
+                exit 1
+            fi
+            UDP_OUT_PORT="$2"
+            shift 2
+            ;;
+        --udp-out-topic)
+            if [[ -z "$2" ]]; then
+                echo -e "${RED}Error: --udp-out-topic requires a topic argument${NC}" >&2
+                exit 1
+            fi
+            UDP_OUT_TOPIC="$2"
             shift 2
             ;;
         sim|real)
@@ -609,6 +704,7 @@ echo -e "  Output Type:        ${GREEN}$OUTPUT_TYPE${NC}"
 echo -e "  ZMQ Host:           ${GREEN}$ZMQ_HOST${NC}"
 echo -e "  ZMQ Port:           ${GREEN}$ZMQ_PORT${NC}"
 echo -e "  ZMQ Topic:          ${GREEN}$ZMQ_TOPIC${NC}"
+echo -e "  UDP Output:         ${GREEN}${UDP_OUT_BIND_HOST:-auto} -> $UDP_OUT_HOST:$UDP_OUT_PORT/$UDP_OUT_TOPIC${NC}"
 if [[ -n "$EXTRA_ARGS" ]]; then
 echo -e "  Extra Args:         ${GREEN}$EXTRA_ARGS${NC}"
 fi
@@ -625,7 +721,11 @@ echo -e "${BLUE}    --input-type $INPUT_TYPE \\${NC}"
 echo -e "${BLUE}    --output-type $OUTPUT_TYPE \\${NC}"
 echo -e "${BLUE}    --zmq-host $ZMQ_HOST \\${NC}"
 echo -e "${BLUE}    --zmq-port $ZMQ_PORT \\${NC}"
-echo -e "${BLUE}    --zmq-topic $ZMQ_TOPIC${NC}"
+echo -e "${BLUE}    --zmq-topic $ZMQ_TOPIC \\${NC}"
+echo -e "${BLUE}    --udp-out-host $UDP_OUT_HOST \\${NC}"
+echo -e "${BLUE}    --udp-out-bind-host $UDP_OUT_BIND_HOST \\${NC}"
+echo -e "${BLUE}    --udp-out-port $UDP_OUT_PORT \\${NC}"
+echo -e "${BLUE}    --udp-out-topic $UDP_OUT_TOPIC${NC}"
 if [[ -n "$EXTRA_ARGS" ]]; then
 echo -e "${BLUE}    $EXTRA_ARGS${NC}"
 fi
@@ -658,6 +758,10 @@ if [[ "$confirm" =~ ^[Yy]$ ]] || [[ -z "$confirm" ]]; then
             --zmq-host "$ZMQ_HOST" \
             --zmq-port "$ZMQ_PORT" \
             --zmq-topic "$ZMQ_TOPIC" \
+            --udp-out-host "$UDP_OUT_HOST" \
+            --udp-out-bind-host "$UDP_OUT_BIND_HOST" \
+            --udp-out-port "$UDP_OUT_PORT" \
+            --udp-out-topic "$UDP_OUT_TOPIC" \
             $EXTRA_ARGS
     else
         just run g1_deploy_onnx_ref "$TARGET" "$CHECKPOINT_DECODER" "$MOTION_DATA" \
@@ -668,7 +772,11 @@ if [[ "$confirm" =~ ^[Yy]$ ]] || [[ -z "$confirm" ]]; then
             --output-type "$OUTPUT_TYPE" \
             --zmq-host "$ZMQ_HOST" \
             --zmq-port "$ZMQ_PORT" \
-            --zmq-topic "$ZMQ_TOPIC"
+            --zmq-topic "$ZMQ_TOPIC" \
+            --udp-out-host "$UDP_OUT_HOST" \
+            --udp-out-bind-host "$UDP_OUT_BIND_HOST" \
+            --udp-out-port "$UDP_OUT_PORT" \
+            --udp-out-topic "$UDP_OUT_TOPIC"
     fi
 else
     echo ""

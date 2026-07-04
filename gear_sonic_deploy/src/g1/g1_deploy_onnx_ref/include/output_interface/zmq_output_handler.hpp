@@ -107,6 +107,12 @@
 #include <vector>
 #include <variant>
 #include <stdexcept>
+#include <cerrno>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <zmq.hpp>
 #include <msgpack.hpp>
 
@@ -117,40 +123,66 @@
 
 /**
  * @class ZMQOutputHandler
- * @brief OutputInterface that publishes state data over a ZMQ PUB socket.
+ * @brief OutputInterface that publishes state data over ZMQ and/or UDP.
  */
 class ZMQOutputHandler : public OutputInterface {
 public:
     static constexpr bool DEBUG_LOGGING = true;
 
     /**
-     * @brief Construct the handler: create a ZMQ PUB socket and bind to the given port.
+     * @brief Construct the handler: create a ZMQ PUB socket and/or UDP destination.
      * @param logger  Reference to the shared StateLogger.
      * @param port    TCP port to bind the PUB socket to (e.g. 5557).
      * @param topic   Topic prefix prepended to each published message.
      */
-    explicit ZMQOutputHandler(StateLogger& logger, int port, const std::string& topic) 
-        : OutputInterface(logger), realtime_debug_context_(1), topic_(topic),
-          robot_config_topic_("robot_config") {
+    explicit ZMQOutputHandler(
+        StateLogger& logger,
+        int port,
+        const std::string& topic,
+        bool enable_zmq = true,
+        const std::string& udp_host = "",
+        int udp_port = -1,
+        const std::string& udp_topic = "",
+        const std::string& udp_bind_host = ""
+    ) : OutputInterface(logger),
+        realtime_debug_context_(1),
+        enable_zmq_(enable_zmq),
+        enable_udp_(!udp_host.empty()),
+        topic_(topic),
+        robot_config_topic_("robot_config"),
+        udp_topic_(udp_topic.empty() ? topic : udp_topic) {
 
-        std::cout << "Initializing realtime debug socket" << std::endl;
-        std::cout << "Binding to port: " << port << " and topic: " << topic_ << std::endl;
-        realtime_debug_socket_ = std::make_unique<zmq::socket_t>(realtime_debug_context_, ZMQ_PUB);
+        if (enable_zmq_) {
+            std::cout << "Initializing realtime debug ZMQ socket" << std::endl;
+            std::cout << "Binding to port: " << port << " and topic: " << topic_ << std::endl;
+            realtime_debug_socket_ = std::make_unique<zmq::socket_t>(realtime_debug_context_, ZMQ_PUB);
 
-        realtime_debug_socket_->set(zmq::sockopt::sndhwm, 10);     // Drop old messages quickly
-        realtime_debug_socket_->set(zmq::sockopt::sndbuf, 32768);   // 32 KB send buffer
-        realtime_debug_socket_->set(zmq::sockopt::linger, 0);       // No lingering on close
-        realtime_debug_socket_->bind("tcp://*:" + std::to_string(port));
+            realtime_debug_socket_->set(zmq::sockopt::sndhwm, 10);     // Drop old messages quickly
+            realtime_debug_socket_->set(zmq::sockopt::sndbuf, 32768);   // 32 KB send buffer
+            realtime_debug_socket_->set(zmq::sockopt::linger, 0);       // No lingering on close
+            realtime_debug_socket_->bind("tcp://*:" + std::to_string(port));
 
-        std::cout << "[INFO] Realtime debug socket bound to port: " << port << std::endl;
+            std::cout << "[INFO] Realtime debug ZMQ socket bound to port: " << port << std::endl;
+        }
+
+        if (enable_udp_) {
+            init_udp_sender(udp_host, udp_port > 0 ? udp_port : port, udp_bind_host);
+        }
 
         if constexpr (DEBUG_LOGGING) {
-            std::cout << "[ZMQ Output DEBUG] ZMQOutputHandler initialized with topics: "
-                      << "'" << topic_ << "' (combined state+viz), "
+            std::cout << "[ZMQ Output DEBUG] Output handler initialized with topics: "
+                      << "'" << topic_ << "' (ZMQ combined state+viz), "
+                      << "'" << udp_topic_ << "' (UDP combined state+viz), "
                       << "'" << robot_config_topic_ << "' (config)" << std::endl;
         }
         
         type_ = OutputType::ZMQ;
+    }
+
+    ~ZMQOutputHandler() override {
+        if (udp_socket_fd_ >= 0) {
+            ::close(udp_socket_fd_);
+        }
     }
 
     /**
@@ -232,9 +264,17 @@ public:
 private:
     zmq::context_t realtime_debug_context_;                ///< ZMQ context (1 I/O thread).
     std::unique_ptr<zmq::socket_t> realtime_debug_socket_; ///< ZMQ PUB socket.
+    bool enable_zmq_ = true;
+    bool enable_udp_ = false;
+    int udp_socket_fd_ = -1;
+    sockaddr_storage udp_addr_ {};
+    socklen_t udp_addr_len_ = 0;
+    std::vector<char> udp_packet_buffer_;
+    bool udp_send_error_printed_ = false;
 
     std::string topic_;              ///< User-provided topic name (e.g. "g1_debug") for combined state+viz.
     std::string robot_config_topic_; ///< Topic for robot config messages.
+    std::string udp_topic_;          ///< UDP topic prefix for combined state+viz.
 
     msgpack::sbuffer state_data_sbuf_;  ///< Reused each tick; cleared in pack_combined_state().
 
@@ -243,12 +283,98 @@ private:
     msgpack::sbuffer config_sbuf_cache_;  ///< Serialised config (populated on first publish_config()).
     std::chrono::steady_clock::time_point config_last_publish_time_;
 
-    /// Non-blocking send of [topic][msgpack payload] over the PUB socket.
+    void init_udp_sender(const std::string& host, int port, const std::string& bind_host) {
+        udp_socket_fd_ = ::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        if (udp_socket_fd_ < 0) {
+            throw std::runtime_error("[UDP Output ERROR] socket() failed: " + std::string(std::strerror(errno)));
+        }
+
+        int send_buffer_bytes = 32768;
+        ::setsockopt(udp_socket_fd_, SOL_SOCKET, SO_SNDBUF, &send_buffer_bytes, sizeof(send_buffer_bytes));
+
+        if (!bind_host.empty()) {
+            sockaddr_in bind_addr {};
+            bind_addr.sin_family = AF_INET;
+            bind_addr.sin_port = htons(0);
+            int parse_rc = ::inet_pton(AF_INET, bind_host.c_str(), &bind_addr.sin_addr);
+            if (parse_rc != 1) {
+                throw std::runtime_error("[UDP Output ERROR] invalid --udp-out-bind-host: " + bind_host);
+            }
+            if (::bind(udp_socket_fd_, reinterpret_cast<sockaddr*>(&bind_addr), sizeof(bind_addr)) != 0) {
+                throw std::runtime_error(
+                    "[UDP Output ERROR] bind(" + bind_host + ") failed: " + std::string(std::strerror(errno))
+                );
+            }
+        }
+
+        addrinfo hints {};
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_DGRAM;
+
+        addrinfo* result = nullptr;
+        const std::string port_str = std::to_string(port);
+        int rc = ::getaddrinfo(host.c_str(), port_str.c_str(), &hints, &result);
+        if (rc != 0 || result == nullptr) {
+            if (result) {
+                ::freeaddrinfo(result);
+            }
+            throw std::runtime_error("[UDP Output ERROR] getaddrinfo(" + host + ":" + port_str + ") failed");
+        }
+
+        std::memcpy(&udp_addr_, result->ai_addr, result->ai_addrlen);
+        udp_addr_len_ = static_cast<socklen_t>(result->ai_addrlen);
+        ::freeaddrinfo(result);
+
+        std::cout << "[INFO] Realtime debug UDP output enabled: "
+                  << (bind_host.empty() ? std::string("auto") : bind_host)
+                  << " -> " << host << ":" << port << "/" << udp_topic_ << std::endl;
+    }
+
+    /// Non-blocking send of [topic][msgpack payload] over the configured transports.
     void send_zmq_message(const std::string& topic, const msgpack::sbuffer& sbuf) {
-        zmq::message_t msg(topic.size() + sbuf.size());
-        memcpy(msg.data(), topic.c_str(), topic.size());
-        memcpy(static_cast<char*>(msg.data()) + topic.size(), sbuf.data(), sbuf.size());
-        realtime_debug_socket_->send(msg, zmq::send_flags::dontwait);
+        if (enable_zmq_ && realtime_debug_socket_) {
+            zmq::message_t msg(topic.size() + sbuf.size());
+            memcpy(msg.data(), topic.c_str(), topic.size());
+            memcpy(static_cast<char*>(msg.data()) + topic.size(), sbuf.data(), sbuf.size());
+            realtime_debug_socket_->send(msg, zmq::send_flags::dontwait);
+        }
+
+        if (enable_udp_ && topic == topic_) {
+            const std::string& udp_topic = (topic == topic_) ? udp_topic_ : topic;
+            send_udp_message(udp_topic, sbuf);
+        }
+    }
+
+    void send_udp_message(const std::string& topic, const msgpack::sbuffer& sbuf) {
+        constexpr size_t MAX_UDP_PAYLOAD_BYTES = 65507;
+        const size_t packet_size = topic.size() + sbuf.size();
+        if (packet_size > MAX_UDP_PAYLOAD_BYTES) {
+            if (!udp_send_error_printed_) {
+                std::cerr << "[UDP Output ERROR] Packet too large for UDP datagram: "
+                          << packet_size << " bytes" << std::endl;
+                udp_send_error_printed_ = true;
+            }
+            return;
+        }
+
+        udp_packet_buffer_.resize(packet_size);
+        std::memcpy(udp_packet_buffer_.data(), topic.data(), topic.size());
+        std::memcpy(udp_packet_buffer_.data() + topic.size(), sbuf.data(), sbuf.size());
+
+        ssize_t sent = ::sendto(
+            udp_socket_fd_,
+            udp_packet_buffer_.data(),
+            udp_packet_buffer_.size(),
+            MSG_DONTWAIT,
+            reinterpret_cast<const sockaddr*>(&udp_addr_),
+            udp_addr_len_
+        );
+        if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != ENOBUFS) {
+            if (!udp_send_error_printed_) {
+                std::cerr << "[UDP Output ERROR] sendto() failed: " << std::strerror(errno) << std::endl;
+                udp_send_error_printed_ = true;
+            }
+        }
     }
 
     /**

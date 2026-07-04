@@ -6,8 +6,10 @@ so the WBC policy sees the sim as a real robot.
 """
 
 import os
+import socket
 import sys
 import threading
+from pathlib import Path
 from typing import Dict, Tuple
 
 import numpy as np
@@ -20,6 +22,36 @@ from unitree_sdk2py.idl.default import (
 )
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import WirelessController_
 from unitree_sdk2py.idl.unitree_hg.msg.dds_ import HandCmd_, HandState_, OdoState_
+
+
+def _load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
+
+
+def _load_default_network_config() -> None:
+    candidates = []
+    if os.environ.get("G1_NETWORK_CONFIG"):
+        candidates.append(Path(os.environ["G1_NETWORK_CONFIG"]).expanduser())
+    candidates.append(Path(__file__).resolve().parents[3] / "config/g1_udp_network.env")
+    for path in candidates:
+        _load_env_file(path)
+
+
+_load_default_network_config()
 
 
 class UnitreeSdk2Bridge:
@@ -107,6 +139,13 @@ class UnitreeSdk2Bridge:
         self.root_zmq_port = int(config.get("ROOT_STATE_ZMQ_PORT", os.environ.get("G1_ROOT_ZMQ_PORT", 5558)))
         if bool(config.get("ROOT_STATE_ZMQ_ENABLE", True)):
             self._init_root_state_zmq()
+        self.root_udp_socket = None
+        self.root_udp_topic = str(config.get("ROOT_STATE_UDP_TOPIC", os.environ.get("G1_ROOT_UDP_TOPIC", "g1_root"))).encode("utf-8")
+        self.root_udp_host = str(config.get("ROOT_STATE_UDP_HOST", os.environ.get("G1_ROOT_UDP_HOST", "127.0.0.1")))
+        self.root_udp_bind_host = str(config.get("ROOT_STATE_UDP_BIND_HOST", os.environ.get("G1_ROOT_UDP_BIND_HOST", "192.168.10.230")))
+        self.root_udp_port = int(config.get("ROOT_STATE_UDP_PORT", os.environ.get("G1_ROOT_UDP_PORT", 5558)))
+        if bool(config.get("ROOT_STATE_UDP_ENABLE", True)):
+            self._init_root_state_udp()
 
         self.wireless_controller = unitree_go_msg_dds__WirelessController_()
         self.wireless_controller_puber = ChannelPublisher(
@@ -194,54 +233,97 @@ class UnitreeSdk2Bridge:
             self.root_zmq_context = None
             print(f"[UnitreeSdk2Bridge] Root-state ZMQ disabled: {exc}")
 
-    def _publish_root_state_zmq(self, obs: Dict[str, any]):
+    def _init_root_state_udp(self):
+        try:
+            self.root_udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.root_udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 32768)
+            if self.root_udp_bind_host:
+                self.root_udp_socket.bind((self.root_udp_bind_host, 0))
+            self.root_udp_socket.setblocking(False)
+            self.root_udp_socket.connect((self.root_udp_host, self.root_udp_port))
+            print(
+                f"[UnitreeSdk2Bridge] Publishing MuJoCo root state on "
+                f"udp://{self.root_udp_bind_host or 'auto'} -> "
+                f"{self.root_udp_host}:{self.root_udp_port}/{self.root_udp_topic.decode('utf-8')}"
+            )
+        except Exception as exc:
+            self.root_udp_socket = None
+            print(f"[UnitreeSdk2Bridge] Root-state UDP disabled: {exc}")
+
+    def _pack_root_state_payload(self, obs: Dict[str, any]) -> bytes:
+        import msgpack
+
+        pose = np.asarray(obs["floating_base_pose"], dtype=np.float64)
+        vel = np.asarray(obs["floating_base_vel"], dtype=np.float64)
+        payload = {
+            "time": float(obs["time"]),
+            "root_pos_w": pose[:3].tolist(),
+            "root_quat_w": pose[3:7].tolist(),
+            "root_lin_vel_w": vel[:3].tolist(),
+            "root_ang_vel_w": vel[3:6].tolist(),
+            "joint_order": "mujoco",
+            "state_source": "mujoco_bridge",
+        }
+        if "body_q" in obs:
+            body_q = np.asarray(obs["body_q"], dtype=np.float64)
+            payload["body_q"] = body_q.tolist()
+            payload["body_q_measured"] = body_q.tolist()
+        if "body_dq" in obs:
+            body_dq = np.asarray(obs["body_dq"], dtype=np.float64)
+            payload["body_dq"] = body_dq.tolist()
+            payload["body_dq_measured"] = body_dq.tolist()
+        if "left_hand_q" in obs:
+            left_hand_q = np.asarray(obs["left_hand_q"], dtype=np.float64)
+            payload["left_hand_q"] = left_hand_q.tolist()
+            payload["left_hand_q_measured"] = left_hand_q.tolist()
+        if "left_hand_dq" in obs:
+            left_hand_dq = np.asarray(obs["left_hand_dq"], dtype=np.float64)
+            payload["left_hand_dq"] = left_hand_dq.tolist()
+            payload["left_hand_dq_measured"] = left_hand_dq.tolist()
+        if "right_hand_q" in obs:
+            right_hand_q = np.asarray(obs["right_hand_q"], dtype=np.float64)
+            payload["right_hand_q"] = right_hand_q.tolist()
+            payload["right_hand_q_measured"] = right_hand_q.tolist()
+        if "right_hand_dq" in obs:
+            right_hand_dq = np.asarray(obs["right_hand_dq"], dtype=np.float64)
+            payload["right_hand_dq"] = right_hand_dq.tolist()
+            payload["right_hand_dq_measured"] = right_hand_dq.tolist()
+        return msgpack.packb(payload, use_bin_type=True)
+
+    def _publish_root_state_zmq_packed(self, packed: bytes):
         if self.root_zmq_socket is None:
             return
         try:
-            import msgpack
-
-            pose = np.asarray(obs["floating_base_pose"], dtype=np.float64)
-            vel = np.asarray(obs["floating_base_vel"], dtype=np.float64)
-            payload = {
-                "time": float(obs["time"]),
-                "root_pos_w": pose[:3].tolist(),
-                "root_quat_w": pose[3:7].tolist(),
-                "root_lin_vel_w": vel[:3].tolist(),
-                "root_ang_vel_w": vel[3:6].tolist(),
-                "joint_order": "mujoco",
-                "state_source": "mujoco_bridge",
-            }
-            if "body_q" in obs:
-                body_q = np.asarray(obs["body_q"], dtype=np.float64)
-                payload["body_q"] = body_q.tolist()
-                payload["body_q_measured"] = body_q.tolist()
-            if "body_dq" in obs:
-                body_dq = np.asarray(obs["body_dq"], dtype=np.float64)
-                payload["body_dq"] = body_dq.tolist()
-                payload["body_dq_measured"] = body_dq.tolist()
-            if "left_hand_q" in obs:
-                left_hand_q = np.asarray(obs["left_hand_q"], dtype=np.float64)
-                payload["left_hand_q"] = left_hand_q.tolist()
-                payload["left_hand_q_measured"] = left_hand_q.tolist()
-            if "left_hand_dq" in obs:
-                left_hand_dq = np.asarray(obs["left_hand_dq"], dtype=np.float64)
-                payload["left_hand_dq"] = left_hand_dq.tolist()
-                payload["left_hand_dq_measured"] = left_hand_dq.tolist()
-            if "right_hand_q" in obs:
-                right_hand_q = np.asarray(obs["right_hand_q"], dtype=np.float64)
-                payload["right_hand_q"] = right_hand_q.tolist()
-                payload["right_hand_q_measured"] = right_hand_q.tolist()
-            if "right_hand_dq" in obs:
-                right_hand_dq = np.asarray(obs["right_hand_dq"], dtype=np.float64)
-                payload["right_hand_dq"] = right_hand_dq.tolist()
-                payload["right_hand_dq_measured"] = right_hand_dq.tolist()
-            packed = msgpack.packb(payload, use_bin_type=True)
             self.root_zmq_socket.send_multipart([self.root_zmq_topic, packed], flags=self.root_zmq.NOBLOCK)
         except self.root_zmq.Again:
             pass
         except Exception as exc:
             print(f"[UnitreeSdk2Bridge] Root-state ZMQ publish failed once: {exc}")
             self.root_zmq_socket = None
+
+    def _publish_root_state_udp_packed(self, packed: bytes):
+        if self.root_udp_socket is None:
+            return
+        try:
+            self.root_udp_socket.send(self.root_udp_topic + packed)
+        except (BlockingIOError, InterruptedError):
+            pass
+        except Exception as exc:
+            print(f"[UnitreeSdk2Bridge] Root-state UDP publish failed once: {exc}")
+            self.root_udp_socket = None
+
+    def _publish_root_state(self, obs: Dict[str, any]):
+        if self.root_zmq_socket is None and self.root_udp_socket is None:
+            return
+        try:
+            packed = self._pack_root_state_payload(obs)
+        except Exception as exc:
+            print(f"[UnitreeSdk2Bridge] Root-state payload pack failed once: {exc}")
+            self.root_zmq_socket = None
+            self.root_udp_socket = None
+            return
+        self._publish_root_state_zmq_packed(packed)
+        self._publish_root_state_udp_packed(packed)
 
     def PublishLowState(self, obs: Dict[str, any]):
         # publish body state
@@ -280,7 +362,7 @@ class UnitreeSdk2Bridge:
 
         self.odo_state.tick = int(obs["time"] * 1e3)
         self.odo_state_puber.Write(self.odo_state)
-        self._publish_root_state_zmq(obs)
+        self._publish_root_state(obs)
 
         self.torso_imu_puber.Write(self.torso_imu_state)
 
