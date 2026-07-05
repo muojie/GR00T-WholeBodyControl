@@ -15,6 +15,8 @@ COORDINATE_FRAME=${COORDINATE_FRAME:-left_handed_yup}
 BONEDATA_POSITION_SCALE=${BONEDATA_POSITION_SCALE:-1.0}
 BONEDATA_INPUT_QUAT_ORDER=${BONEDATA_INPUT_QUAT_ORDER:-xyzw}
 BONEDATA_ROTATION_MODE=${BONEDATA_ROTATION_MODE:-input}
+BVH_UNIT_SCALE=${BVH_UNIT_SCALE:-0.01}
+BVH_KEEP_YUP=${BVH_KEEP_YUP:-0}
 POSE_PROTOCOL_VERSION=${POSE_PROTOCOL_VERSION:-1}
 
 ISAACLAB_ROOT=${ISAACLAB_ROOT:-/home/nolo/xiaoyang_IssacLab/IsaacLab}
@@ -28,6 +30,7 @@ LAUNCHER_PY=${LAUNCHER_PY:-${SENDER_REPO}/.venv_teleop/bin/python}
 LAUNCHER=${LAUNCHER:-${SENDER_REPO}/scripts/launch_sonic_local_isaaclab_closed_loop.py}
 SENDER_PY=${SENDER_PY:-${SENDER_REPO}/.venv_teleop/bin/python}
 SENDER_SCRIPT=${SENDER_SCRIPT:-${SENDER_REPO}/gear_sonic/scripts/sony_bonedata_json_stream_sender.py}
+BVH_SENDER_SCRIPT=${BVH_SENDER_SCRIPT:-${SENDER_REPO}/gear_sonic/scripts/bvh_stream_sender.py}
 
 MODE=${MODE:-all}
 REPLACE=${REPLACE:-1}
@@ -72,12 +75,19 @@ Environment overrides:
   BONEDATA_POSITION_SCALE=${BONEDATA_POSITION_SCALE}
   BONEDATA_INPUT_QUAT_ORDER=${BONEDATA_INPUT_QUAT_ORDER}
   BONEDATA_ROTATION_MODE=${BONEDATA_ROTATION_MODE}
+  BVH_UNIT_SCALE=${BVH_UNIT_SCALE}           # BVH sender: cm->m scale (default 0.01)
+  BVH_KEEP_YUP=${BVH_KEEP_YUP}               # BVH sender: 1=no y-up->z-up conversion
   POSE_PROTOCOL_VERSION=${POSE_PROTOCOL_VERSION}
 
 Examples:
   $0 /home/nolo/saveBoneData_Yup20260702.json
   $0 --no-isaaclab --windows-ip 192.168.1.20 /home/nolo/saveBoneData_Yup20260702.json
   $0 --no-json-sender
+  $0 --sender-only /home/nolo/saveBoneData_Yup20260702.json
+  $0 --print-sender-command /home/nolo/saveBoneData_Yup20260702.json
+  POSE_PROTOCOL_VERSION=3 $0 /home/nolo/saveBoneData_Yup20260702.json
+  POSE_PROTOCOL_VERSION=3 $0 /path/to/mocopi_recording.bvh
+  BVH_KEEP_YUP=1 POSE_PROTOCOL_VERSION=3 $0 /path/to/recording.bvh
   $0 --no-isaaclab --no-json-sender --isaac-state-host 192.168.1.20
   $0 --sender-only /home/nolo/saveBoneData_Yup20260702.json
   POSE_PROTOCOL_VERSION=3 $0 /home/nolo/saveBoneData_Yup20260702.json
@@ -212,6 +222,17 @@ case "${NO_ISAACLAB}" in
     ;;
 esac
 
+# A .bvh input file switches the sender to bvh_stream_sender.py (mocopi-skeleton
+# BVH replay); everything downstream stays the same.
+INPUT_KIND=json
+if [[ "${JSON_FILE,,}" == *.bvh ]]; then
+  INPUT_KIND=bvh
+fi
+SONY_PICO_BVH_FRAME=sonic_zup
+if [[ "${BVH_KEEP_YUP}" == "1" ]]; then
+  SONY_PICO_BVH_FRAME=bvh_yup
+fi
+
 RUNTIME_DIR=${RUNTIME_DIR:-/tmp/sonic_json_isaaclab_${SESSION}}
 mkdir -p "${RUNTIME_DIR}"
 
@@ -219,23 +240,43 @@ quote_arg() {
   printf "%q" "$1"
 }
 
+build_sender_args() {
+  if [[ "${INPUT_KIND}" == "bvh" ]]; then
+    ACTIVE_SENDER_SCRIPT="${BVH_SENDER_SCRIPT}"
+    SENDER_ARGS="--bvh-file $(quote_arg "${JSON_FILE}") \\
+  --host 127.0.0.1 \\
+  --port $(quote_arg "${BVH_STREAM_PORT}") \\
+  --fps $(quote_arg "${FPS}") \\
+  --unit-scale $(quote_arg "${BVH_UNIT_SCALE}") \\
+  --loop"
+    if [[ "${BVH_KEEP_YUP}" == "1" ]]; then
+      SENDER_ARGS="${SENDER_ARGS} \\
+  --no-y-up-to-z-up"
+    fi
+  else
+    ACTIVE_SENDER_SCRIPT="${SENDER_SCRIPT}"
+    SENDER_ARGS="--json-file $(quote_arg "${JSON_FILE}") \\
+  --host 127.0.0.1 \\
+  --port $(quote_arg "${BVH_STREAM_PORT}") \\
+  --fps $(quote_arg "${FPS}") \\
+  --loop"
+  fi
+}
+build_sender_args
+
 print_sender_command() {
   cat <<EOF
 cd $(quote_arg "${SENDER_REPO}")
 export PYTHONUNBUFFERED=1
 export PYTHONPATH=$(quote_arg "${SENDER_REPO}"):\${PYTHONPATH:-}
-$(quote_arg "${SENDER_PY}") -u $(quote_arg "${SENDER_SCRIPT}") \\
-  --json-file $(quote_arg "${JSON_FILE}") \\
-  --host 127.0.0.1 \\
-  --port $(quote_arg "${BVH_STREAM_PORT}") \\
-  --fps $(quote_arg "${FPS}") \\
-  --loop \\
+$(quote_arg "${SENDER_PY}") -u $(quote_arg "${ACTIVE_SENDER_SCRIPT}") \\
+  ${SENDER_ARGS} \\
   |& tee "/tmp/sonic_local_sony_json_sender_\$(date +%Y%m%d_%H%M%S).log"
 EOF
 }
 
 if [[ "${MODE}" != "receiver" && ! -f "${JSON_FILE}" ]]; then
-  echo "ERROR: JSON file not found: ${JSON_FILE}" >&2
+  echo "ERROR: input file not found: ${JSON_FILE}" >&2
   exit 2
 fi
 if [[ "${MODE}" != "sender" && "${MODE}" != "print_sender" && ! -x "${LAUNCHER_PY}" ]]; then
@@ -250,8 +291,8 @@ if [[ "${MODE}" != "receiver" && ! -x "${SENDER_PY}" ]]; then
   echo "ERROR: sender python not executable: ${SENDER_PY}" >&2
   exit 2
 fi
-if [[ "${MODE}" != "receiver" && ! -f "${SENDER_SCRIPT}" ]]; then
-  echo "ERROR: sender script not found: ${SENDER_SCRIPT}" >&2
+if [[ "${MODE}" != "receiver" && ! -f "${ACTIVE_SENDER_SCRIPT}" ]]; then
+  echo "ERROR: sender script not found: ${ACTIVE_SENDER_SCRIPT}" >&2
   exit 2
 fi
 if [[ "${MODE}" == "print_sender" ]]; then
@@ -266,12 +307,8 @@ set -o pipefail
 cd "${SENDER_REPO}"
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="${SENDER_REPO}:\${PYTHONPATH:-}"
-"${SENDER_PY}" -u "${SENDER_SCRIPT}" \
-  --json-file "${JSON_FILE}" \
-  --host 127.0.0.1 \
-  --port "${BVH_STREAM_PORT}" \
-  --fps "${FPS}" \
-  --loop \
+"${SENDER_PY}" -u "${ACTIVE_SENDER_SCRIPT}" \\
+  ${SENDER_ARGS} \\
   |& tee "/tmp/sonic_local_sony_json_sender_\$(date +%Y%m%d_%H%M%S).log"
 status=\$?
 echo
@@ -338,8 +375,13 @@ fi
 
 echo "[sonic-json] session=${SESSION}"
 echo "[sonic-json] mode=${MODE}"
+echo "[sonic-json] input_kind=${INPUT_KIND}"
 if [[ "${MODE}" != "receiver" ]]; then
-  echo "[sonic-json] json=${JSON_FILE}"
+  echo "[sonic-json] input_file=${JSON_FILE}"
+  if [[ "${INPUT_KIND}" == "bvh" ]]; then
+    echo "[sonic-json] bvh_unit_scale=${BVH_UNIT_SCALE}"
+    echo "[sonic-json] bvh_keep_yup=${BVH_KEEP_YUP}"
+  fi
 else
   echo "[sonic-json] json_sender=disabled"
 fi
