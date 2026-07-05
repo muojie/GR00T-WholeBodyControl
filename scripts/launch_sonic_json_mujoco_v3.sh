@@ -23,6 +23,9 @@ Usage:
 
 Options:
   --no-json-sender         不启动 JSON sender（假设外部已在发送）。
+                           注意：v3 MuJoCo launcher 会创建 sender window 但 host 设为空。
+                           如需完全移除，启动后运行：
+                           tmux kill-window -t ${SESSION}:json_sender
   --receiver-only          同 --no-json-sender（兼容旧参数）。
   --sender-only            只启动 JSON sender（不启动 MuJoCo/manager/deploy）。
   --print-sender-command   只打印 sender 命令并退出。
@@ -186,8 +189,9 @@ cmd=(
   --json-file "${JSON_FILE}"
 )
 
+# v3 MuJoCo launcher 没有 --no-json-sender，用 --bvh-stream-sender-host "" 来禁用 sender
 if [[ $NO_JSON_SENDER -eq 1 ]]; then
-  cmd+=(--no-json-sender)
+  cmd+=(--bvh-stream-sender-host "")
 fi
 
 if [[ $REPLACE -eq 1 ]]; then
