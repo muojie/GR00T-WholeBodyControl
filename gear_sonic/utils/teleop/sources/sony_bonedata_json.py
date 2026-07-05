@@ -21,6 +21,73 @@ SONY_BONEDATA_INPUT_QUAT_ORDERS = ("xyzw", "wxyz")
 SONY_BONEDATA_ROTATION_MODES = ("input", "identity")
 
 
+def _load_boneinfos_format(
+    json_file: Path,
+    data: dict[str, Any],
+    joints_per_frame: int,
+    source_fps: float,
+    playback_fps: float,
+) -> SonyBoneDataJsonMotion:
+    """Load saveBoneAllData format with boneInfos array."""
+    bone_infos = data.get("boneInfos")
+    if not isinstance(bone_infos, list):
+        raise ValueError(f"{json_file} boneInfos must be a list")
+    if len(bone_infos) == 0:
+        raise ValueError(f"{json_file} boneInfos is empty")
+
+    # Extract joint names from the first frame
+    first_frame = bone_infos[0]
+    if not isinstance(first_frame, dict):
+        raise ValueError(f"{json_file} boneInfos[0] must be a dict")
+    for key in ("name", "position", "rotation"):
+        if key not in first_frame:
+            raise ValueError(f"{json_file} boneInfos[0] missing required field {key!r}")
+
+    joint_names = [str(name) for name in first_frame["name"]]
+    if len(joint_names) != joints_per_frame:
+        raise ValueError(
+            f"{json_file} boneInfos[0] has {len(joint_names)} joints, "
+            f"expected {joints_per_frame} (use --joints-per-frame to override)"
+        )
+
+    # Extract positions and rotations from all frames
+    frame_positions: list[list[Any]] = []
+    frame_rotations: list[list[Any]] = []
+    for idx, frame_info in enumerate(bone_infos):
+        if not isinstance(frame_info, dict):
+            raise ValueError(f"{json_file} boneInfos[{idx}] must be a dict")
+
+        # Verify joint names match
+        frame_names = frame_info.get("name", [])
+        if [str(n) for n in frame_names] != joint_names:
+            raise ValueError(
+                f"{json_file} boneInfos[{idx}] joint names don't match frame 0; "
+                "raw BoneData streaming expects stable joint order"
+            )
+
+        positions = frame_info.get("position")
+        rotations = frame_info.get("rotation")
+        if not isinstance(positions, list) or not isinstance(rotations, list):
+            raise ValueError(f"{json_file} boneInfos[{idx}] position and rotation must be lists")
+        if len(positions) != joints_per_frame or len(rotations) != joints_per_frame:
+            raise ValueError(
+                f"{json_file} boneInfos[{idx}] has {len(positions)} positions and {len(rotations)} rotations, "
+                f"expected {joints_per_frame}"
+            )
+
+        frame_positions.append(list(positions))
+        frame_rotations.append(list(rotations))
+
+    return SonyBoneDataJsonMotion(
+        path=str(json_file),
+        joint_names=joint_names,
+        frame_positions=frame_positions,
+        frame_rotations=frame_rotations,
+        source_fps=float(source_fps),
+        playback_fps=float(playback_fps),
+    )
+
+
 @dataclass(frozen=True)
 class SonyBoneDataJsonMotion:
     path: str
@@ -65,12 +132,25 @@ def load_sony_bonedata_json_raw(
     source_fps: float,
     playback_fps: float,
 ) -> SonyBoneDataJsonMotion:
-    """Load saveBoneData JSON and split it into raw per-frame payload slices."""
+    """Load saveBoneData JSON and split it into raw per-frame payload slices.
+
+    Supports two formats:
+    1. Flat format (original saveBoneData):
+       {"name": [...], "position": [...], "rotation": [...]}
+    2. BoneInfos array format (saveBoneAllData):
+       {"boneInfos": [{"name": [...], "position": [...], "rotation": [...]}, ...]}
+    """
     with json_file.open("r", encoding="utf-8-sig") as file:
         data = json.load(file)
 
     if not isinstance(data, dict):
         raise ValueError(f"{json_file} must contain a JSON object")
+
+    # Check if it's the new boneInfos array format
+    if "boneInfos" in data:
+        return _load_boneinfos_format(json_file, data, joints_per_frame, source_fps, playback_fps)
+
+    # Original flat format
     for key in ("name", "position", "rotation"):
         if key not in data:
             raise ValueError(f"{json_file} missing required field {key!r}")
