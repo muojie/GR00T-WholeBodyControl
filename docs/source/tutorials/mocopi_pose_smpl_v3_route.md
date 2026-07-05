@@ -175,7 +175,7 @@ motion_joint_positions_wrists_10frame_step1
 已知限制：
 
 - mocopi 只有 6 传感器，腕部位置是测量真值，但上臂/前臂**旋转**是 mocopi 内部 IK 估计，个别时段单侧手臂幅度明显不足（同一录制里两次侧平举各有一侧没展开）；全程臂抬升增益约 0.92。纯旋转路线继承此衰减，后续可用腕位置做二次 IK 修正。
-- 第一版只支持 Unity Y-up 原生录制（真机 mocopi / `saveBoneData_Yup*` 格式）；旧的 z-up 录制不支持。
+- 输入要求是 **rotation 为 Unity Y-up 左手系原生四元数**；position 只有 root 被携带且不参与 SMPL 语义。这与已固定的 `sony_bonedata_json_v1` 现行协议（外部 sender app，参考格式即 `saveBoneData_Yup20260702.json` 形态）一致，该素材验证 GO。旧版 sender app 导出的 `Downloads/saveBoneData_Yup.json`（position 已转 z-up、rotation 仍 y-up 原生的混合存储）rotation 链不受影响，实测 5 次原地转身角全部复现（净 yaw 回零），可用作纯 yaw/T-pose 锚点测试素材，仅其臂部旋转 IK 衰减比现行版素材更明显。
 - `--bvh-stream-bonedata-coordinate-frame` 等 sonic_zup 转换参数对这条线无效，只消费 `--bvh-stream-bonedata-position-scale` 和 `--bvh-stream-bonedata-input-quat-order`。
 
 ## 研究命令模板
