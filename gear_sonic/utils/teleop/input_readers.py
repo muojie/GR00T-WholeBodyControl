@@ -2,16 +2,64 @@
 
 PicoReader         -- pulls data from XRoboToolkit SDK (Pico headset).
 IsaacTeleopReader  -- in-process IsaacTeleop / CloudXR DeviceIO session.
+SonyBoneDataUdpReader -- receives Sony mocopi saveBoneData JSON frames over UDP.
 """
 
+import json
 import logging
+import socket
 import threading
 import time
 from typing import Any
 
 import numpy as np
+from scipy.spatial.transform import Rotation
+
+try:
+    import msgpack
+except ImportError:
+    msgpack = None
+
+try:
+    import msgpack_numpy
+except ImportError:
+    msgpack_numpy = None
 
 logger = logging.getLogger(__name__)
+
+SONY_BONEDATA_JSON_FORMAT = "sony_bonedata_json_v1"
+SONY_BONEDATA_DEFAULT_PORT = 12352
+SONY_BONEDATA_JOINT_COUNT = 27
+
+# SMPL/PICO 24-body slot -> accepted Sony mocopi bone names.
+_SMPL_SLOT_BONE_NAMES: tuple[tuple[str, ...], ...] = (
+    ("root",),
+    ("l_up_leg", "left_upper_leg"),
+    ("r_up_leg", "right_upper_leg"),
+    ("torso_3",),
+    ("l_low_leg", "left_lower_leg"),
+    ("r_low_leg", "right_lower_leg"),
+    ("torso_5",),
+    ("l_foot", "left_foot"),
+    ("r_foot", "right_foot"),
+    ("torso_7",),
+    ("l_toes", "left_toes"),
+    ("r_toes", "right_toes"),
+    ("neck_1",),
+    ("l_shoulder", "left_shoulder"),
+    ("r_shoulder", "right_shoulder"),
+    ("head",),
+    ("l_up_arm", "left_upper_arm"),
+    ("r_up_arm", "right_upper_arm"),
+    ("l_low_arm", "left_lower_arm"),
+    ("r_low_arm", "right_lower_arm"),
+    ("l_hand", "left_wrist"),
+    ("r_hand", "right_wrist"),
+    ("l_hand", "left_wrist"),
+    ("r_hand", "right_wrist"),
+)
+
+_UNITY_YUP_ZFLIP_BASIS = np.diag([1.0, 1.0, -1.0])
 
 try:
     import xrobotoolkit_sdk as xrt
@@ -185,6 +233,203 @@ def _quat_xyzw(orientation: Any) -> tuple[float, float, float, float] | None:
         )
     except Exception:
         return None
+
+
+def decode_msgpack_byte_multi_array(
+    byte_chunks: list[bytes] | tuple[bytes, ...],
+    *,
+    msgpack_module: Any | None = None,
+    msgpack_numpy_module: Any | None = None,
+) -> Any:
+    """Decode a msgpack payload split into byte chunks."""
+    packer = msgpack_module or msgpack
+    numpy_codec = msgpack_numpy_module or msgpack_numpy
+    if packer is None:
+        raise ImportError("msgpack is required to decode msgpack byte chunks")
+    payload = b"".join(bytes(chunk) for chunk in byte_chunks)
+    object_hook = numpy_codec.decode if numpy_codec is not None else None
+    return packer.unpackb(payload, object_hook=object_hook, raw=False)
+
+
+def build_body_pose_sample(
+    payload: dict[str, Any],
+    *,
+    prev_stamp_ns: int | None = None,
+    fps_ema: float = 0.0,
+) -> tuple[dict[str, Any] | None, int | None, float]:
+    """Build the common PicoReader sample dict from joint position/quaternion payloads."""
+    body_poses = _body_data_to_24x7(payload)
+    if body_poses is None:
+        return None, prev_stamp_ns, fps_ema
+
+    stamp_ns = int(
+        payload.get(
+            "timestamp_ns",
+            payload.get("source_time_ns", payload.get("timestamp", time.monotonic_ns())),
+        )
+    )
+    dt = ((stamp_ns - prev_stamp_ns) * 1e-9) if prev_stamp_ns is not None else 0.0
+    next_fps = float(fps_ema)
+    if dt > 0.0:
+        inst = 1.0 / dt
+        next_fps = inst if next_fps == 0.0 else 0.9 * next_fps + 0.1 * inst
+
+    sample = {
+        "body_poses_np": body_poses,
+        "timestamp_realtime": time.time(),
+        "timestamp_monotonic": time.monotonic(),
+        "timestamp_ns": stamp_ns,
+        "dt": dt,
+        "fps": next_fps,
+    }
+    return sample, stamp_ns, next_fps
+
+
+def resolve_sony_bonedata_smpl_indices(joint_names: list[str]) -> np.ndarray:
+    """Resolve a raw Sony BoneData name list into the 24 Pico/SMPL body slots."""
+    name_to_index = {str(name).strip().lower(): i for i, name in enumerate(joint_names)}
+    indices = np.empty(len(_SMPL_SLOT_BONE_NAMES), dtype=np.int64)
+    missing: list[str] = []
+    for slot, candidates in enumerate(_SMPL_SLOT_BONE_NAMES):
+        for candidate in candidates:
+            if candidate in name_to_index:
+                indices[slot] = name_to_index[candidate]
+                break
+        else:
+            missing.append(candidates[0])
+    if missing:
+        raise ValueError(
+            f"BoneData payload is missing bones required for Pico/SMPL slots: {missing}; "
+            f"got {joint_names}"
+        )
+    return indices
+
+
+def _bonedata_vectors_to_arrays(
+    joint_names: list[str],
+    positions: list[Any],
+    rotations: list[Any],
+    *,
+    position_scale: float = 1.0,
+    input_quat_order: str = "xyzw",
+) -> tuple[np.ndarray, np.ndarray]:
+    if len(positions) != len(joint_names) or len(rotations) != len(joint_names):
+        raise ValueError(
+            "BoneData name/position/rotation lengths must match; "
+            f"name={len(joint_names)} position={len(positions)} rotation={len(rotations)}"
+        )
+
+    pos = np.empty((len(joint_names), 3), dtype=np.float64)
+    quat = np.empty((len(joint_names), 4), dtype=np.float64)
+    for i, (p, q) in enumerate(zip(positions, rotations)):
+        vec = _vec3(p)
+        if vec is None:
+            raise ValueError(f"invalid BoneData position at index {i}: {p!r}")
+        pos[i] = vec
+
+        if isinstance(q, dict):
+            quat[i] = (float(q["x"]), float(q["y"]), float(q["z"]), float(q["w"]))
+        elif input_quat_order == "wxyz":
+            quat[i] = (float(q[1]), float(q[2]), float(q[3]), float(q[0]))
+        else:
+            quat[i] = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
+
+    pos *= float(position_scale)
+    norms = np.linalg.norm(quat, axis=1, keepdims=True)
+    bad = (norms[:, 0] < 1e-8) | ~np.isfinite(norms[:, 0])
+    quat[bad] = (0.0, 0.0, 0.0, 1.0)
+    norms[bad] = 1.0
+    quat /= norms
+    return pos, quat
+
+
+def sony_bonedata_payload_to_body_poses(
+    payload: dict[str, Any],
+    *,
+    position_scale: float = 1.0,
+    input_quat_order: str = "xyzw",
+    coordinate_frame: str = "unity-yup-zflip",
+    slot_indices: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Convert one raw Sony saveBoneData frame to PicoReader-compatible ``(24, 7)`` data."""
+    fmt = payload.get("format")
+    if fmt is not None and fmt != SONY_BONEDATA_JSON_FORMAT:
+        raise ValueError(f"unsupported BoneData payload format {fmt!r}")
+
+    names = payload.get("name", payload.get("joint_names"))
+    positions = payload.get("position")
+    rotations = payload.get("rotation")
+    if not isinstance(names, list) or not names:
+        raise ValueError("BoneData payload requires non-empty list field 'name'")
+    if not isinstance(positions, list) or not isinstance(rotations, list):
+        raise ValueError("BoneData payload requires list fields 'position' and 'rotation'")
+
+    joint_names = [str(name) for name in names]
+    indices = slot_indices if slot_indices is not None else resolve_sony_bonedata_smpl_indices(joint_names)
+    pos, quat_xyzw = _bonedata_vectors_to_arrays(
+        joint_names,
+        positions,
+        rotations,
+        position_scale=position_scale,
+        input_quat_order=input_quat_order,
+    )
+
+    pos = pos[indices]
+    quat_xyzw = quat_xyzw[indices]
+    frame_name = coordinate_frame.strip().lower().replace("_", "-")
+    if frame_name in {"unity-yup-zflip", "xrt-yup-zflip"}:
+        basis = _UNITY_YUP_ZFLIP_BASIS
+        pos = pos @ basis.T
+        mats = Rotation.from_quat(quat_xyzw).as_matrix()
+        quat_xyzw = Rotation.from_matrix(basis @ mats @ basis.T).as_quat()
+    elif frame_name in {"identity", "raw", "unity-yup"}:
+        pass
+    else:
+        raise ValueError(
+            f"unsupported Sony BoneData coordinate frame {coordinate_frame!r}; "
+            "expected 'unity-yup-zflip' or 'identity'"
+        )
+    return np.concatenate([pos, quat_xyzw], axis=1).astype(np.float32), indices
+
+
+def _zero_controller_data() -> dict[str, Any]:
+    return {
+        "left_trigger_value": 0.0,
+        "right_trigger_value": 0.0,
+        "left_squeeze_value": 0.0,
+        "right_squeeze_value": 0.0,
+        "left_thumbstick": [0.0, 0.0],
+        "right_thumbstick": [0.0, 0.0],
+        "left_thumbstick_click": 0.0,
+        "right_thumbstick_click": 0.0,
+        "left_primary_click": 0.0,
+        "left_secondary_click": 0.0,
+        "right_primary_click": 0.0,
+        "right_secondary_click": 0.0,
+    }
+
+
+def _timestamp_ns_from_payload(
+    payload: dict[str, Any],
+    *,
+    prev_stamp_ns: int | None,
+    fallback_fps: float,
+) -> int:
+    for key in ("timestamp_ns", "source_time_ns"):
+        value = payload.get(key)
+        if value is not None:
+            return int(value)
+
+    value = payload.get("timestamp")
+    if value is not None:
+        numeric = float(value)
+        if numeric > 10_000_000_000:
+            return int(numeric)
+        return int(numeric * 1_000_000_000)
+
+    if prev_stamp_ns is not None and fallback_fps > 0.0:
+        return prev_stamp_ns + int(1_000_000_000 / fallback_fps)
+    return time.monotonic_ns()
 
 
 # Number of joints in the IsaacTeleop FullBodyPosePicoT (XR_BD_body_tracking).
@@ -491,3 +736,192 @@ class IsaacTeleopReader:
             time.sleep(self._period)
 
 
+class SonyBoneDataUdpReader:
+    """UDP reader for Sony mocopi saveBoneData frames sent by sony_bonedata_json_sender."""
+
+    STALE_TIMEOUT = 5.0
+
+    def __init__(
+        self,
+        *,
+        bind_host: str = "0.0.0.0",
+        port: int = SONY_BONEDATA_DEFAULT_PORT,
+        packet_format: str = "auto",
+        coordinate_frame: str = "unity-yup-zflip",
+        position_scale: float = 1.0,
+        input_quat_order: str = "xyzw",
+        max_queue_size: int = 15,
+    ):
+        del max_queue_size
+        self.bind_host = bind_host
+        self.port = int(port)
+        self.packet_format = packet_format
+        self.coordinate_frame = coordinate_frame
+        self.position_scale = float(position_scale)
+        self.input_quat_order = input_quat_order
+
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._lock = threading.Lock()
+        self._latest: dict[str, Any] | None = None
+        self._latest_controller = _zero_controller_data()
+        self._last_stamp_ns: int | None = None
+        self._fps_ema = 0.0
+        self._slot_indices: np.ndarray | None = None
+        self._last_new_data_time = time.monotonic()
+        self._disconnected = threading.Event()
+        self._sock: socket.socket | None = None
+        self._diagnostics: dict[str, Any] = {
+            "frames_received": 0,
+            "frames_dropped": 0,
+            "last_error": "",
+        }
+
+    def start(self) -> None:
+        if self._sock is None:
+            self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._sock.bind((self.bind_host, self.port))
+            self._sock.settimeout(0.1)
+        if not self._thread.is_alive():
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        sock = self._sock
+        self._sock = None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        if self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+
+    def get_latest(self) -> dict[str, Any] | None:
+        with self._lock:
+            return self._latest
+
+    def get_controller_data(self) -> dict[str, Any]:
+        return dict(self._latest_controller)
+
+    def get_diagnostics(self) -> dict[str, Any]:
+        return dict(self._diagnostics)
+
+    @property
+    def disconnected(self) -> bool:
+        return self._disconnected.is_set()
+
+    def clear_disconnect(self) -> None:
+        self._disconnected.clear()
+        self._last_new_data_time = time.monotonic()
+        self._last_stamp_ns = None
+        self._fps_ema = 0.0
+
+    def get_timestamp_ns(self) -> int:
+        with self._lock:
+            sample = self._latest
+        return int(sample["timestamp_ns"]) if sample else 0
+
+    def _decode_packet(self, data: bytes) -> dict[str, Any]:
+        packet_format = self.packet_format.lower()
+        if packet_format not in {"auto", "json", "msgpack"}:
+            raise ValueError(f"unsupported BoneData packet format {self.packet_format!r}")
+
+        if packet_format in {"auto", "json"}:
+            stripped = data.lstrip()
+            if packet_format == "json" or stripped.startswith((b"{", b"[")):
+                return json.loads(data.decode("utf-8"))
+
+        if msgpack is None:
+            raise ImportError("msgpack is required for Sony BoneData msgpack UDP packets")
+        object_hook = msgpack_numpy.decode if msgpack_numpy is not None else None
+        return msgpack.unpackb(data, raw=False, object_hook=object_hook)
+
+    def _run(self) -> None:
+        last_report = time.time()
+        while not self._stop.is_set():
+            sock = self._sock
+            if sock is None:
+                time.sleep(0.01)
+                continue
+            try:
+                data, _addr = sock.recvfrom(262_144)
+            except socket.timeout:
+                if (
+                    time.monotonic() - self._last_new_data_time > self.STALE_TIMEOUT
+                    and not self._disconnected.is_set()
+                ):
+                    logger.warning(
+                        "[SonyBoneDataUdpReader] No UDP frames for %.1fs, flagging disconnect",
+                        self.STALE_TIMEOUT,
+                    )
+                    self._disconnected.set()
+                continue
+            except OSError:
+                if not self._stop.is_set():
+                    logger.exception("[SonyBoneDataUdpReader] UDP socket read failed")
+                break
+
+            try:
+                payload = self._decode_packet(data)
+                if not isinstance(payload, dict):
+                    raise ValueError(f"BoneData UDP payload must be a dict, got {type(payload)}")
+
+                body_poses, indices = sony_bonedata_payload_to_body_poses(
+                    payload,
+                    position_scale=self.position_scale,
+                    input_quat_order=self.input_quat_order,
+                    coordinate_frame=self.coordinate_frame,
+                    slot_indices=self._slot_indices,
+                )
+                if self._slot_indices is None:
+                    self._slot_indices = indices
+
+                payload_fps = float(payload.get("fps", payload.get("source_fps", 50.0)) or 50.0)
+                stamp_ns = _timestamp_ns_from_payload(
+                    payload,
+                    prev_stamp_ns=self._last_stamp_ns,
+                    fallback_fps=payload_fps,
+                )
+                if self._last_stamp_ns is not None and stamp_ns <= self._last_stamp_ns:
+                    stamp_ns = self._last_stamp_ns + int(1_000_000_000 / max(1.0, payload_fps))
+
+                prev_stamp_ns = self._last_stamp_ns
+                device_dt = ((stamp_ns - prev_stamp_ns) * 1e-9) if prev_stamp_ns is not None else 0.0
+                if device_dt > 0.0:
+                    inst = 1.0 / device_dt
+                    self._fps_ema = inst if self._fps_ema == 0.0 else (0.9 * self._fps_ema + 0.1 * inst)
+                self._last_stamp_ns = stamp_ns
+                self._last_new_data_time = time.monotonic()
+                self._disconnected.clear()
+
+                sample = {
+                    "body_poses_np": body_poses,
+                    "timestamp_realtime": time.time(),
+                    "timestamp_monotonic": time.monotonic(),
+                    "timestamp_ns": stamp_ns,
+                    "dt": device_dt,
+                    "fps": self._fps_ema,
+                    "frame_index": payload.get("frame_index"),
+                    "source_frame_index": payload.get("source_frame_index"),
+                    "motion_name": payload.get("motion_name", payload.get("name_id", "")),
+                    "source_path": payload.get("path", payload.get("source_path", "")),
+                }
+                with self._lock:
+                    self._latest = sample
+
+                self._diagnostics["frames_received"] += 1
+                now = time.time()
+                if now - last_report >= 5.0:
+                    logger.info(
+                        "[SonyBoneDataUdpReader] frames=%s dt=%.2f ms fps=%.2f",
+                        self._diagnostics["frames_received"],
+                        device_dt * 1000.0,
+                        self._fps_ema,
+                    )
+                    last_report = now
+            except Exception as exc:
+                self._diagnostics["frames_dropped"] += 1
+                self._diagnostics["last_error"] = str(exc)
+                logger.warning("[SonyBoneDataUdpReader] dropping UDP frame: %s", exc)

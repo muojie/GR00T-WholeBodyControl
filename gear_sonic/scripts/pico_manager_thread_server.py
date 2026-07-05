@@ -607,26 +607,30 @@ def init_hand_ik_solvers():
     return None, None
 
 
-# Readers that expose `get_controller_data()` returning the IsaacTeleop
-# controller_data dict schema (left/right trigger/squeeze, thumbstick, clicks).
-# Tuple form keeps the dispatch sites uniform if/when a second reader speaks
-# the same schema.
-_ISAAC_TELEOP_READERS = (input_readers.IsaacTeleopReader,)
+def _reader_controller_data(reader=None):
+    """Return controller dict from non-XRT readers when they provide one."""
+    getter = getattr(reader, "get_controller_data", None)
+    if not callable(getter):
+        return None
+    try:
+        return getter() or {}
+    except Exception:
+        return {}
 
 
 def get_controller_inputs(reader=None):
-    """Fetch controller button/trigger states from XRoboToolkit or IsaacTeleop."""
-    if isinstance(reader, _ISAAC_TELEOP_READERS):
-        ctrl = reader.get_controller_data()
-        if ctrl is None:
-            return False, 0.0, 0.0, 0.0, 0.0
+    """Fetch controller button/trigger states from XRoboToolkit or reader dicts."""
+    ctrl = _reader_controller_data(reader)
+    if ctrl is not None:
         return (
-            False,
+            bool(ctrl.get("left_menu_button", False)),
             float(ctrl.get("left_trigger_value", 0.0)),
             float(ctrl.get("right_trigger_value", 0.0)),
             float(ctrl.get("left_squeeze_value", 0.0)),
             float(ctrl.get("right_squeeze_value", 0.0)),
         )
+    if xrt is None:
+        return False, 0.0, 0.0, 0.0, 0.0
     left_trigger = xrt.get_left_trigger()
     right_trigger = xrt.get_right_trigger()
     left_grip = xrt.get_left_grip()
@@ -637,10 +641,8 @@ def get_controller_inputs(reader=None):
 
 def get_controller_axes(reader=None):
     """Fetch joystick axes (lx, ly, rx, ry). Falls back to zeros if not available."""
-    if isinstance(reader, _ISAAC_TELEOP_READERS):
-        ctrl = reader.get_controller_data()
-        if ctrl is None:
-            return 0.0, 0.0, 0.0, 0.0
+    ctrl = _reader_controller_data(reader)
+    if ctrl is not None:
         left_thumbstick = ctrl.get("left_thumbstick", [0.0, 0.0])
         right_thumbstick = ctrl.get("right_thumbstick", [0.0, 0.0])
         return (
@@ -665,8 +667,12 @@ def get_controller_axes(reader=None):
 
 def get_menu_buttons(reader=None):
     """Fetch both menu buttons (left, right). Falls back to False if not available."""
-    if isinstance(reader, _ISAAC_TELEOP_READERS):
-        return False, False
+    ctrl = _reader_controller_data(reader)
+    if ctrl is not None:
+        return (
+            float(ctrl.get("left_menu_button", 0.0)) > 0.5,
+            float(ctrl.get("right_menu_button", 0.0)) > 0.5,
+        )
     if xrt is None:
         return False, False
 
@@ -684,10 +690,8 @@ def get_menu_buttons(reader=None):
 
 def get_axis_clicks(reader=None):
     """Fetch both axis click buttons (left, right). Falls back to False if not available."""
-    if isinstance(reader, _ISAAC_TELEOP_READERS):
-        ctrl = reader.get_controller_data()
-        if ctrl is None:
-            return False, False
+    ctrl = _reader_controller_data(reader)
+    if ctrl is not None:
         return (
             float(ctrl.get("left_thumbstick_click", 0.0)) > 0.5,
             float(ctrl.get("right_thumbstick_click", 0.0)) > 0.5,
@@ -709,10 +713,8 @@ def get_axis_clicks(reader=None):
 
 def get_face_buttons(reader=None):
     """Fetch primary face buttons A and X. Returns (a_pressed, x_pressed)."""
-    if isinstance(reader, _ISAAC_TELEOP_READERS):
-        ctrl = reader.get_controller_data()
-        if ctrl is None:
-            return False, False
+    ctrl = _reader_controller_data(reader)
+    if ctrl is not None:
         return (
             float(ctrl.get("right_primary_click", 0.0)) > 0.5,
             float(ctrl.get("left_primary_click", 0.0)) > 0.5,
@@ -729,10 +731,8 @@ def get_face_buttons(reader=None):
 
 def get_abxy_buttons(reader=None):
     """Fetch A,B,X,Y face buttons as booleans (a,b,x,y)."""
-    if isinstance(reader, _ISAAC_TELEOP_READERS):
-        ctrl = reader.get_controller_data()
-        if ctrl is None:
-            return False, False, False, False
+    ctrl = _reader_controller_data(reader)
+    if ctrl is not None:
         return (
             float(ctrl.get("right_primary_click", 0.0)) > 0.5,
             float(ctrl.get("right_secondary_click", 0.0)) > 0.5,
@@ -1568,7 +1568,13 @@ class PoseStreamer:
 def _init_input_source(
     input_source: str,
     buffer_size: int,
-) -> "PicoReader | input_readers.IsaacTeleopReader":
+    sony_bonedata_host: str = "0.0.0.0",
+    sony_bonedata_port: int = input_readers.SONY_BONEDATA_DEFAULT_PORT,
+    sony_bonedata_format: str = "auto",
+    sony_bonedata_coordinate_frame: str = "unity-yup-zflip",
+    sony_bonedata_position_scale: float = 1.0,
+    sony_bonedata_input_quat_order: str = "xyzw",
+) -> "PicoReader | input_readers.IsaacTeleopReader | input_readers.SonyBoneDataUdpReader":
     """Create, start, and wait for readiness of the requested teleop input source."""
     if input_source == "isaac-teleop":
         reader = input_readers.IsaacTeleopReader(max_queue_size=buffer_size)
@@ -1576,6 +1582,26 @@ def _init_input_source(
         print("Using Isaac Teleop (in-process CloudXR / DeviceIO), waiting for data...")
         while reader.get_latest() is None:
             print("waiting for Isaac Teleop body data (connect the headset to CloudXR)...")
+            time.sleep(1)
+        return reader
+
+    if input_source == "sony-bonedata":
+        reader = input_readers.SonyBoneDataUdpReader(
+            bind_host=sony_bonedata_host,
+            port=sony_bonedata_port,
+            packet_format=sony_bonedata_format,
+            coordinate_frame=sony_bonedata_coordinate_frame,
+            position_scale=sony_bonedata_position_scale,
+            input_quat_order=sony_bonedata_input_quat_order,
+            max_queue_size=buffer_size,
+        )
+        reader.start()
+        print(
+            "Using Sony BoneData UDP input "
+            f"({sony_bonedata_host}:{sony_bonedata_port}), waiting for sender frames..."
+        )
+        while reader.get_latest() is None:
+            print("waiting for Sony BoneData UDP frames...")
             time.sleep(1)
         return reader
 
@@ -1609,9 +1635,24 @@ def run_pico(
     enable_waist_tracking: bool = False,
     enable_smpl_vis: bool = False,
     input_source: str = "xrt",
+    sony_bonedata_host: str = "0.0.0.0",
+    sony_bonedata_port: int = input_readers.SONY_BONEDATA_DEFAULT_PORT,
+    sony_bonedata_format: str = "auto",
+    sony_bonedata_coordinate_frame: str = "unity-yup-zflip",
+    sony_bonedata_position_scale: float = 1.0,
+    sony_bonedata_input_quat_order: str = "xyzw",
 ):
     """Run body tracking with real-time visualization and ZMQ streaming."""
-    reader = _init_input_source(input_source, buffer_size)
+    reader = _init_input_source(
+        input_source,
+        buffer_size,
+        sony_bonedata_host=sony_bonedata_host,
+        sony_bonedata_port=sony_bonedata_port,
+        sony_bonedata_format=sony_bonedata_format,
+        sony_bonedata_coordinate_frame=sony_bonedata_coordinate_frame,
+        sony_bonedata_position_scale=sony_bonedata_position_scale,
+        sony_bonedata_input_quat_order=sony_bonedata_input_quat_order,
+    )
     context = zmq.Context()
     socket = context.socket(zmq.PUB)
     socket.bind(f"tcp://*:{port}")
@@ -1912,6 +1953,13 @@ def run_pico_manager(
     enable_waist_tracking: bool = False,
     enable_smpl_vis: bool = False,
     input_source: str = "xrt",
+    sony_bonedata_host: str = "0.0.0.0",
+    sony_bonedata_port: int = input_readers.SONY_BONEDATA_DEFAULT_PORT,
+    sony_bonedata_format: str = "auto",
+    sony_bonedata_coordinate_frame: str = "unity-yup-zflip",
+    sony_bonedata_position_scale: float = 1.0,
+    sony_bonedata_input_quat_order: str = "xyzw",
+    auto_pose: bool = False,
 ):
     """
     Manager: creates shared PUB socket and runs pose/planner streamers based on current mode.
@@ -1919,7 +1967,16 @@ def run_pico_manager(
       A+X: Toggle between planner and pose mode
       A+B+X+Y: Toggle policy start/stop
     """
-    reader = _init_input_source(input_source, buffer_size)
+    reader = _init_input_source(
+        input_source,
+        buffer_size,
+        sony_bonedata_host=sony_bonedata_host,
+        sony_bonedata_port=sony_bonedata_port,
+        sony_bonedata_format=sony_bonedata_format,
+        sony_bonedata_coordinate_frame=sony_bonedata_coordinate_frame,
+        sony_bonedata_position_scale=sony_bonedata_position_scale,
+        sony_bonedata_input_quat_order=sony_bonedata_input_quat_order,
+    )
 
     context = zmq.Context()
     socket = context.socket(zmq.PUB)
@@ -1983,6 +2040,7 @@ def run_pico_manager(
     # Track which mode VR_3PT was entered from, so left_axis_click returns to it.
     # Will be either PLANNER or PLANNER_FROZEN_UPPER_BODY.
     vr3pt_parent_mode = StreamMode.PLANNER
+    auto_pose_started = False
     prev_toggle_dc = False
     prev_toggle_da = False
     try:
@@ -2009,7 +2067,13 @@ def run_pico_manager(
 
             new_mode = current_mode
             if current_mode == StreamMode.OFF:
-                if start_combo and not prev_start_combo:
+                if auto_pose and not auto_pose_started:
+                    sample = reader.get_latest()
+                    if sample is not None:
+                        three_point.calibrate_now(sample["body_poses_np"])
+                        new_mode = StreamMode.POSE
+                        auto_pose_started = True
+                if new_mode == current_mode and start_combo and not prev_start_combo:
                     new_mode = StreamMode.PLANNER
                     # Calibrate VR 3pt tracking NOW: operator should be in zero-ref pose.
                     # Uses the current Pico SMPL frame + FK of all-zero body joints.
@@ -2245,11 +2309,60 @@ if __name__ == "__main__":
         "--input-source",
         type=str,
         default="xrt",
-        choices=["xrt", "isaac-teleop"],
+        choices=["xrt", "isaac-teleop", "sony-bonedata"],
         help=(
             "Input source: 'xrt' for XRoboToolkit SDK (default), "
-            "'isaac-teleop' for in-process IsaacTeleop / CloudXR DeviceIO"
+            "'isaac-teleop' for in-process IsaacTeleop / CloudXR DeviceIO, "
+            "'sony-bonedata' for UDP replay from Sony mocopi saveBoneData JSON"
         ),
+    )
+    parser.add_argument(
+        "--sony_bonedata_host",
+        type=str,
+        default="0.0.0.0",
+        help="Bind host for --input-source sony-bonedata (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--sony_bonedata_port",
+        type=int,
+        default=input_readers.SONY_BONEDATA_DEFAULT_PORT,
+        help=(
+            "UDP port for --input-source sony-bonedata "
+            f"(default: {input_readers.SONY_BONEDATA_DEFAULT_PORT})"
+        ),
+    )
+    parser.add_argument(
+        "--sony_bonedata_format",
+        type=str,
+        default="auto",
+        choices=["auto", "json", "msgpack"],
+        help="UDP payload format for Sony BoneData frames (default: auto)",
+    )
+    parser.add_argument(
+        "--sony_bonedata_coordinate_frame",
+        type=str,
+        default="unity-yup-zflip",
+        choices=["unity-yup-zflip", "identity"],
+        help="Coordinate conversion for Sony BoneData frames (default: unity-yup-zflip)",
+    )
+    parser.add_argument(
+        "--sony_bonedata_position_scale",
+        type=float,
+        default=1.0,
+        help="Scale applied to Sony BoneData positions before streaming (default: 1.0)",
+    )
+    parser.add_argument(
+        "--sony_bonedata_input_quat_order",
+        type=str,
+        default="xyzw",
+        choices=["xyzw", "wxyz"],
+        help="Input quaternion order for Sony BoneData arrays (dicts always use x/y/z/w)",
+    )
+    parser.add_argument(
+        "--auto_pose",
+        "--auto-pose",
+        action="store_true",
+        help="Automatically enter POSE mode once the first input frame is available",
     )
     args = parser.parse_args()
 
@@ -2292,6 +2405,13 @@ if __name__ == "__main__":
             enable_waist_tracking=args.waist_tracking,
             enable_smpl_vis=args.vis_smpl,
             input_source=args.input_source,
+            sony_bonedata_host=args.sony_bonedata_host,
+            sony_bonedata_port=args.sony_bonedata_port,
+            sony_bonedata_format=args.sony_bonedata_format,
+            sony_bonedata_coordinate_frame=args.sony_bonedata_coordinate_frame,
+            sony_bonedata_position_scale=args.sony_bonedata_position_scale,
+            sony_bonedata_input_quat_order=args.sony_bonedata_input_quat_order,
+            auto_pose=args.auto_pose or args.input_source == "sony-bonedata",
         )
     else:
         # Run legacy single-thread pose streaming
@@ -2308,4 +2428,10 @@ if __name__ == "__main__":
             enable_waist_tracking=args.waist_tracking,
             enable_smpl_vis=args.vis_smpl,
             input_source=args.input_source,
+            sony_bonedata_host=args.sony_bonedata_host,
+            sony_bonedata_port=args.sony_bonedata_port,
+            sony_bonedata_format=args.sony_bonedata_format,
+            sony_bonedata_coordinate_frame=args.sony_bonedata_coordinate_frame,
+            sony_bonedata_position_scale=args.sony_bonedata_position_scale,
+            sony_bonedata_input_quat_order=args.sony_bonedata_input_quat_order,
         )

@@ -118,7 +118,28 @@ class DataCollectionLaunchConfig:
     """Run pico_manager_thread_server with --manager flag."""
 
     pico_input_source: str = "xrt"
-    """Teleop input source for pico_manager_thread_server.py (xrt or isaac-teleop)."""
+    """Teleop input source for pico_manager_thread_server.py (xrt, isaac-teleop, sony-bonedata)."""
+
+    pico_auto_pose: bool = False
+    """Automatically switch pico_manager_thread_server.py to POSE mode after the first frame."""
+
+    sony_bonedata_host: str = "0.0.0.0"
+    """Bind host for pico_manager_thread_server.py --input-source sony-bonedata."""
+
+    sony_bonedata_port: int = 12352
+    """UDP port for pico_manager_thread_server.py --input-source sony-bonedata."""
+
+    sony_bonedata_format: str = "auto"
+    """UDP payload format for Sony BoneData frames (auto, json, msgpack)."""
+
+    sony_bonedata_coordinate_frame: str = "unity-yup-zflip"
+    """Coordinate conversion for Sony BoneData frames."""
+
+    sony_bonedata_position_scale: float = 1.0
+    """Scale applied to Sony BoneData positions before streaming."""
+
+    sony_bonedata_input_quat_order: str = "xyzw"
+    """Input quaternion order for Sony BoneData array payloads."""
 
     pico_vis_vr3pt: bool = False
     """Enable VR 3-point visualization on the teleop streamer."""
@@ -192,8 +213,17 @@ def _check_prerequisites(config: DataCollectionLaunchConfig):
             "(see install instructions)."
         )
 
-    if config.pico_input_source not in {"xrt", "isaac-teleop"}:
-        errors.append("--pico-input-source must be one of: xrt, isaac-teleop")
+    if config.pico_input_source not in {"xrt", "isaac-teleop", "sony-bonedata"}:
+        errors.append("--pico-input-source must be one of: xrt, isaac-teleop, sony-bonedata")
+
+    if config.sony_bonedata_format not in {"auto", "json", "msgpack"}:
+        errors.append("--sony-bonedata-format must be one of: auto, json, msgpack")
+
+    if config.sony_bonedata_coordinate_frame not in {"unity-yup-zflip", "identity"}:
+        errors.append("--sony-bonedata-coordinate-frame must be one of: unity-yup-zflip, identity")
+
+    if config.sony_bonedata_input_quat_order not in {"xyzw", "wxyz"}:
+        errors.append("--sony-bonedata-input-quat-order must be one of: xyzw, wxyz")
 
     if errors:
         print("ERROR: Prerequisites not met:\n")
@@ -293,6 +323,8 @@ def main(config: DataCollectionLaunchConfig):
     print(f"  Dataset name:    {config.dataset_name or '(auto)'}")
     print(f"  Deploy input:    {config.deploy_input_type}")
     print(f"  Teleop input:    {config.pico_input_source}")
+    if config.pico_input_source == "sony-bonedata":
+        print(f"  BoneData UDP:    {config.sony_bonedata_host}:{config.sony_bonedata_port}")
     if config.deploy_checkpoint:
         print(f"  Checkpoint:      {config.deploy_checkpoint}")
     print(f"  Camera:          {config.camera_host}:{config.camera_port}")
@@ -366,12 +398,21 @@ def main(config: DataCollectionLaunchConfig):
     )
     if config.pico_manager:
         pico_cmd += " --manager"
+    if config.pico_auto_pose or config.pico_input_source == "sony-bonedata":
+        pico_cmd += " --auto_pose"
     if config.pico_vis_vr3pt:
         pico_cmd += " --vis_vr3pt"
     if config.pico_vis_smpl:
         pico_cmd += " --vis_smpl"
     if config.pico_waist_tracking:
         pico_cmd += " --waist_tracking"
+    if config.pico_input_source == "sony-bonedata":
+        pico_cmd += f" --sony_bonedata_host {config.sony_bonedata_host}"
+        pico_cmd += f" --sony_bonedata_port {config.sony_bonedata_port}"
+        pico_cmd += f" --sony_bonedata_format {config.sony_bonedata_format}"
+        pico_cmd += f" --sony_bonedata_coordinate_frame {config.sony_bonedata_coordinate_frame}"
+        pico_cmd += f" --sony_bonedata_position_scale {config.sony_bonedata_position_scale}"
+        pico_cmd += f" --sony_bonedata_input_quat_order {config.sony_bonedata_input_quat_order}"
 
     print("Starting teleop streamer (pane 2)...")
     _send_to_pane(1, pico_cmd, wait=2.0)
