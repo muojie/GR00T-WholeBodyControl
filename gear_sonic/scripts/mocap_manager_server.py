@@ -37,6 +37,9 @@ from gear_sonic.utils.teleop.sources.sony_bonedata_json import (
     SONY_BONEDATA_INPUT_QUAT_ORDERS,
     SONY_BONEDATA_ROTATION_MODES,
 )
+from gear_sonic.utils.teleop.sources.sony_pico_smpl_source import (
+    SONY_PICO_BVH_INPUT_FRAMES,
+)
 from gear_sonic.utils.teleop.zmq.zmq_planner_sender import (
     build_command_message,
     build_planner_message,
@@ -323,12 +326,14 @@ def _create_source(args: argparse.Namespace):
             recv_size=args.bvh_stream_recv_size,
             position_scale=args.bvh_stream_bonedata_position_scale,
             input_quat_order=args.bvh_stream_bonedata_input_quat_order,
+            bvh_input_frame=args.sony_pico_bvh_frame,
         )
         description = (
-            f"listening for raw sony_bonedata_json_v1 UDP on "
+            f"listening for raw sony_bonedata_json_v1 or bvh_stream_v1 UDP on "
             f"{args.bvh_stream_host}:{args.bvh_stream_port} ({args.bvh_stream_format}); "
-            "converting Unity Y-up bones through the PICO SMPL stack "
-            f"(zflip basis, POSE v{args.pose_protocol_version}/"
+            "converting world bone rotations through the PICO SMPL stack "
+            f"(zflip basis for BoneData, {args.sony_pico_bvh_frame} basis for BVH streams, "
+            f"POSE v{args.pose_protocol_version}/"
             f"{args.pose_encoder_mode}, "
             f"scale={args.bvh_stream_bonedata_position_scale:g}, "
             f"quat_order={args.bvh_stream_bonedata_input_quat_order})"
@@ -828,6 +833,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--bvh-stream-bonedata-local-root",
         action="store_true",
         help="Subtract each raw BoneData frame's root position on the receiver side.",
+    )
+    parser.add_argument(
+        "--sony-pico-bvh-frame",
+        choices=SONY_PICO_BVH_INPUT_FRAMES,
+        default="sonic_zup",
+        help=(
+            "World frame of bvh_stream_v1 packets received by --source sony_pico. "
+            "Use sonic_zup for bvh_stream_sender defaults, bvh_yup when the sender "
+            "ran with --no-y-up-to-z-up."
+        ),
     )
     parser.add_argument("--bvh-file", help="BVH file to replay when --source bvh or bvh_g1")
     parser.add_argument("--bvh-loop", action="store_true", help="Loop BVH playback")

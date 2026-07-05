@@ -17,6 +17,15 @@ Conversion chain (validated offline by
 
 Unlike the ``bvh_stream`` route this source consumes the *raw* Unity-frame
 payload and must NOT be combined with the sonic_zup BoneData conversion.
+
+The source also accepts ``bvh_stream_v1`` packets (``bvh_stream_sender.py``
+streaming a mocopi-skeleton BVH file), so recorded BVH takes the same
+rotation-driven PICO line. BVH payloads carry world poses either in the SONIC
+Z-up frame (sender default) or the raw BVH right-handed Y-up frame (sender
+``--no-y-up-to-z-up``); ``bvh_input_frame`` selects the matching basis change
+into the XRT convention. This assumes the BVH rest pose is a world-aligned
+T-pose with identity world rotations (true for mocopi BVH exports) — the same
+bind-frame assumption the saveBoneData line relies on.
 """
 
 from __future__ import annotations
@@ -53,6 +62,22 @@ PICO_SMPL_PARENT_INDICES = [
 # p' = B @ p and world rotations as R' = B @ R @ B^T (equivalently, quaternion
 # components (x, y, z, w) -> (-x, -y, z, w)).
 UNITY_TO_XRT_BASIS = np.diag([1.0, 1.0, -1.0])
+
+# Basis changes into the XRT convention for the world frames a bvh_stream_v1
+# payload can carry. Both compose zflip with the exact frame conversions used
+# elsewhere in this package, so the three input frames land in the same XRT
+# world:
+#   sonic_zup: zflip @ inv(unity_yup -> sonic_zup)   (sender default)
+#   bvh_yup:   zflip @ inv(unity_yup -> sonic_zup) @ (bvh_yup -> sonic_zup)
+#              = diag(-1, 1, -1), i.e. the standard BVH<->Unity x-mirror
+#              followed by zflip (sender --no-y-up-to-z-up)
+SONY_PICO_BVH_INPUT_FRAMES = ("sonic_zup", "bvh_yup")
+XRT_BASIS_BY_BVH_INPUT_FRAME: dict[str, np.ndarray] = {
+    "sonic_zup": np.array(
+        [[-1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]], dtype=np.float64
+    ),
+    "bvh_yup": np.diag([-1.0, 1.0, -1.0]),
+}
 
 # SMPL slot index -> accepted mocopi bone names (saveBoneData short names
 # first, MOCOPI_BONE_NAMES long names as aliases). SMPL hand slots (22/23)
@@ -150,13 +175,52 @@ def read_bonedata_frame_arrays(
     return joint_names, pos, quat
 
 
+def read_bvh_stream_frame_arrays(
+    payload: dict[str, Any],
+) -> tuple[list[str], np.ndarray, np.ndarray]:
+    """Extract (names, positions (J,3), quats_xyzw (J,4)) from a bvh_stream_v1 payload."""
+    names = payload.get("joint_names")
+    positions = payload.get("world_positions")
+    quats_wxyz = payload.get("world_quat_wxyz")
+    if not isinstance(names, list) or not names:
+        raise ValueError("bvh_stream payload requires non-empty list field 'joint_names'")
+    if positions is None or quats_wxyz is None:
+        raise ValueError(
+            "bvh_stream payload requires fields 'world_positions' and 'world_quat_wxyz'"
+        )
+
+    joint_names = [str(name) for name in names]
+    pos = np.asarray(positions, dtype=np.float64)
+    quat = np.asarray(quats_wxyz, dtype=np.float64)
+    if pos.ndim == 3 and pos.shape[0] == 1:
+        pos = pos[0]
+    if quat.ndim == 3 and quat.shape[0] == 1:
+        quat = quat[0]
+    if pos.shape != (len(joint_names), 3):
+        raise ValueError(
+            f"world_positions must have shape ({len(joint_names)}, 3), got {pos.shape}"
+        )
+    if quat.shape != (len(joint_names), 4):
+        raise ValueError(
+            f"world_quat_wxyz must have shape ({len(joint_names)}, 4), got {quat.shape}"
+        )
+
+    quat_xyzw = quat[:, [1, 2, 3, 0]].copy()
+    norms = np.linalg.norm(quat_xyzw, axis=1, keepdims=True)
+    bad = (norms[:, 0] < 1e-8) | ~np.isfinite(norms[:, 0])
+    quat_xyzw[bad] = (0.0, 0.0, 0.0, 1.0)
+    norms[bad] = 1.0
+    quat_xyzw /= norms
+    return joint_names, pos, quat_xyzw
+
+
 def bonedata_to_xrt_body_poses(
     positions: np.ndarray,
     quats_xyzw: np.ndarray,
     slot_indices: np.ndarray,
+    basis: np.ndarray = UNITY_TO_XRT_BASIS,
 ) -> np.ndarray:
     """Build the (24, 7) [x,y,z,qx,qy,qz,qw] array PicoReader would deliver."""
-    basis = UNITY_TO_XRT_BASIS
     pos = positions[slot_indices] @ basis.T
     mats = sRot.from_quat(quats_xyzw[slot_indices]).as_matrix()
     mats = basis @ mats @ basis.T
@@ -197,13 +261,16 @@ class SonyPicoSmplConverter:
         quats_xyzw: np.ndarray,
         *,
         frame_index: int | None,
+        basis: np.ndarray = UNITY_TO_XRT_BASIS,
     ) -> FullBodyReference:
         names_key = tuple(joint_names)
         if self._slot_indices is None or self._joint_names != names_key:
             self._slot_indices = resolve_smpl_slot_bone_indices(joint_names)
             self._joint_names = names_key
 
-        body_poses = bonedata_to_xrt_body_poses(positions, quats_xyzw, self._slot_indices)
+        body_poses = bonedata_to_xrt_body_poses(
+            positions, quats_xyzw, self._slot_indices, basis=basis
+        )
         data = self._compute_from_body_poses(
             PICO_SMPL_PARENT_INDICES, self._device, body_poses
         )
@@ -222,8 +289,12 @@ class SonyPicoSmplConverter:
         )
 
 
+# Accepted bvh_stream payload format markers (mirrors bvh_stream_source).
+_BVH_STREAM_FORMATS = frozenset({"bvh_stream_v1", "bvh_stream"})
+
+
 def parse_sony_pico_packet(packet: bytes, packet_format: str = "auto") -> dict[str, Any]:
-    """Decode one raw sony_bonedata_json_v1 packet from JSON or msgpack."""
+    """Decode one raw sony_bonedata_json_v1 or bvh_stream_v1 packet."""
     normalized = str(packet_format or "auto").strip().lower()
     if normalized == "auto":
         normalized = "json" if packet.lstrip().startswith(b"{") else "msgpack"
@@ -235,16 +306,17 @@ def parse_sony_pico_packet(packet: bytes, packet_format: str = "auto") -> dict[s
         raise ValueError(f"unsupported packet format {packet_format!r}")
     if not isinstance(payload, dict):
         raise ValueError(f"payload must be a dict, got {type(payload).__name__}")
-    if payload.get("format") != SONY_BONEDATA_JSON_FORMAT:
+    payload_format = payload.get("format")
+    if payload_format != SONY_BONEDATA_JSON_FORMAT and payload_format not in _BVH_STREAM_FORMATS:
         raise ValueError(
-            f"--source {SONY_PICO_SOURCE_NAME} only accepts raw "
-            f"{SONY_BONEDATA_JSON_FORMAT!r} packets, got {payload.get('format')!r}"
+            f"--source {SONY_PICO_SOURCE_NAME} accepts raw {SONY_BONEDATA_JSON_FORMAT!r} "
+            f"or bvh_stream_v1 packets, got {payload_format!r}"
         )
     return payload
 
 
 class SonyPicoSmplUdpSource:
-    """Threaded UDP receiver feeding raw BoneData frames to the PICO stack."""
+    """Threaded UDP receiver feeding BoneData or BVH-stream frames to the PICO stack."""
 
     def __init__(
         self,
@@ -255,6 +327,7 @@ class SonyPicoSmplUdpSource:
         socket_timeout_s: float = 0.5,
         position_scale: float = 1.0,
         input_quat_order: str = "xyzw",
+        bvh_input_frame: str = "sonic_zup",
     ):
         self.bind_host = bind_host
         self.port = int(port)
@@ -263,6 +336,12 @@ class SonyPicoSmplUdpSource:
         self.socket_timeout_s = float(socket_timeout_s)
         self.position_scale = float(position_scale)
         self.input_quat_order = str(input_quat_order)
+        if bvh_input_frame not in XRT_BASIS_BY_BVH_INPUT_FRAME:
+            raise ValueError(
+                f"unsupported bvh_input_frame {bvh_input_frame!r}; "
+                f"expected one of {SONY_PICO_BVH_INPUT_FRAMES}"
+            )
+        self.bvh_input_frame = str(bvh_input_frame)
 
         self._converter = SonyPicoSmplConverter()
         self._socket: socket.socket | None = None
@@ -374,11 +453,19 @@ class SonyPicoSmplUdpSource:
                 self._latest_payload_sequence = self._received_packets
 
     def _payload_to_frame(self, payload: dict[str, Any], *, receive_time_s: float) -> MocapFrame:
-        joint_names, positions, quats_xyzw = read_bonedata_frame_arrays(
-            payload,
-            position_scale=self.position_scale,
-            input_quat_order=self.input_quat_order,
-        )
+        payload_format = payload.get("format")
+        if payload_format in _BVH_STREAM_FORMATS:
+            # bvh_stream_v1 world poses are canonical meters; position_scale
+            # and input_quat_order only apply to raw Unity-frame BoneData.
+            joint_names, positions, quats_xyzw = read_bvh_stream_frame_arrays(payload)
+            basis = XRT_BASIS_BY_BVH_INPUT_FRAME[self.bvh_input_frame]
+        else:
+            joint_names, positions, quats_xyzw = read_bonedata_frame_arrays(
+                payload,
+                position_scale=self.position_scale,
+                input_quat_order=self.input_quat_order,
+            )
+            basis = UNITY_TO_XRT_BASIS
         frame_index = int(payload.get("frame_index", 0))
         convert_start = time.perf_counter()
         full_body = self._converter.convert(
@@ -386,6 +473,7 @@ class SonyPicoSmplUdpSource:
             positions,
             quats_xyzw,
             frame_index=frame_index,
+            basis=basis,
         )
         convert_ms = (time.perf_counter() - convert_start) * 1000.0
         self._convert_ms_ema = (
@@ -397,7 +485,7 @@ class SonyPicoSmplUdpSource:
         playback_fps = float(payload.get("fps") or source_fps or 50.0)
         root_row = int(self._converter.slot_indices[0])
         root_body_pose = bonedata_to_xrt_body_poses(
-            positions, quats_xyzw, np.array([root_row], dtype=np.int64)
+            positions, quats_xyzw, np.array([root_row], dtype=np.int64), basis=basis
         )[0]
         root_pose = Pose7D(
             position=root_body_pose[:3],
@@ -413,12 +501,15 @@ class SonyPicoSmplUdpSource:
             joints={"root": root_pose},
             full_body=full_body,
             metadata={
-                "format": SONY_BONEDATA_JSON_FORMAT,
+                "format": payload_format,
                 "path": payload.get("path"),
                 "motion_name": payload.get("motion_name"),
                 "source_frame_index": int(payload.get("source_frame_index", frame_index)),
                 "source_fps": source_fps,
                 "joint_count": len(joint_names),
                 "convert_ms": round(convert_ms, 2),
+                "bvh_input_frame": (
+                    self.bvh_input_frame if payload_format in _BVH_STREAM_FORMATS else None
+                ),
             },
         )

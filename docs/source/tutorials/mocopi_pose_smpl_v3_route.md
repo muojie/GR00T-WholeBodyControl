@@ -178,6 +178,31 @@ motion_joint_positions_wrists_10frame_step1
 - 输入要求是 **rotation 为 Unity Y-up 左手系原生四元数**；position 只有 root 被携带且不参与 SMPL 语义。这与已固定的 `sony_bonedata_json_v1` 现行协议（外部 sender app，参考格式即 `saveBoneData_Yup20260702.json` 形态）一致，该素材验证 GO。旧版 sender app 导出的 `Downloads/saveBoneData_Yup.json`（position 已转 z-up、rotation 仍 y-up 原生的混合存储）rotation 链不受影响，实测 5 次原地转身角全部复现（净 yaw 回零），可用作纯 yaw/T-pose 锚点测试素材，仅其臂部旋转 IK 衰减比现行版素材更明显。
 - `--bvh-stream-bonedata-coordinate-frame` 等 sonic_zup 转换参数对这条线无效，只消费 `--bvh-stream-bonedata-position-scale` 和 `--bvh-stream-bonedata-input-quat-order`。
 
+### BVH 录制走 sony_pico 直通线
+
+`--source sony_pico` 同时接受 `bvh_stream_v1` 包（`bvh_stream_sender.py` 回放 mocopi 骨架 BVH 文件），让 BVH 录制也走同一条旋转驱动 PICO 线，而不是 bvh_stream 的 G1 FK 投影旁路（后者存在 Sony/PICO 腕语义差异，已被一键脚本弃用）：
+
+```bash
+# manager 不变（同上 sony_pico 命令），sender 换成 BVH 回放：
+.venv_teleop/bin/python -u gear_sonic/scripts/bvh_stream_sender.py \
+  --bvh-file /path/to/mocopi_recording.bvh \
+  --host 127.0.0.1 --port 12352 --loop
+```
+
+坐标系由 `--sony-pico-bvh-frame` 选择（manager 侧参数）：
+
+| sender 用法 | manager 参数 | 基变换 |
+|---|---|---|
+| 默认（做 Y-up→Z-up 转换） | `--sony-pico-bvh-frame sonic_zup`（默认） | `[[-1,0,0],[0,0,1],[0,1,0]]` |
+| `--no-y-up-to-z-up` | `--sony-pico-bvh-frame bvh_yup` | `diag(-1,1,-1)` |
+
+两个基都是与 zflip 精确复合推导的（`XRT_sonic @ M_unity→zup = zflip` 闭合验证），离线一致性测试三路（raw sony / sonic_zup BVH 流 / bvh_yup 帧）输出 bit-exact 一致。
+
+约束：
+
+- **仅限 mocopi 骨架 BVH**（27 bone、`root`/`torso_*`/`l_up_arm` 等命名，rest pose 为世界对齐 T-pose 且世界旋转为 identity）。通用 BVH（Mixamo `Hips`/`Spine` 命名、非 T-pose rest）骨名解析会直接报错，语义也不成立。
+- `--bvh-stream-bonedata-position-scale` / `--bvh-stream-bonedata-input-quat-order` 只作用于 raw BoneData 包；`bvh_stream_v1` 包按协议已是米制 + wxyz，不受这两个参数影响（sender 侧用 `--unit-scale` 控制单位）。
+
 ## 研究命令模板
 
 `--source bvh` 是本地 SMPL debug 入口：

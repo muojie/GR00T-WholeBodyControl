@@ -53,6 +53,7 @@ from gear_sonic.utils.teleop.sources.robot_pkl_source import (
     load_robot_pkl_motion,
 )
 from gear_sonic.utils.teleop.sources.sony_pico_smpl_source import (
+    SONY_PICO_BVH_INPUT_FRAMES,
     SONY_PICO_SOURCE_NAME,
     SonyPicoSmplConverter,
     SonyPicoSmplUdpSource,
@@ -89,6 +90,7 @@ __all__ = [
     "Pose7D",
     "RobotPklPlaybackSource",
     "SONIC_BODY_NAMES",
+    "SONY_PICO_BVH_INPUT_FRAMES",
     "SONY_PICO_SOURCE_NAME",
     "SonyPicoSmplConverter",
     "SonyPicoSmplUdpSource",
