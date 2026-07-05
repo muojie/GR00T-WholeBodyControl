@@ -57,34 +57,37 @@ POSE_PROTOCOL_VERSION=3 ./scripts/launch_sonic_json_isaaclab_closed_loop.sh \
 
 **v1 协议（默认）：**
 ```bash
+--source bvh_stream \
+--bvh-stream-host 0.0.0.0 \
+--bvh-stream-port 12362 \
+--bvh-stream-bonedata-coordinate-frame left_handed_yup \
+--bvh-stream-bonedata-position-scale 1.0 \
+--bvh-stream-bonedata-input-quat-order xyzw \
+--bvh-stream-bonedata-rotation-mode input \
 --pose-encoder-mode g1 \
 --pose-protocol-version 1
 ```
 
 **v3 协议：**
 ```bash
+--source sony_pico \
+--bvh-stream-port 12362 \
+--bvh-stream-bonedata-position-scale 1.0 \
+--bvh-stream-bonedata-input-quat-order xyzw \
 --pose-encoder-mode smpl \
---pose-protocol-version 3 \
---allow-sony-pose-v3
+--pose-protocol-version 3
 ```
 
-### 错误处理
+**关键区别：**
+- v3 使用 `--source sony_pico`（Sony → PICO SMPL 直通线）
+- v3 **不使用** `coordinate-frame` 和 `rotation-mode`（PICO 栈内部处理）
+- v3 直接调用 PICO 转换栈，与 PICO 头显同构
 
-如果手动指定了不兼容的参数组合，manager 会报错：
-
-```
-error: --source bvh_stream supports either 
-  --pose-protocol-version 1 --pose-encoder-mode g1, or 
-  --pose-protocol-version 3 --pose-encoder-mode smpl --allow-sony-pose-v3
-```
-
-一键脚本会自动避免这个错误，无需手动指定 encoder mode 和额外标志。
-
-## 验证方法
+### 验证方法
 
 ### 检查 manager 日志
 
-启动后，检查 manager 窗口或日志，确认使用了正确的 encoder：
+启动后，检查 manager 窗口或日志，确认使用了正确的 source 和 encoder：
 
 ```bash
 # 查看实时输出
@@ -97,13 +100,18 @@ tail -f logs/sony_json_mujoco_sonic_json_yup_mujoco/manager.log
 
 **v1 协议日志特征：**
 ```
-[MocapManager] ... encoder=g1 ...
+[MocapManager] ... encoder=g1 ... body_n=14 ...
 ```
 
 **v3 协议日志特征：**
 ```
-[MocapManager] ... encoder=smpl ... smpl_lz=[-0.75,-0.13] smpl_lspan=0.66m ...
+[MocapManager] ... encoder=smpl ... body_n=1 ... smpl_lspan=0.92m ...
 ```
+
+**关键区别：**
+- `body_n=14`：bvh_stream 使用 14 个 G1 FK 关键点
+- `body_n=1`：sony_pico 使用 PICO 转换栈
+- `smpl_lspan`：v1 约 0.66m，v3 约 0.92m（不同的转换路径）
 
 ### 检查 deploy 输出
 
@@ -187,6 +195,7 @@ tmux attach-session -t test_v3
 - 文件：`/home/nolo/saveBoneData_Yup20260702.json`（7305 帧，27 关节）
 - 后端：MuJoCo
 - 协议：v3
+- Source：`sony_pico`
 
 ### 验证结果
 
@@ -194,7 +203,11 @@ tmux attach-session -t test_v3
 |------|------|
 | json_sender 发送帧率 | 50.0 fps |
 | manager 接收帧率 | 50.0 fps |
+| manager source 模式 | `sony_pico` ✓ |
 | manager encoder 模式 | `smpl` ✓ |
+| manager body_n | `1`（PICO 栈）✓ |
+| deploy protocol version | `3` ✓ |
+| deploy encode mode | `2` (SMPL) ✓ |
 | deploy SMPL 字段 | 正常输出 ✓ |
 | 丢帧率 | 0 ✓ |
 | 日志错误 | 无 ✓ |
@@ -203,21 +216,25 @@ tmux attach-session -t test_v3
 
 **manager.log:**
 ```
-[MocapManager] recv_fps=50.0 recv=1998 vr_3pt=no pose=sent:1912 encoder=smpl 
-q=[-1.00,1.00] dq_abs=0.11 wrist_abs=0.72 wrist_dq=0.11 wrist_margin=0.97 
-body_n=14 lower_dq=0.37 smpl_lz=[-0.75,-0.13] smpl_lspan=0.66m 
-smpl_lpose=0.15rad root_z=0.953m body0_z=0.953m root_tilt=0.00rad 
-smpl_lag=0.001m pose_lag=0.00rad q_lag=0.00rad wrist_lag=0.00rad 
-root_raw=0.00rad dropped=0 frame=1997
+[MocapManager] recv_fps=50.0 recv=775 vr_3pt=no pose=sent:693 encoder=smpl 
+q=[-0.79,0.67] dq_abs=0.07 wrist_abs=0.79 wrist_dq=0.07 wrist_margin=1.18 
+body_n=1 lower_dq=0.00 smpl_lz=[-0.92,-0.08] smpl_lspan=0.92m 
+smpl_lpose=0.12rad root_z=0.793m body0_z=0.793m root_tilt=0.01rad 
+smpl_lag=0.002m pose_lag=0.00rad q_lag=0.00rad wrist_lag=0.00rad 
+root_raw=0.01rad dropped=0 frame=774
 ```
+
+**关键特征：**
+- `body_n=1`：使用 sony_pico PICO 转换栈（区别于 bvh_stream 的 `body_n=14`）
+- `smpl_lspan=0.92m`：SMPL 肢段长度（区别于 bvh_stream v3 的 0.66m）
 
 **deploy.log:**
 ```
-Frame[10] (idx=1014) joint_pos: [-0.053581, -0.077066], 
-joint_vel: [-0.008915, -0.005217], 
-body_quat: [(0.999933, 0.000000, 0.000000, 0.011603)], 
-smpl_joints: [(0.000000, 0.000000, 0.000000)], 
-smpl_pose: [(0.003524, -0.059697, -0.062969)]
+[ZMQEndpointInterface] active_protocol_version_=3
+[ZMQEndpointInterface] result.motion->GetEncodeMode()=2
+Frame[17] (idx=1545) joint_pos: [-0.312000, -0.312000], 
+smpl_joints: [(-0.009844, -0.351365, 0.009359)], 
+smpl_pose: [(-0.040017, -0.063219, 0.073330)]
 ```
 
-所有组件正常运行，数据流畅传输，v3 协议验证通过 ✅
+所有组件正常运行，数据流畅传输，v3 协议（sony_pico 路线）验证通过 ✅

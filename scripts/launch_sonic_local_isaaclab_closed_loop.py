@@ -495,32 +495,45 @@ def _deploy_command(args: argparse.Namespace) -> str:
 def _mocap_manager_command(args: argparse.Namespace) -> str:
     python = args.repo_root / ".venv_teleop" / "bin" / "python"
 
-    # v3 requires smpl encoder mode and --allow-sony-pose-v3
+    # v3 requires sony_pico source with smpl encoder mode
+    # v1 uses bvh_stream source with g1 encoder mode
     if args.pose_protocol_version == 3:
+        source_type = "sony_pico"
         pose_encoder_mode = "smpl"
-        extra_v3_args = ["--allow-sony-pose-v3"]
+        # sony_pico source only uses position-scale and input-quat-order
+        source_specific_args = [
+            "--bvh-stream-port",
+            str(args.bvh_stream_port),
+            "--bvh-stream-bonedata-position-scale",
+            str(args.bvh_stream_bonedata_position_scale),
+            "--bvh-stream-bonedata-input-quat-order",
+            args.bvh_stream_bonedata_input_quat_order,
+        ]
     else:
+        source_type = "bvh_stream"
         pose_encoder_mode = "g1"
-        extra_v3_args = []
+        source_specific_args = [
+            "--bvh-stream-host",
+            args.bvh_stream_host,
+            "--bvh-stream-port",
+            str(args.bvh_stream_port),
+            "--bvh-stream-bonedata-coordinate-frame",
+            args.bvh_stream_bonedata_coordinate_frame,
+            "--bvh-stream-bonedata-position-scale",
+            str(args.bvh_stream_bonedata_position_scale),
+            "--bvh-stream-bonedata-input-quat-order",
+            args.bvh_stream_bonedata_input_quat_order,
+            "--bvh-stream-bonedata-rotation-mode",
+            args.bvh_stream_bonedata_rotation_mode,
+        ]
 
     mocap_args = [
         python,
         "-u",
         "gear_sonic/scripts/mocap_manager_server.py",
         "--source",
-        "bvh_stream",
-        "--bvh-stream-host",
-        args.bvh_stream_host,
-        "--bvh-stream-port",
-        str(args.bvh_stream_port),
-        "--bvh-stream-bonedata-coordinate-frame",
-        args.bvh_stream_bonedata_coordinate_frame,
-        "--bvh-stream-bonedata-position-scale",
-        str(args.bvh_stream_bonedata_position_scale),
-        "--bvh-stream-bonedata-input-quat-order",
-        args.bvh_stream_bonedata_input_quat_order,
-        "--bvh-stream-bonedata-rotation-mode",
-        args.bvh_stream_bonedata_rotation_mode,
+        source_type,
+        *source_specific_args,
         "--control-mode",
         "pose",
         "--pose-window-size",
@@ -529,7 +542,6 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
         pose_encoder_mode,
         "--pose-protocol-version",
         str(args.pose_protocol_version),
-        *extra_v3_args,
         "--zmq-port",
         str(args.zmq_port),
         "--log-interval-s",

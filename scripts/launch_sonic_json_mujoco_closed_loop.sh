@@ -378,13 +378,25 @@ echo "[sonic-json-mujoco] mujoco exited with status \${status}"
 exec bash
 EOF
 
-  # v3 requires smpl encoder mode and --allow-sony-pose-v3
+  # v3 requires sony_pico source with smpl encoder mode
+  # v1 uses bvh_stream source with g1 encoder mode
   if [[ "${POSE_PROTOCOL_VERSION}" == "3" ]]; then
+    SOURCE_TYPE=sony_pico
     POSE_ENCODER_MODE=smpl
-    POSE_V3_FLAG="--allow-sony-pose-v3"
+    # sony_pico source only uses position-scale and input-quat-order
+    # coordinate-frame and rotation-mode are ignored
+    SOURCE_SPECIFIC_ARGS="--bvh-stream-port ${BVH_STREAM_PORT} \\
+  --bvh-stream-bonedata-position-scale ${BONEDATA_POSITION_SCALE} \\
+  --bvh-stream-bonedata-input-quat-order ${BONEDATA_INPUT_QUAT_ORDER}"
   else
+    SOURCE_TYPE=bvh_stream
     POSE_ENCODER_MODE=g1
-    POSE_V3_FLAG=""
+    SOURCE_SPECIFIC_ARGS="--bvh-stream-host 0.0.0.0 \\
+  --bvh-stream-port ${BVH_STREAM_PORT} \\
+  --bvh-stream-bonedata-coordinate-frame ${COORDINATE_FRAME} \\
+  --bvh-stream-bonedata-position-scale ${BONEDATA_POSITION_SCALE} \\
+  --bvh-stream-bonedata-input-quat-order ${BONEDATA_INPUT_QUAT_ORDER} \\
+  --bvh-stream-bonedata-rotation-mode ${BONEDATA_ROTATION_MODE}"
   fi
 
   cat > "${RUNTIME_DIR}/manager.sh" <<EOF
@@ -394,18 +406,12 @@ cd "${REPO_ROOT}"
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="${REPO_ROOT}:\${PYTHONPATH:-}"
 "${TELEOP_PY}" -u "${MANAGER_SCRIPT}" \
-  --source bvh_stream \
-  --bvh-stream-host 0.0.0.0 \
-  --bvh-stream-port "${BVH_STREAM_PORT}" \
-  --bvh-stream-bonedata-coordinate-frame "${COORDINATE_FRAME}" \
-  --bvh-stream-bonedata-position-scale "${BONEDATA_POSITION_SCALE}" \
-  --bvh-stream-bonedata-input-quat-order "${BONEDATA_INPUT_QUAT_ORDER}" \
-  --bvh-stream-bonedata-rotation-mode "${BONEDATA_ROTATION_MODE}" \
+  --source ${SOURCE_TYPE} \
+  ${SOURCE_SPECIFIC_ARGS} \
   --control-mode pose \
   --pose-window-size 80 \
   --pose-encoder-mode ${POSE_ENCODER_MODE} \
   --pose-protocol-version "${POSE_PROTOCOL_VERSION}" \
-  ${POSE_V3_FLAG} \
   --zmq-port "${MOCAP_ZMQ_PORT}" \
   --log-interval-s 1.0 ${MANAGER_EXTRA_ARGS} \
   2>&1 | tee "${LOG_DIR}/manager.log"
