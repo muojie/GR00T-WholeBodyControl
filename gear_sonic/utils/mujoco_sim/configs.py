@@ -66,6 +66,7 @@ def override_wbc_config(
     """Override WBC YAML values with dataclass values."""
     key_to_value = {
         "INTERFACE": config.interface,
+        "DOMAIN_ID": config.domain_id,
         "ENV_TYPE": config.env_type,
         "VERSION": config.wbc_version,
         "SIMULATOR": config.simulator,
@@ -89,6 +90,10 @@ def override_wbc_config(
         "waist_pitch_limit": config.waist_pitch_limit,
         "hand_torque_limit": config.hand_torque_limit,
         "enable_natural_walk": config.enable_natural_walk,
+        "ENABLE_ELASTIC_BAND": config.enable_elastic_band,
+        "MUJOCO_METRICS_ZMQ_BIND": config.mujoco_metrics_zmq_bind,
+        "MUJOCO_METRICS_ZMQ_TOPIC": config.mujoco_metrics_zmq_topic,
+        "MUJOCO_METRICS_HZ": config.mujoco_metrics_hz,
     }
 
     if missed_keys_only:
@@ -126,6 +131,9 @@ class BaseConfig(ArgsConfigTemplate):
     # System Configuration
     interface: str = "sim"
     """Interface to use for the control loop. [sim, real, lo, enxe8ea6a9c4e09]"""
+
+    domain_id: int = 0
+    """Unitree DDS domain id used by the MuJoCo sim bridge."""
 
     simulator: str = "mujoco"
     """Simulator to use."""
@@ -204,6 +212,18 @@ class BaseConfig(ArgsConfigTemplate):
 
     enable_natural_walk: bool = False
     """Enable natural walk mode."""
+
+    enable_elastic_band: bool = True
+    """Enable the MuJoCo elastic band that keeps the floating root near its anchor."""
+
+    mujoco_metrics_zmq_bind: str = ""
+    """Optional ZMQ PUB bind endpoint for MuJoCo-only diagnostic metrics."""
+
+    mujoco_metrics_zmq_topic: str = "mujoco_metrics"
+    """Topic prefix for MuJoCo diagnostic metrics."""
+
+    mujoco_metrics_hz: float = 50.0
+    """Publish frequency for MuJoCo diagnostic metrics."""
 
     # Teleop/Device Configuration
     body_control_device: str = "dummy"

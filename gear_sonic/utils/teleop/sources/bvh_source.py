@@ -457,6 +457,7 @@ def build_full_body_reference_from_skeleton_frame(
     *,
     frame_index: int | None = None,
     lower_body_retarget_scale: float = 0.0,
+    smpl_joints_source: str = "skeleton",
     smpl_joints: np.ndarray | None = None,
     body_quat_w: np.ndarray | None = None,
     body_pos_w: np.ndarray | None = None,
@@ -491,7 +492,7 @@ def build_full_body_reference_from_skeleton_frame(
         ],
         lower_body_retarget_scale=max(0.0, float(lower_body_retarget_scale)),
     )
-    reference = _build_full_body_reference(motion, 0)
+    reference = _build_full_body_reference(motion, 0, smpl_joints_source=smpl_joints_source)
     smpl_joints_np = reference.smpl_joints if smpl_joints is None else smpl_joints
     return FullBodyReference(
         smpl_joints=smpl_joints_np,
@@ -505,7 +506,109 @@ def build_full_body_reference_from_skeleton_frame(
     )
 
 
-def _build_full_body_reference(motion: BvhMotion, frame_idx: int) -> FullBodyReference:
+def _smpl_joints_from_model(smpl_pose: np.ndarray, root_quat_wxyz: np.ndarray) -> np.ndarray:
+    """SMPL body-model FK -> root-local canonical joints.
+
+    Mirrors PICO's ``process_smpl_joints``: drive the SMPL model with the
+    retargeted local pose so ``smpl_joints`` carry the canonical SMPL skeleton
+    (fixed bone lengths, no degenerate joints), matching the distribution the
+    deploy SMPL encoder was trained on. This is the fix for the raw-position
+    path, whose ``smpl_joints`` inherit the mocap subject's bone lengths and the
+    joint-alias collapse (see diagnose_smpl_joints_gap.py). torch is imported
+    lazily so the raw-skeleton path stays torch-free.
+    """
+    import torch
+
+    from gear_sonic.trl.utils.torch_transform import (
+        angle_axis_to_quaternion,
+        compute_human_joints,
+        quat_apply,
+        quat_inv,
+        quaternion_to_angle_axis,
+    )
+
+    try:
+        from gear_sonic.isaac_utils.rotations import remove_smpl_base_rot, smpl_root_ytoz_up
+    except Exception:  # pragma: no cover - optional
+        remove_smpl_base_rot = None
+        smpl_root_ytoz_up = None
+
+    body_pose = torch.from_numpy(
+        np.asarray(smpl_pose, dtype=np.float32).reshape(-1)
+    ).unsqueeze(0)  # (1, 63)
+    root_rotvec = _rotation_from_wxyz(root_quat_wxyz).as_rotvec().astype(np.float32)
+    global_orient = torch.from_numpy(root_rotvec).unsqueeze(0)  # (1, 3)
+
+    global_orient_quat = angle_axis_to_quaternion(global_orient)
+    if smpl_root_ytoz_up is not None:
+        global_orient_quat = smpl_root_ytoz_up(global_orient_quat)
+    global_orient_new = quaternion_to_angle_axis(global_orient_quat)
+    joints = compute_human_joints(body_pose=body_pose[..., :63], global_orient=global_orient_new)
+    if remove_smpl_base_rot is not None:
+        global_orient_quat = remove_smpl_base_rot(global_orient_quat, w_last=False)
+    goq_inv = quat_inv(global_orient_quat).unsqueeze(1).repeat(1, joints.shape[1], 1)
+    smpl_joints_local = quat_apply(goq_inv, joints)
+    return smpl_joints_local[0].detach().cpu().numpy().astype(np.float32)
+
+
+_CANONICAL_BONE_GEOMETRY: tuple[np.ndarray, np.ndarray] | None = None
+
+
+def _canonical_bone_geometry() -> tuple[np.ndarray, np.ndarray]:
+    """Cached canonical SMPL bone lengths (24,) and rest bone directions (24, 3)."""
+    global _CANONICAL_BONE_GEOMETRY
+    if _CANONICAL_BONE_GEOMETRY is None:
+        import torch
+
+        from gear_sonic.trl.utils.torch_transform import compute_human_joints
+
+        rest = (
+            compute_human_joints(body_pose=torch.zeros(1, 63), global_orient=torch.zeros(1, 3))[0]
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(np.float32)
+        )
+        lengths = np.zeros(24, dtype=np.float32)
+        directions = np.zeros((24, 3), dtype=np.float32)
+        for smpl_idx in range(24):
+            parent = SMPL_PARENT_INDICES[smpl_idx]
+            if parent < 0:
+                continue
+            bone = rest[smpl_idx] - rest[parent]
+            length = float(np.linalg.norm(bone))
+            lengths[smpl_idx] = length
+            if length > 1e-8:
+                directions[smpl_idx] = bone / length
+        _CANONICAL_BONE_GEOMETRY = (lengths, directions)
+    return _CANONICAL_BONE_GEOMETRY
+
+
+def _smpl_joints_canonical_rescale(raw_smpl_joints: np.ndarray) -> np.ndarray:
+    """Impose canonical SMPL bone lengths on the mocap skeleton, keeping directions.
+
+    The raw skeleton carries the correct per-bone directions from the mocap but the
+    subject's own bone lengths and the joint-alias collapse (zero-length bones).
+    Walking the SMPL tree with canonical lengths along the raw directions yields
+    smpl_joints in the canonical SMPL skeleton the deploy encoder was trained on,
+    without any rotation retargeting. Collapsed bones (near-zero raw direction) fall
+    back to the canonical rest direction.
+    """
+    lengths, directions = _canonical_bone_geometry()
+    raw = np.asarray(raw_smpl_joints, dtype=np.float32)
+    out = np.zeros((24, 3), dtype=np.float32)
+    for smpl_idx in range(1, 24):
+        parent = SMPL_PARENT_INDICES[smpl_idx]
+        bone = raw[smpl_idx] - raw[parent]
+        norm = float(np.linalg.norm(bone))
+        direction = bone / norm if norm > 1e-4 else directions[smpl_idx]
+        out[smpl_idx] = out[parent] + lengths[smpl_idx] * direction
+    return out.astype(np.float32)
+
+
+def _build_full_body_reference(
+    motion: BvhMotion, frame_idx: int, smpl_joints_source: str = "skeleton"
+) -> FullBodyReference:
     smpl_joints = np.zeros((24, 3), dtype=np.float32)
     smpl_pose = np.zeros((21, 3), dtype=np.float32)
 
@@ -550,6 +653,16 @@ def _build_full_body_reference(motion: BvhMotion, frame_idx: int) -> FullBodyRef
         else:
             local_rot = root_inv * child_rot
         smpl_pose[smpl_idx - 1] = local_rot.as_rotvec().astype(np.float32)
+
+    if smpl_joints_source == "smpl_model":
+        smpl_joints = _smpl_joints_from_model(smpl_pose, root_quat_wxyz)
+    elif smpl_joints_source == "canonical":
+        smpl_joints = _smpl_joints_canonical_rescale(smpl_joints)
+    elif smpl_joints_source != "skeleton":
+        raise ValueError(
+            f"unsupported smpl_joints_source {smpl_joints_source!r}; "
+            "expected 'skeleton', 'smpl_model', or 'canonical'"
+        )
 
     joint_pos = smpl_pose_to_g1_wrist_joint_pos(smpl_pose)
     if motion.lower_body_retarget_scale > 0.0:

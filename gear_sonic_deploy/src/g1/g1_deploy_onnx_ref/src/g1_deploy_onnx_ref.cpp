@@ -2162,7 +2162,8 @@ class G1Deploy {
       std::string zmq_out_topic = "g1_debug",
       bool enable_motion_recording = false,
       std::array<double, 3> initial_compliance = {0.05, 0.05, 0.0},
-      double initial_max_close_ratio = 1.0)
+      double initial_max_close_ratio = 1.0,
+      int domain_id = 0)
       : time_(0.0),
         publish_dt_(0.002),
         control_dt_(0.02),
@@ -2185,7 +2186,9 @@ class G1Deploy {
         planner_path(planner_file_path) {
       
       // Initialize ChannelFactory
-      ChannelFactory::Instance()->Init(0, networkInterface);
+      ChannelFactory::Instance()->Init(domain_id, networkInterface);
+      std::cout << "[INFO] Unitree DDS initialized on domain " << domain_id
+                << " interface " << networkInterface << std::endl;
 
       // Initialize Dex3 hands (ChannelFactory already initialized above)
       dex3_hands_.initialize("");
@@ -4124,6 +4127,7 @@ int main(int argc, char const* argv[]) {
     std::cout << "  --encoder-file <path>: specify encoder ONNX file (optional)" << std::endl;
     std::cout << "  --planner-precision <16|32>: specify precision to run the planner model at (default: 16)" << std::endl;
     std::cout << "  --policy-precision <16|32>: specify precision to run the policy model at (default: 32)" << std::endl;
+    std::cout << "  --domain-id <id>: Unitree DDS domain id for simulation/isolation (default: 0)" << std::endl;
     std::cout << "  --zmq-host <host>: ZMQ server host (default: localhost)" << std::endl;
     std::cout << "  --zmq-port <port>: ZMQ server port (default: 5556)" << std::endl;
     std::cout << "  --zmq-topic <topic>: ZMQ topic/prefix (default: pose)" << std::endl;
@@ -4157,6 +4161,7 @@ int main(int argc, char const* argv[]) {
   std::string modelFile = argv[2];
   std::string motionDataPath = argv[3];
   std::string plannerFile = "";
+  int domainId = 0;
 
   // Parse optional arguments
   bool disableCrcCheck = false;\
@@ -4287,6 +4292,15 @@ int main(int argc, char const* argv[]) {
       if (i + 1 < argc) { zmq_out_port = std::stoi(argv[i + 1]); i++; }
     } else if (std::string(argv[i]) == "--zmq-out-topic") {
       if (i + 1 < argc) { zmq_out_topic = argv[i + 1]; i++; }
+    } else if (std::string(argv[i]) == "--domain-id") {
+      if (i + 1 < argc) {
+        domainId = std::stoi(argv[i + 1]);
+        std::cout << "[INFO] Using Unitree DDS domain id: " << domainId << std::endl;
+        i++;
+      } else {
+        std::cerr << "Error: --domain-id requires an integer argument" << std::endl;
+        exit(1);
+      }
     } else if (std::string(argv[i]) == "--record-input-file") {
       if (i + 1 < argc) {
         recordInputFile = argv[i + 1];
@@ -4444,7 +4458,8 @@ int main(int argc, char const* argv[]) {
     zmq_out_topic,
     enableMotionRecording,
     initial_compliance,
-    initial_max_close_ratio
+    initial_max_close_ratio,
+    domainId
   );
   std::cout << "[DEBUG] G1Deploy object created successfully!" << std::endl;
   
@@ -4471,4 +4486,3 @@ int main(int argc, char const* argv[]) {
   std::cout << "[DEBUG] Program exiting normally..." << std::endl;
   return 0;
 }
-
