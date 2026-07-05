@@ -34,6 +34,8 @@ COORDINATE_FRAME=${COORDINATE_FRAME:-left_handed_yup}
 BONEDATA_POSITION_SCALE=${BONEDATA_POSITION_SCALE:-1.0}
 BONEDATA_INPUT_QUAT_ORDER=${BONEDATA_INPUT_QUAT_ORDER:-xyzw}
 BONEDATA_ROTATION_MODE=${BONEDATA_ROTATION_MODE:-input}
+BVH_UNIT_SCALE=${BVH_UNIT_SCALE:-0.01}
+BVH_KEEP_YUP=${BVH_KEEP_YUP:-0}
 POSE_PROTOCOL_VERSION=${POSE_PROTOCOL_VERSION:-1}
 REPLACE=${REPLACE:-1}
 MODE=${MODE:-all}
@@ -44,6 +46,7 @@ ISAAC_STATE_ENDPOINT=${ISAAC_STATE_ENDPOINT:-}
 SIM_PY=${SIM_PY:-${REPO_ROOT}/.venv_sim/bin/python}
 TELEOP_PY=${TELEOP_PY:-${REPO_ROOT}/.venv_teleop/bin/python}
 SENDER_SCRIPT=${SENDER_SCRIPT:-${REPO_ROOT}/gear_sonic/scripts/sony_bonedata_json_stream_sender.py}
+BVH_SENDER_SCRIPT=${BVH_SENDER_SCRIPT:-${REPO_ROOT}/gear_sonic/scripts/bvh_stream_sender.py}
 MANAGER_SCRIPT=${MANAGER_SCRIPT:-${REPO_ROOT}/gear_sonic/scripts/mocap_manager_server.py}
 MANAGER_EXTRA_ARGS=${MANAGER_EXTRA_ARGS:-}
 DEPLOY_ROOT=${DEPLOY_ROOT:-${REPO_ROOT}/gear_sonic_deploy}
@@ -85,6 +88,8 @@ Environment overrides:
   BONEDATA_POSITION_SCALE=${BONEDATA_POSITION_SCALE}
   BONEDATA_INPUT_QUAT_ORDER=${BONEDATA_INPUT_QUAT_ORDER}
   BONEDATA_ROTATION_MODE=${BONEDATA_ROTATION_MODE}
+  BVH_UNIT_SCALE=${BVH_UNIT_SCALE}           # BVH sender: cm->m scale (default 0.01)
+  BVH_KEEP_YUP=${BVH_KEEP_YUP}               # BVH sender: 1=no y-up->z-up conversion
   POSE_PROTOCOL_VERSION=${POSE_PROTOCOL_VERSION}
   REPLACE=${REPLACE}
 
@@ -98,6 +103,8 @@ Examples:
   $0 --print-sender-command /home/nolo/saveBoneData_Yup20260702.json
   COORDINATE_FRAME=sonic_zup $0 /path/to/saveBoneData.json
   POSE_PROTOCOL_VERSION=3 $0 /home/nolo/saveBoneData_Yup20260702.json
+  POSE_PROTOCOL_VERSION=3 $0 /path/to/mocopi_recording.bvh
+  BVH_KEEP_YUP=1 POSE_PROTOCOL_VERSION=3 $0 /path/to/recording.bvh
   tmux kill-session -t ${SESSION}
 EOF
 }
@@ -249,6 +256,19 @@ if [[ "${MODE}" == "sender" && "${SESSION_WAS_SET}" == "0" ]]; then
   SESSION=sonic_json_${BACKEND}_sender
 fi
 
+# A .bvh input file switches the sender to bvh_stream_sender.py (mocopi-skeleton
+# BVH replay); everything downstream stays the same. v3 keeps sony_pico on the
+# manager side (it accepts bvh_stream_v1 packets), v1 keeps the native
+# bvh_stream retarget line.
+INPUT_KIND=json
+if [[ "${JSON_FILE,,}" == *.bvh ]]; then
+  INPUT_KIND=bvh
+fi
+SONY_PICO_BVH_FRAME=sonic_zup
+if [[ "${BVH_KEEP_YUP}" == "1" ]]; then
+  SONY_PICO_BVH_FRAME=bvh_yup
+fi
+
 LOG_DIR=${LOG_DIR:-${REPO_ROOT}/logs/sony_json_${BACKEND}_${SESSION}}
 RUNTIME_DIR=${RUNTIME_DIR:-/tmp/sony_json_${BACKEND}_${SESSION}}
 
@@ -256,33 +276,54 @@ quote_arg() {
   printf "%q" "$1"
 }
 
+build_sender_args() {
+  if [[ "${INPUT_KIND}" == "bvh" ]]; then
+    ACTIVE_SENDER_SCRIPT="${BVH_SENDER_SCRIPT}"
+    SENDER_ARGS="--bvh-file $(quote_arg "${JSON_FILE}") \\
+  --host 127.0.0.1 \\
+  --port $(quote_arg "${BVH_STREAM_PORT}") \\
+  --fps $(quote_arg "${FPS}") \\
+  --unit-scale $(quote_arg "${BVH_UNIT_SCALE}") \\
+  --loop \\
+  --log-interval-s 1.0"
+    if [[ "${BVH_KEEP_YUP}" == "1" ]]; then
+      SENDER_ARGS="${SENDER_ARGS} \\
+  --no-y-up-to-z-up"
+    fi
+  else
+    ACTIVE_SENDER_SCRIPT="${SENDER_SCRIPT}"
+    SENDER_ARGS="--json-file $(quote_arg "${JSON_FILE}") \\
+  --host 127.0.0.1 \\
+  --port $(quote_arg "${BVH_STREAM_PORT}") \\
+  --fps $(quote_arg "${FPS}") \\
+  --loop \\
+  --log-interval-s 1.0"
+  fi
+}
+build_sender_args
+
 print_sender_command() {
   cat <<EOF
 mkdir -p $(quote_arg "${LOG_DIR}")
 cd $(quote_arg "${REPO_ROOT}")
 export PYTHONUNBUFFERED=1
 export PYTHONPATH=$(quote_arg "${REPO_ROOT}"):\${PYTHONPATH:-}
-$(quote_arg "${TELEOP_PY}") -u $(quote_arg "${SENDER_SCRIPT}") \\
-  --json-file $(quote_arg "${JSON_FILE}") \\
-  --host 127.0.0.1 \\
-  --port $(quote_arg "${BVH_STREAM_PORT}") \\
-  --fps $(quote_arg "${FPS}") \\
-  --loop \\
-  --log-interval-s 1.0 \\
+$(quote_arg "${TELEOP_PY}") -u $(quote_arg "${ACTIVE_SENDER_SCRIPT}") \\
+  ${SENDER_ARGS} \\
   2>&1 | tee $(quote_arg "${LOG_DIR}/json_sender.log")
 EOF
 }
 
 if [[ "${MODE}" != "receiver" && ! -f "${JSON_FILE}" ]]; then
-  echo "ERROR: JSON file not found: ${JSON_FILE}" >&2
+  echo "ERROR: input file not found: ${JSON_FILE}" >&2
   exit 2
 fi
 if [[ ! -x "${TELEOP_PY}" ]]; then
   echo "ERROR: teleop python not executable: ${TELEOP_PY}" >&2
   exit 2
 fi
-if [[ "${MODE}" != "receiver" && ! -f "${SENDER_SCRIPT}" ]]; then
-  echo "ERROR: sender script not found: ${SENDER_SCRIPT}" >&2
+if [[ "${MODE}" != "receiver" && ! -f "${ACTIVE_SENDER_SCRIPT}" ]]; then
+  echo "ERROR: sender script not found: ${ACTIVE_SENDER_SCRIPT}" >&2
   exit 2
 fi
 if [[ "${MODE}" == "print_sender" ]]; then
@@ -387,7 +428,8 @@ EOF
     # coordinate-frame and rotation-mode are ignored
     SOURCE_SPECIFIC_ARGS="--bvh-stream-port ${BVH_STREAM_PORT} \\
   --bvh-stream-bonedata-position-scale ${BONEDATA_POSITION_SCALE} \\
-  --bvh-stream-bonedata-input-quat-order ${BONEDATA_INPUT_QUAT_ORDER}"
+  --bvh-stream-bonedata-input-quat-order ${BONEDATA_INPUT_QUAT_ORDER} \\
+  --sony-pico-bvh-frame ${SONY_PICO_BVH_FRAME}"
   else
     SOURCE_TYPE=bvh_stream
     POSE_ENCODER_MODE=g1
@@ -456,13 +498,8 @@ set -o pipefail
 cd "${REPO_ROOT}"
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="${REPO_ROOT}:\${PYTHONPATH:-}"
-"${TELEOP_PY}" -u "${SENDER_SCRIPT}" \
-  --json-file "${JSON_FILE}" \
-  --host 127.0.0.1 \
-  --port "${BVH_STREAM_PORT}" \
-  --fps "${FPS}" \
-  --loop \
-  --log-interval-s 1.0 \
+"${TELEOP_PY}" -u "${ACTIVE_SENDER_SCRIPT}" \\
+  ${SENDER_ARGS} \\
   2>&1 | tee "${LOG_DIR}/json_sender.log"
 status=\$?
 echo
@@ -483,7 +520,15 @@ fi
 echo "[sonic-json-mujoco] session=${SESSION}"
 echo "[sonic-json-mujoco] backend=${BACKEND}"
 echo "[sonic-json-mujoco] mode=${MODE}"
-echo "[sonic-json-mujoco] json=${JSON_FILE}"
+echo "[sonic-json-mujoco] input_kind=${INPUT_KIND}"
+echo "[sonic-json-mujoco] input_file=${JSON_FILE}"
+if [[ "${INPUT_KIND}" == "bvh" ]]; then
+  echo "[sonic-json-mujoco] bvh_unit_scale=${BVH_UNIT_SCALE}"
+  echo "[sonic-json-mujoco] bvh_keep_yup=${BVH_KEEP_YUP}"
+  if [[ "${POSE_PROTOCOL_VERSION}" == "3" ]]; then
+    echo "[sonic-json-mujoco] sony_pico_bvh_frame=${SONY_PICO_BVH_FRAME}"
+  fi
+fi
 echo "[sonic-json-mujoco] receiver_coordinate_frame=${COORDINATE_FRAME}"
 echo "[sonic-json-mujoco] receiver_position_scale=${BONEDATA_POSITION_SCALE}"
 echo "[sonic-json-mujoco] ports: bvh_stream=${BVH_STREAM_PORT} zmq=${MOCAP_ZMQ_PORT} debug=${DEBUG_PORT}"
@@ -514,6 +559,6 @@ echo "[sonic-json-mujoco] started tmux session: ${SESSION}"
 echo "[sonic-json-mujoco] attach with: tmux attach-session -t ${SESSION}"
 echo "[sonic-json-mujoco] stop with: tmux kill-session -t ${SESSION}"
 if [[ "${MODE}" == "receiver" ]]; then
-  echo "[sonic-json-mujoco] JSON sender was not started. Start it later with:"
+  echo "[sonic-json-mujoco] Input sender was not started. Start it later with:"
   echo "  ${SCRIPT_DIR}/$(basename "$0") --sender-only ${JSON_FILE}"
 fi
