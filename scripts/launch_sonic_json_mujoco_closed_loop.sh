@@ -34,6 +34,7 @@ COORDINATE_FRAME=${COORDINATE_FRAME:-left_handed_yup}
 BONEDATA_POSITION_SCALE=${BONEDATA_POSITION_SCALE:-1.0}
 BONEDATA_INPUT_QUAT_ORDER=${BONEDATA_INPUT_QUAT_ORDER:-xyzw}
 BONEDATA_ROTATION_MODE=${BONEDATA_ROTATION_MODE:-input}
+POSE_PROTOCOL_VERSION=${POSE_PROTOCOL_VERSION:-1}
 REPLACE=${REPLACE:-1}
 MODE=${MODE:-all}
 NO_ISAACLAB=${NO_ISAACLAB:-0}
@@ -84,6 +85,7 @@ Environment overrides:
   BONEDATA_POSITION_SCALE=${BONEDATA_POSITION_SCALE}
   BONEDATA_INPUT_QUAT_ORDER=${BONEDATA_INPUT_QUAT_ORDER}
   BONEDATA_ROTATION_MODE=${BONEDATA_ROTATION_MODE}
+  POSE_PROTOCOL_VERSION=${POSE_PROTOCOL_VERSION}
   REPLACE=${REPLACE}
 
 Examples:
@@ -95,6 +97,7 @@ Examples:
   $0 --sender-only /home/nolo/saveBoneData_Yup20260702.json
   $0 --print-sender-command /home/nolo/saveBoneData_Yup20260702.json
   COORDINATE_FRAME=sonic_zup $0 /path/to/saveBoneData.json
+  POSE_PROTOCOL_VERSION=3 $0 /home/nolo/saveBoneData_Yup20260702.json
   tmux kill-session -t ${SESSION}
 EOF
 }
@@ -313,6 +316,7 @@ if [[ "${BACKEND}" == "isaaclab" && "${MODE}" != "sender" && "${MODE}" != "print
     BONEDATA_POSITION_SCALE="${BONEDATA_POSITION_SCALE}" \
     BONEDATA_INPUT_QUAT_ORDER="${BONEDATA_INPUT_QUAT_ORDER}" \
     BONEDATA_ROTATION_MODE="${BONEDATA_ROTATION_MODE}" \
+    POSE_PROTOCOL_VERSION="${POSE_PROTOCOL_VERSION}" \
     REPLACE="${REPLACE}" \
     "${SCRIPT_DIR}/launch_sonic_json_isaaclab_closed_loop.sh" "${isaaclab_args[@]}" --json-file "${JSON_FILE}"
   exit 0
@@ -374,6 +378,15 @@ echo "[sonic-json-mujoco] mujoco exited with status \${status}"
 exec bash
 EOF
 
+  # v3 requires smpl encoder mode and --allow-sony-pose-v3
+  if [[ "${POSE_PROTOCOL_VERSION}" == "3" ]]; then
+    POSE_ENCODER_MODE=smpl
+    POSE_V3_FLAG="--allow-sony-pose-v3"
+  else
+    POSE_ENCODER_MODE=g1
+    POSE_V3_FLAG=""
+  fi
+
   cat > "${RUNTIME_DIR}/manager.sh" <<EOF
 #!/usr/bin/env bash
 set -o pipefail
@@ -390,8 +403,9 @@ export PYTHONPATH="${REPO_ROOT}:\${PYTHONPATH:-}"
   --bvh-stream-bonedata-rotation-mode "${BONEDATA_ROTATION_MODE}" \
   --control-mode pose \
   --pose-window-size 80 \
-  --pose-encoder-mode g1 \
-  --pose-protocol-version 1 \
+  --pose-encoder-mode ${POSE_ENCODER_MODE} \
+  --pose-protocol-version "${POSE_PROTOCOL_VERSION}" \
+  ${POSE_V3_FLAG} \
   --zmq-port "${MOCAP_ZMQ_PORT}" \
   --log-interval-s 1.0 ${MANAGER_EXTRA_ARGS} \
   2>&1 | tee "${LOG_DIR}/manager.log"

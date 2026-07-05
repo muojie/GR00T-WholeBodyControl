@@ -15,6 +15,7 @@ COORDINATE_FRAME=${COORDINATE_FRAME:-left_handed_yup}
 BONEDATA_POSITION_SCALE=${BONEDATA_POSITION_SCALE:-1.0}
 BONEDATA_INPUT_QUAT_ORDER=${BONEDATA_INPUT_QUAT_ORDER:-xyzw}
 BONEDATA_ROTATION_MODE=${BONEDATA_ROTATION_MODE:-input}
+POSE_PROTOCOL_VERSION=${POSE_PROTOCOL_VERSION:-1}
 
 ISAACLAB_ROOT=${ISAACLAB_ROOT:-/home/nolo/xiaoyang_IssacLab/IsaacLab}
 CONDA_SH=${CONDA_SH:-/home/nolo/miniconda3/etc/profile.d/conda.sh}
@@ -67,6 +68,11 @@ Environment overrides:
   DEBUG_PORT=${DEBUG_PORT}
   STATE_PORT=${STATE_PORT}
   FPS=${FPS}
+  COORDINATE_FRAME=${COORDINATE_FRAME}
+  BONEDATA_POSITION_SCALE=${BONEDATA_POSITION_SCALE}
+  BONEDATA_INPUT_QUAT_ORDER=${BONEDATA_INPUT_QUAT_ORDER}
+  BONEDATA_ROTATION_MODE=${BONEDATA_ROTATION_MODE}
+  POSE_PROTOCOL_VERSION=${POSE_PROTOCOL_VERSION}
 
 Examples:
   $0 /home/nolo/saveBoneData_Yup20260702.json
@@ -74,6 +80,7 @@ Examples:
   $0 --no-json-sender
   $0 --no-isaaclab --no-json-sender --isaac-state-host 192.168.1.20
   $0 --sender-only /home/nolo/saveBoneData_Yup20260702.json
+  POSE_PROTOCOL_VERSION=3 $0 /home/nolo/saveBoneData_Yup20260702.json
 EOF
 }
 
@@ -357,6 +364,7 @@ launcher_args=(
   --bvh-stream-bonedata-position-scale "${BONEDATA_POSITION_SCALE}" \
   --bvh-stream-bonedata-input-quat-order "${BONEDATA_INPUT_QUAT_ORDER}" \
   --bvh-stream-bonedata-rotation-mode "${BONEDATA_ROTATION_MODE}" \
+  --pose-protocol-version "${POSE_PROTOCOL_VERSION}" \
   --zmq-port "${MOCAP_ZMQ_PORT}" \
   --debug-port "${DEBUG_PORT}" \
   --state-port "${STATE_PORT}"

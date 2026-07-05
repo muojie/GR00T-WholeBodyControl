@@ -225,6 +225,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-bvh-loop", action="store_true")
     parser.add_argument("--bvh-fps", type=float)
     parser.add_argument("--pose-window-size", type=int, default=80)
+    parser.add_argument("--pose-protocol-version", type=int, default=1, help="POSE protocol version (1 or 3)")
     parser.add_argument("--mocap-log-interval-s", type=float, default=1.0)
 
     parser.add_argument("--lowstate-hz", type=float, default=500.0)
@@ -493,6 +494,15 @@ def _deploy_command(args: argparse.Namespace) -> str:
 
 def _mocap_manager_command(args: argparse.Namespace) -> str:
     python = args.repo_root / ".venv_teleop" / "bin" / "python"
+
+    # v3 requires smpl encoder mode and --allow-sony-pose-v3
+    if args.pose_protocol_version == 3:
+        pose_encoder_mode = "smpl"
+        extra_v3_args = ["--allow-sony-pose-v3"]
+    else:
+        pose_encoder_mode = "g1"
+        extra_v3_args = []
+
     mocap_args = [
         python,
         "-u",
@@ -516,9 +526,10 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
         "--pose-window-size",
         str(args.pose_window_size),
         "--pose-encoder-mode",
-        "g1",
+        pose_encoder_mode,
         "--pose-protocol-version",
-        "1",
+        str(args.pose_protocol_version),
+        *extra_v3_args,
         "--zmq-port",
         str(args.zmq_port),
         "--log-interval-s",
