@@ -699,11 +699,16 @@ class BvhG1PlaybackSource:
             body_pos_w=body_pos_w,
             body_quat_w=body_quat_w,
         )
+        _builder_src = str(self.retarget_config.smpl_joints_source or "").lower()
+        builder_smpl_joints_source = (
+            _builder_src if _builder_src in ("smpl_model", "canonical") else "skeleton"
+        )
         return build_full_body_reference_from_skeleton_frame(
             motion.joint_names,
             motion.world_positions[source_frame_idx],
             motion.world_quat_wxyz[source_frame_idx],
             frame_index=int(stream_frame_idx),
+            smpl_joints_source=builder_smpl_joints_source,
             smpl_joints=smpl_joints,
             body_quat_w=body_quat_w,
             body_pos_w=body_pos_w,
@@ -756,10 +761,15 @@ def _smpl_joints_for_sony_v3(
     body_quat_w: np.ndarray,
 ) -> np.ndarray | None:
     mode = str(source or "skeleton").strip().lower()
-    if mode == "skeleton":
+    if mode in ("skeleton", "smpl_model", "canonical"):
+        # skeleton -> raw positions; smpl_model -> SMPL FK; canonical -> canonical-length rescale.
+        # All three are produced inside build_full_body_reference_from_skeleton_frame.
         return None
     if mode != "g1_fk":
-        raise ValueError(f"unsupported smpl_joints_source {source!r}; expected 'g1_fk' or 'skeleton'")
+        raise ValueError(
+            f"unsupported smpl_joints_source {source!r}; "
+            "expected 'g1_fk', 'smpl_model', 'canonical', or 'skeleton'"
+        )
     if body_pos is None:
         return None
     return g1_body_pos14_world_to_smpl_joints(body_pos, body_pos_w, body_quat_w)

@@ -322,22 +322,26 @@ class BvhStreamUdpSource:
         )
         smpl_joints = None
         smpl_joints_source = str(self.retarget_config.smpl_joints_source or "skeleton").lower()
+        builder_smpl_joints_source = "skeleton"
         if smpl_joints_source == "g1_fk" and body_pos is not None:
             smpl_joints = g1_body_pos14_world_to_smpl_joints(
                 body_pos,
                 self._context.root_pos[0],
                 self._context.root_quat[0],
             )
+        elif smpl_joints_source in ("smpl_model", "canonical"):
+            builder_smpl_joints_source = smpl_joints_source
         elif smpl_joints_source != "skeleton":
             raise ValueError(
                 f"unsupported smpl_joints_source {self.retarget_config.smpl_joints_source!r}; "
-                "expected 'g1_fk' or 'skeleton'"
+                "expected 'g1_fk', 'smpl_model', 'canonical', or 'skeleton'"
             )
         full_body = build_full_body_reference_from_skeleton_frame(
             self._context.bvh_motion.joint_names,
             self._context.bvh_motion.world_positions[0],
             self._context.bvh_motion.world_quat_wxyz[0],
             frame_index=stream_frame_idx,
+            smpl_joints_source=builder_smpl_joints_source,
             smpl_joints=smpl_joints,
             body_quat_w=self._context.root_quat[0],
             body_pos_w=self._context.root_pos[0],
