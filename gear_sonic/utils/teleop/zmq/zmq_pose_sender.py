@@ -97,6 +97,7 @@ class PoseStreamPublisher:
         vr_orientation: np.ndarray | None = None,
         timestamp_s: float | None = None,
         catch_up: bool = True,
+        heading_increment: float | None = None,
     ) -> bool:
         resolved_frame_index = self._resolve_frame_index(reference, frame_index)
         if self._last_frame_index == resolved_frame_index:
@@ -130,6 +131,8 @@ class PoseStreamPublisher:
             data["vr_position"] = np.asarray(vr_position, dtype=np.float32).reshape(9)
         if vr_orientation is not None:
             data["vr_orientation"] = np.asarray(vr_orientation, dtype=np.float32).reshape(12)
+        if heading_increment is not None:
+            data["heading_increment"] = np.array([heading_increment], dtype=np.float32)
 
         socket.send(pack_pose_message(data, topic="pose", version=self.protocol_version))
         self.sent_messages += 1
@@ -144,6 +147,7 @@ class PoseStreamPublisher:
         vr_orientation: np.ndarray | None = None,
         timestamp_s: float | None = None,
         catch_up: bool = True,
+        heading_increment: float | None = None,
     ) -> bool:
         """Send one full POSE window by holding the first available reference.
 
@@ -203,6 +207,8 @@ class PoseStreamPublisher:
             data["vr_position"] = np.asarray(vr_position, dtype=np.float32).reshape(9)
         if vr_orientation is not None:
             data["vr_orientation"] = np.asarray(vr_orientation, dtype=np.float32).reshape(12)
+        if heading_increment is not None:
+            data["heading_increment"] = np.array([heading_increment], dtype=np.float32)
 
         socket.send(pack_pose_message(data, topic="pose", version=self.protocol_version))
         self.sent_messages += 1

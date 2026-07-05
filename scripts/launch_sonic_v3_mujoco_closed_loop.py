@@ -228,6 +228,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bvh-g1-joint-filter-alpha", type=float, default=0.35)
     parser.add_argument("--bvh-g1-joint-delta-limit-scale", type=float, default=0.8)
     parser.add_argument("--bvh-g1-min-root-height", type=float, default=0.74)
+    parser.add_argument(
+        "--bvh-g1-no-align-root",
+        action="store_true",
+        help="Do not align BVH root to first frame; preserve global root translation for JSON playback"
+    )
+    parser.add_argument(
+        "--bvh-g1-smpl-joints-source",
+        choices=("g1_fk", "skeleton", "smpl_model", "canonical"),
+        default="g1_fk",
+        help="smpl_joints source for Sony/BVH POSE v3 (forwarded to mocap_manager_server.py)",
+    )
 
     parser.add_argument("--decoder", type=Path)
     parser.add_argument("--encoder", type=Path)
@@ -418,7 +429,7 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
         "--pose-protocol-version",
         args.pose_protocol_version,
         "--bvh-g1-smpl-joints-source",
-        "g1_fk",
+        args.bvh_g1_smpl_joints_source,
         "--pose-filter-profile",
         args.pose_filter_profile,
         "--bvh-g1-retarget-scale",
@@ -468,6 +479,8 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
         mocap_args.append("--allow-sony-pose-v3")
     if args.bvh_stream_bonedata_local_root:
         mocap_args.append("--bvh-stream-bonedata-local-root")
+    if args.bvh_g1_no_align_root:
+        mocap_args.append("--bvh-g1-no-align-root")
     if not args.no_root_yaw_only:
         mocap_args.append("--pose-root-yaw-only")
     if args.pose_encoder_mode == "teleop":

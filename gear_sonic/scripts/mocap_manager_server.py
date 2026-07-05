@@ -491,6 +491,9 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
     planner_root_last_time_s: float | None = None
     planner_root_velocity_xy = np.zeros(2, dtype=np.float32)
 
+    # Track root state for POSE heading_increment calculation
+    pose_last_yaw: float | None = None
+
     try:
         while True:
             loop_start = time.time()
@@ -542,6 +545,29 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
                                 _send_manager_state(socket, current_stream_mode, False, False)
                                 break
                     if pose_stream_enabled and frame.full_body is not None:
+                        # Calculate heading_increment for POSE messages (like pico_manager)
+                        heading_increment = None
+                        if frame.full_body.body_quat_w is not None:
+                            from scipy.spatial.transform import Rotation
+                            quat_wxyz = frame.full_body.body_quat_w.reshape(4)
+                            rot = Rotation.from_quat(
+                                [quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]]
+                            )  # scipy uses xyzw
+                            euler = rot.as_euler('xyz', degrees=False)
+                            current_yaw = float(euler[2])  # z-axis rotation is yaw
+
+                            if pose_last_yaw is not None:
+                                # Calculate yaw change, handling wrap-around
+                                delta_yaw = current_yaw - pose_last_yaw
+                                # Normalize to [-pi, pi]
+                                while delta_yaw > np.pi:
+                                    delta_yaw -= 2 * np.pi
+                                while delta_yaw < -np.pi:
+                                    delta_yaw += 2 * np.pi
+                                heading_increment = float(delta_yaw)
+
+                            pose_last_yaw = current_yaw
+
                         if (
                             pose_bootstrap_enabled
                             and pose_publisher.sent_messages == 0
@@ -554,6 +580,7 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
                                 vr_position=vr_position,
                                 vr_orientation=vr_orientation,
                                 timestamp_s=frame.host_time_s,
+                                heading_increment=heading_increment,
                             )
                         else:
                             pose_sent = pose_publisher.publish(
@@ -563,6 +590,7 @@ def run_mocap_manager(args: argparse.Namespace) -> None:
                                 vr_position=vr_position,
                                 vr_orientation=vr_orientation,
                                 timestamp_s=frame.host_time_s,
+                                heading_increment=heading_increment,
                             )
 
             planner_from_root_desc = ""
@@ -1063,11 +1091,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--bvh-g1-smpl-joints-source",
-        choices=("g1_fk", "skeleton"),
+        choices=("g1_fk", "skeleton", "smpl_model", "canonical"),
         default="g1_fk",
         help=(
             "SMPL joints sent in Sony/BVH POSE v3. g1_fk projects the validated v1 G1 FK "
-            "keypoints into SMPL slots; skeleton keeps the raw BVH/mocopi skeleton joints."
+            "keypoints into SMPL slots; skeleton keeps the raw BVH/mocopi skeleton joints; "
+            "smpl_model drives the SMPL body model (PICO-equivalent FK, needs rotation "
+            "retargeting); canonical keeps the mocap bone directions but imposes canonical "
+            "SMPL bone lengths and repairs collapsed joints (recommended for Sony/BVH)."
         ),
     )
     parser.add_argument("--pkl-file", help="Robot-filtered G1 PKL file to replay when --source pkl")
