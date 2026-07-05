@@ -65,19 +65,60 @@ def load_sony_bonedata_json_raw(
     source_fps: float,
     playback_fps: float,
 ) -> SonyBoneDataJsonMotion:
-    """Load saveBoneData JSON and split it into raw per-frame payload slices."""
+    """Load saveBoneData JSON and split it into raw per-frame payload slices.
+
+    Supports two formats:
+    1. saveBoneData (flat): {"name": [...], "position": [...], "rotation": [...]}
+    2. saveBoneAllData (nested): {"boneInfos": [{"name": [...], "position": [...], ...}, ...]}
+    """
     with json_file.open("r", encoding="utf-8-sig") as file:
         data = json.load(file)
 
     if not isinstance(data, dict):
         raise ValueError(f"{json_file} must contain a JSON object")
-    for key in ("name", "position", "rotation"):
-        if key not in data:
-            raise ValueError(f"{json_file} missing required field {key!r}")
 
-    names = data["name"]
-    positions = data["position"]
-    rotations = data["rotation"]
+    # Detect format: saveBoneAllData (nested) vs saveBoneData (flat)
+    if "boneInfos" in data:
+        # saveBoneAllData format: extract and flatten boneInfos array
+        bone_infos = data["boneInfos"]
+        if not isinstance(bone_infos, list) or len(bone_infos) == 0:
+            raise ValueError(f"{json_file} boneInfos must be a non-empty list")
+
+        # Extract first frame to get joint names
+        first_frame = bone_infos[0]
+        if not isinstance(first_frame, dict):
+            raise ValueError(f"{json_file} boneInfos[0] must be a dict")
+        for key in ("name", "position", "rotation"):
+            if key not in first_frame:
+                raise ValueError(f"{json_file} boneInfos[0] missing required field {key!r}")
+
+        # Flatten all frames into flat arrays
+        names = []
+        positions = []
+        rotations = []
+        for frame_idx, frame in enumerate(bone_infos):
+            if not isinstance(frame, dict):
+                raise ValueError(f"{json_file} boneInfos[{frame_idx}] must be a dict")
+            frame_names = frame.get("name")
+            frame_positions = frame.get("position")
+            frame_rotations = frame.get("rotation")
+            if not isinstance(frame_names, list):
+                raise ValueError(f"{json_file} boneInfos[{frame_idx}].name must be a list")
+            if not isinstance(frame_positions, list):
+                raise ValueError(f"{json_file} boneInfos[{frame_idx}].position must be a list")
+            if not isinstance(frame_rotations, list):
+                raise ValueError(f"{json_file} boneInfos[{frame_idx}].rotation must be a list")
+            names.extend(frame_names)
+            positions.extend(frame_positions)
+            rotations.extend(frame_rotations)
+    else:
+        # saveBoneData format: use top-level fields directly
+        for key in ("name", "position", "rotation"):
+            if key not in data:
+                raise ValueError(f"{json_file} missing required field {key!r}")
+        names = data["name"]
+        positions = data["position"]
+        rotations = data["rotation"]
     if not isinstance(names, list) or not isinstance(positions, list) or not isinstance(rotations, list):
         raise ValueError("name, position, and rotation must all be lists")
     if joints_per_frame <= 0:
