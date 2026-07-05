@@ -4,7 +4,7 @@
 
 当前有两条稳定验证链路：`planner` topic 的 VR3PT 三点验证，以及 `pose` topic 的 BVH-G1 joint reference 验证。BVH-G1 主线推荐使用 `bvh_stream_sender.py -> --source bvh_stream -> POSE v1 + encoder_mode=g1`，这样 MuJoCo、deploy、manager 可以常驻，只重启 sender 就能换 BVH；单进程回归用 `--source bvh_g1`。
 
-POSE 路线不要混写：当前主线见 [Sony mocopi / BVH-G1 POSE v1 路线](mocopi_pose_bvh_g1_v1_route.md)；更接近 SONIC 原生人体 pose encoder 的研究线见 [Sony mocopi / SMPL POSE v3 路线](mocopi_pose_smpl_v3_route.md)。
+POSE 路线不要混写：当前主线见 [Sony mocopi / BVH-G1 POSE v1 路线](mocopi_pose_bvh_g1_v1_route.md)；更接近 SONIC 原生人体 pose encoder 的研究线见 [Sony mocopi / SMPL POSE v3 路线](mocopi_pose_smpl_v3_route.md)，其中 `--source sony_pico` 直通线把 raw saveBoneData 交给 PICO 转换栈，是 v3 家族里语义最贴近 PICO 的入口。
 
 BVH 输入源也不要混写：`--source bvh` 是老的本地 BVH 文件回放/VR3PT/SMPL 调试入口；`--source bvh_g1` 是 manager 直接读本地 BVH 并输出 G1 joint reference；`--source bvh_stream` 是 manager 监听 UDP skeleton stream，由 `bvh_stream_sender.py` 负责读文件和发送。三者统一归入 [Sony mocopi / BVH-G1 POSE v1 路线](mocopi_pose_bvh_g1_v1_route.md) 的 BVH 输入源章节。
 
@@ -244,7 +244,7 @@ BVH source 会解析 hierarchy 和 motion 数据，执行 FK，并尽量保留 t
 
 | 参数 | 默认值 | 作用 |
 |------|--------|------|
-| `--source` | `mocopi` | 输入源，可选 `mocopi`、`bvh`、`bvh_g1`、`bvh_stream`、`pkl`、`joint_probe` |
+| `--source` | `mocopi` | 输入源，可选 `mocopi`、`bvh`、`bvh_g1`、`bvh_stream`、`sony_pico`、`pkl`、`joint_probe` |
 | `--mocopi-host` | `0.0.0.0` | UDP 绑定地址 |
 | `--mocopi-port` | `12351` | UDP 绑定端口 |
 | `--mocopi-format` | `auto` | 输入包格式，可选 `auto`、`binary`、`json` |

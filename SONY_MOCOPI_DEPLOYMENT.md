@@ -115,6 +115,24 @@ cd ~/GR00T-WholeBodyControl
 --mocopi-format json
 ```
 
+### 备选：saveBoneData 走 PICO 转换栈（POSE v3/smpl）
+
+如果上游是 `sony_bonedata_json_v1` raw 单帧流（`sony_bonedata_json_stream_sender.py` 或等价 app），可以改走 PICO SMPL 直通线，deploy 侧会按 protocol v3 自动进入 SMPL encoder：
+
+```bash
+.venv_teleop/bin/python -u gear_sonic/scripts/mocap_manager_server.py \
+  --source sony_pico \
+  --bvh-stream-port 12352 \
+  --control-mode pose \
+  --pose-window-size 80 \
+  --pose-protocol-version 3 \
+  --pose-encoder-mode smpl \
+  --target-fps 50 \
+  --zmq-port 5556
+```
+
+细节和已知限制见 `docs/source/tutorials/mocopi_pose_smpl_v3_route.md` 的 sony_pico 章节。
+
 成功标志：
 
 ```text

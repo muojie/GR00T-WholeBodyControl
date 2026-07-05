@@ -29,6 +29,7 @@ from gear_sonic.utils.teleop.sources import (
     JointProbePlaybackSource,
     MocopiUdpSource,
     RobotPklPlaybackSource,
+    SonyPicoSmplUdpSource,
     resolve_g1_isaaclab_joint_index,
 )
 from gear_sonic.utils.teleop.sources.sony_bonedata_json import (
@@ -311,6 +312,26 @@ def _create_source(args: argparse.Namespace):
             f"body_fk={int(not args.bvh_g1_no_body_fk)}, "
             f"smpl_joints={args.bvh_g1_smpl_joints_source}, "
             f"align_root={int(not args.bvh_g1_no_align_root)})"
+        )
+        return source, description
+
+    if args.source == "sony_pico":
+        source = SonyPicoSmplUdpSource(
+            bind_host=args.bvh_stream_host,
+            port=args.bvh_stream_port,
+            packet_format=args.bvh_stream_format,
+            recv_size=args.bvh_stream_recv_size,
+            position_scale=args.bvh_stream_bonedata_position_scale,
+            input_quat_order=args.bvh_stream_bonedata_input_quat_order,
+        )
+        description = (
+            f"listening for raw sony_bonedata_json_v1 UDP on "
+            f"{args.bvh_stream_host}:{args.bvh_stream_port} ({args.bvh_stream_format}); "
+            "converting Unity Y-up bones through the PICO SMPL stack "
+            f"(zflip basis, POSE v{args.pose_protocol_version}/"
+            f"{args.pose_encoder_mode}, "
+            f"scale={args.bvh_stream_bonedata_position_scale:g}, "
+            f"quat_order={args.bvh_stream_bonedata_input_quat_order})"
         )
         return source, description
 
@@ -709,7 +730,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a mocap-backed teleop ZMQ manager.")
     parser.add_argument(
         "--source",
-        choices=["mocopi", "bvh", "bvh_g1", "bvh_stream", "pkl", "joint_probe"],
+        choices=["mocopi", "bvh", "bvh_g1", "bvh_stream", "sony_pico", "pkl", "joint_probe"],
         default="mocopi",
     )
     parser.add_argument(
@@ -1300,7 +1321,7 @@ def _validate_args(
     user_set_target_fps: bool,
     user_set_pose_filter_profile: bool,
 ) -> None:
-    if args.source in {"pkl", "bvh_g1", "bvh_stream"}:
+    if args.source in {"pkl", "bvh_g1", "bvh_stream", "sony_pico"}:
         if args.control_mode != "pose":
             parser.error(f"--source {args.source} requires --control-mode pose")
         if not user_set_target_fps:
@@ -1310,6 +1331,15 @@ def _validate_args(
                 args.target_fps = args.bvh_fps or 50.0
             else:
                 args.target_fps = 50.0
+    if args.source == "sony_pico":
+        # This source *is* the PICO-stack SMPL line: raw Unity-frame BoneData
+        # converted by the PICO manager functions. Other protocol/encoder
+        # combinations have no meaning here.
+        if args.pose_protocol_version != 3 or args.pose_encoder_mode != "smpl":
+            parser.error(
+                "--source sony_pico requires --pose-protocol-version 3 "
+                "--pose-encoder-mode smpl (it always publishes the PICO-stack SMPL line)"
+            )
     if args.source == "pkl":
         if args.pose_protocol_version != 1:
             parser.error("--source pkl requires --pose-protocol-version 1")

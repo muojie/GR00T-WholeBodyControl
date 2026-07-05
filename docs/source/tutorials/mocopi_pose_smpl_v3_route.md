@@ -143,6 +143,41 @@ motion_joint_positions_wrists_10frame_step1
 
 因此不要用 BVH-G1 的调参结论覆盖 SMPL v3，也不要把 SMPL v3 的字段契约要求反推到 G1 v1。
 
+## sony_pico 直通线：saveBoneData 直接走 PICO 转换栈
+
+`--source sony_pico` 是 v3 家族的第三条 `smpl_joints/smpl_pose` 构造线，也是目前最接近 PICO 语义的一条：manager 直接接收 raw `sony_bonedata_json_v1` UDP 单帧包（Unity Y-up 原始数据，不做 sonic_zup 转换），把 27 bone 世界旋转按骨名搬进 24 个 SMPL 槽位，随后逐字调用 `pico_manager_thread_server.py` 的 `compute_from_body_poses` / `process_smpl_joints`，产出与 PICO 头显同构的 v3 字段。G1 腕关节 `joint_pos[23..28]` 由共享的 `smpl_pose_to_g1_wrist_joint_pos`（即 PICO 腕投影）生成，之前量化过的 Sony/PICO 腕语义差异（p95 2.25 rad）在这条线上不存在。
+
+转换链关键点（实现在 `gear_sonic/utils/teleop/sources/sony_pico_smpl_source.py`）：
+
+- **zflip 基变换必不可少**：`diag(1,1,-1)`，把 Unity 左手系转成 XRT SDK 交给 PICO 栈的右手约定。缺了它 yaw 转向全反、前平举变后举、前弯变后仰。
+- 27→24 直接搬全局旋转即可：mocopi bind frame 世界对齐，SMPL FK 只消费旋转并用标准 SMPL 骨长重建关节，骨架比例自动归一。
+- SMPL 22/23 hand 槽位复用 wrist bone，其局部旋转会被 `[:63]` 截断，无影响。
+
+离线验证（`gear_sonic/scripts/validate_sony_bonedata_pico_smpl.py`，`saveBoneData_Yup20260702.json` 139s 有效段）：关键姿态断言 25/28，六段转身角 6/6（符号数值全对），逐帧姿态零跳变，腕高相关 0.99，单帧转换约 5ms（50Hz 预算内）。
+
+启动命令（协议组合固定为 v3+smpl，其他组合会被 CLI 拒绝）：
+
+```bash
+.venv_teleop/bin/python -u gear_sonic/scripts/mocap_manager_server.py \
+  --source sony_pico \
+  --bvh-stream-port 12352 \
+  --control-mode pose \
+  --pose-window-size 80 \
+  --pose-protocol-version 3 \
+  --pose-encoder-mode smpl \
+  --zmq-port 5556
+
+.venv_teleop/bin/python -u gear_sonic/scripts/sony_bonedata_json_stream_sender.py \
+  --json-file /path/to/saveBoneData_Yup20260702.json \
+  --host 127.0.0.1 --port 12352 --loop
+```
+
+已知限制：
+
+- mocopi 只有 6 传感器，腕部位置是测量真值，但上臂/前臂**旋转**是 mocopi 内部 IK 估计，个别时段单侧手臂幅度明显不足（同一录制里两次侧平举各有一侧没展开）；全程臂抬升增益约 0.92。纯旋转路线继承此衰减，后续可用腕位置做二次 IK 修正。
+- 第一版只支持 Unity Y-up 原生录制（真机 mocopi / `saveBoneData_Yup*` 格式）；旧的 z-up 录制不支持。
+- `--bvh-stream-bonedata-coordinate-frame` 等 sonic_zup 转换参数对这条线无效，只消费 `--bvh-stream-bonedata-position-scale` 和 `--bvh-stream-bonedata-input-quat-order`。
+
 ## 研究命令模板
 
 `--source bvh` 是本地 SMPL debug 入口：
