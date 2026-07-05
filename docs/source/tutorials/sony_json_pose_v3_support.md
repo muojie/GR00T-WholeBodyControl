@@ -49,6 +49,40 @@ POSE_PROTOCOL_VERSION=3 ./scripts/launch_sonic_json_isaaclab_closed_loop.sh \
   ~/saveBoneData_Yup20260702.json
 ```
 
+## BVH 输入支持（b22cbea / cf85868）
+
+从 2026-07-05 开始，一键脚本原生支持 `.bvh` 文件输入（按扩展名自动识别）——sender 自动切换为 `bvh_stream_sender.py`，manager 保持不变（v3 时 `sony_pico` source 接受 `bvh_stream_v1` 包）。
+
+### 使用方式
+
+```bash
+# MuJoCo 后端 + BVH + v3 协议
+POSE_PROTOCOL_VERSION=3 ./scripts/launch_sonic_json_mujoco_closed_loop.sh /path/to/mocopi_recording.bvh
+
+# IsaacLab 后端 + BVH + v3 协议
+POSE_PROTOCOL_VERSION=3 ./scripts/launch_sonic_json_isaaclab_closed_loop.sh /path/to/mocopi_recording.bvh
+
+# BVH sender 发原始 Y-up（不做 Y-up → Z-up 转换）
+BVH_KEEP_YUP=1 POSE_PROTOCOL_VERSION=3 ./scripts/launch_sonic_json_mujoco_closed_loop.sh /path/to/recording.bvh
+```
+
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `BVH_UNIT_SCALE` | `0.01` | BVH 单位缩放（厘米 BVH 用 0.01 转米） |
+| `BVH_KEEP_YUP` | `0` | 1=sender 不做 Y-up → Z-up 转换，发原始 BVH Y-up |
+
+**manager 侧坐标参数**（v3 协议时生效）：
+- `BVH_KEEP_YUP=0`（默认）→ `--sony-pico-bvh-frame sonic_zup`
+- `BVH_KEEP_YUP=1` → `--sony-pico-bvh-frame bvh_yup`
+
+### 约束
+
+- **仅限 mocopi 骨架 BVH**（27 bone、`root`/`torso_*`/`l_up_arm` 命名、世界对齐 T-pose rest）
+- Mixamo 等通用 BVH 骨名解析会报错
+- BVH 流继承 mocopi 臂旋转 IK 衰减（增益约 0.92）
+
 ## 实现细节
 
 ### 自动参数切换
