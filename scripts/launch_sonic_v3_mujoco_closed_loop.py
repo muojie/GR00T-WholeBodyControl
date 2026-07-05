@@ -148,6 +148,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bvh-stream-port", type=int, default=DEFAULT_BVH_STREAM_PORT)
 
     parser.add_argument("--input-source", choices=["bvh", "sony_json"], default="bvh")
+    parser.add_argument("--no-sender", action="store_true", help="Do not start BVH/JSON sender (use external sender)")
     parser.add_argument("--bvh-file", type=Path, default=DEFAULT_BVH_FILE)
     parser.add_argument("--bvh-fps", type=float)
     parser.add_argument("--no-bvh-loop", action="store_true")
@@ -679,8 +680,9 @@ def _build_window_commands(args: argparse.Namespace) -> list[WindowCommand]:
         WindowCommand("mujoco", _mujoco_command(args)),
         WindowCommand("input", _mocap_manager_command(args)),
         WindowCommand("deploy", _deploy_command(args)),
-        WindowCommand(_sender_window_name(args), _bvh_sender_command(args)),
     ]
+    if not args.no_sender:
+        commands.append(WindowCommand(_sender_window_name(args), _bvh_sender_command(args)))
     if not args.no_metrics:
         commands.append(WindowCommand("metrics", _metrics_command(args)))
     return commands
