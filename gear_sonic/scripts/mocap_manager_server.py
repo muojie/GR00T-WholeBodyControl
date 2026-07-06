@@ -38,6 +38,7 @@ from gear_sonic.utils.teleop.sources.sony_bonedata_json import (
     SONY_BONEDATA_ROTATION_MODES,
 )
 from gear_sonic.utils.teleop.sources.sony_pico_smpl_source import (
+    SONY_PICO_BONEDATA_BASES,
     SONY_PICO_BVH_INPUT_FRAMES,
 )
 from gear_sonic.utils.teleop.zmq.zmq_planner_sender import (
@@ -326,13 +327,15 @@ def _create_source(args: argparse.Namespace):
             recv_size=args.bvh_stream_recv_size,
             position_scale=args.bvh_stream_bonedata_position_scale,
             input_quat_order=args.bvh_stream_bonedata_input_quat_order,
+            bonedata_basis=args.sony_pico_bonedata_basis,
             bvh_input_frame=args.sony_pico_bvh_frame,
         )
         description = (
             f"listening for raw sony_bonedata_json_v1 or bvh_stream_v1 UDP on "
             f"{args.bvh_stream_host}:{args.bvh_stream_port} ({args.bvh_stream_format}); "
             "converting world bone rotations through the PICO SMPL stack "
-            f"(zflip basis for BoneData, {args.sony_pico_bvh_frame} basis for BVH streams, "
+            f"({args.sony_pico_bonedata_basis} basis for BoneData, "
+            f"{args.sony_pico_bvh_frame} basis for BVH streams, "
             f"POSE v{args.pose_protocol_version}/"
             f"{args.pose_encoder_mode}, "
             f"scale={args.bvh_stream_bonedata_position_scale:g}, "
@@ -833,6 +836,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--bvh-stream-bonedata-local-root",
         action="store_true",
         help="Subtract each raw BoneData frame's root position on the receiver side.",
+    )
+    parser.add_argument(
+        "--sony-pico-bonedata-basis",
+        choices=SONY_PICO_BONEDATA_BASES,
+        default="zflip",
+        help=(
+            "Basis applied to raw sony_bonedata_json_v1 packets received by "
+            "--source sony_pico before running the PICO SMPL stack. Default "
+            "zflip preserves the existing behavior; none/xflip/y180 are A/B "
+            "diagnostic modes for front/back or yaw sign checks."
+        ),
     )
     parser.add_argument(
         "--sony-pico-bvh-frame",

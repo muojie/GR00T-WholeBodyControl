@@ -62,6 +62,13 @@ PICO_SMPL_PARENT_INDICES = [
 # p' = B @ p and world rotations as R' = B @ R @ B^T (equivalently, quaternion
 # components (x, y, z, w) -> (-x, -y, z, w)).
 UNITY_TO_XRT_BASIS = np.diag([1.0, 1.0, -1.0])
+SONY_PICO_BONEDATA_BASES = ("zflip", "none", "xflip", "y180")
+SONY_PICO_BONEDATA_BASIS_BY_NAME: dict[str, np.ndarray] = {
+    "zflip": UNITY_TO_XRT_BASIS,
+    "none": np.eye(3, dtype=np.float64),
+    "xflip": np.diag([-1.0, 1.0, 1.0]),
+    "y180": np.diag([-1.0, 1.0, -1.0]),
+}
 
 # Basis changes into the XRT convention for the world frames a bvh_stream_v1
 # payload can carry. Both compose zflip with the exact frame conversions used
@@ -327,6 +334,7 @@ class SonyPicoSmplUdpSource:
         socket_timeout_s: float = 0.5,
         position_scale: float = 1.0,
         input_quat_order: str = "xyzw",
+        bonedata_basis: str = "zflip",
         bvh_input_frame: str = "sonic_zup",
     ):
         self.bind_host = bind_host
@@ -336,6 +344,12 @@ class SonyPicoSmplUdpSource:
         self.socket_timeout_s = float(socket_timeout_s)
         self.position_scale = float(position_scale)
         self.input_quat_order = str(input_quat_order)
+        if bonedata_basis not in SONY_PICO_BONEDATA_BASIS_BY_NAME:
+            raise ValueError(
+                f"unsupported bonedata_basis {bonedata_basis!r}; "
+                f"expected one of {SONY_PICO_BONEDATA_BASES}"
+            )
+        self.bonedata_basis = str(bonedata_basis)
         if bvh_input_frame not in XRT_BASIS_BY_BVH_INPUT_FRAME:
             raise ValueError(
                 f"unsupported bvh_input_frame {bvh_input_frame!r}; "
@@ -465,7 +479,7 @@ class SonyPicoSmplUdpSource:
                 position_scale=self.position_scale,
                 input_quat_order=self.input_quat_order,
             )
-            basis = UNITY_TO_XRT_BASIS
+            basis = SONY_PICO_BONEDATA_BASIS_BY_NAME[self.bonedata_basis]
         frame_index = int(payload.get("frame_index", 0))
         convert_start = time.perf_counter()
         full_body = self._converter.convert(
@@ -508,6 +522,9 @@ class SonyPicoSmplUdpSource:
                 "source_fps": source_fps,
                 "joint_count": len(joint_names),
                 "convert_ms": round(convert_ms, 2),
+                "bonedata_basis": (
+                    self.bonedata_basis if payload_format not in _BVH_STREAM_FORMATS else None
+                ),
                 "bvh_input_frame": (
                     self.bvh_input_frame if payload_format in _BVH_STREAM_FORMATS else None
                 ),

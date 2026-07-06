@@ -15,6 +15,7 @@ COORDINATE_FRAME=${COORDINATE_FRAME:-left_handed_yup}
 BONEDATA_POSITION_SCALE=${BONEDATA_POSITION_SCALE:-1.0}
 BONEDATA_INPUT_QUAT_ORDER=${BONEDATA_INPUT_QUAT_ORDER:-xyzw}
 BONEDATA_ROTATION_MODE=${BONEDATA_ROTATION_MODE:-input}
+SONY_PICO_BONEDATA_BASIS=${SONY_PICO_BONEDATA_BASIS:-zflip}
 BVH_UNIT_SCALE=${BVH_UNIT_SCALE:-0.01}
 BVH_KEEP_YUP=${BVH_KEEP_YUP:-0}
 POSE_PROTOCOL_VERSION=${POSE_PROTOCOL_VERSION:-1}
@@ -75,6 +76,7 @@ Environment overrides:
   BONEDATA_POSITION_SCALE=${BONEDATA_POSITION_SCALE}
   BONEDATA_INPUT_QUAT_ORDER=${BONEDATA_INPUT_QUAT_ORDER}
   BONEDATA_ROTATION_MODE=${BONEDATA_ROTATION_MODE}
+  SONY_PICO_BONEDATA_BASIS=${SONY_PICO_BONEDATA_BASIS} # v3 raw BoneData basis: zflip|none|xflip|y180
   BVH_UNIT_SCALE=${BVH_UNIT_SCALE}           # BVH sender: cm->m scale (default 0.01)
   BVH_KEEP_YUP=${BVH_KEEP_YUP}               # BVH sender: 1=no y-up->z-up conversion
   POSE_PROTOCOL_VERSION=${POSE_PROTOCOL_VERSION}
@@ -85,6 +87,7 @@ Examples:
   $0 --no-json-sender
   $0 --sender-only /home/nolo/saveBoneData_Yup20260702.json
   $0 --print-sender-command /home/nolo/saveBoneData_Yup20260702.json
+  SONY_PICO_BONEDATA_BASIS=none POSE_PROTOCOL_VERSION=3 $0 /home/nolo/saveBoneData_Yup20260702.json
   POSE_PROTOCOL_VERSION=3 $0 /home/nolo/saveBoneData_Yup20260702.json
   POSE_PROTOCOL_VERSION=3 $0 /path/to/mocopi_recording.bvh
   BVH_KEEP_YUP=1 POSE_PROTOCOL_VERSION=3 $0 /path/to/recording.bvh
@@ -392,6 +395,9 @@ else
   echo "[sonic-json] local_isaaclab=enabled"
 fi
 echo "[sonic-json] receiver_coordinate_frame=${COORDINATE_FRAME}"
+if [[ "${POSE_PROTOCOL_VERSION}" == "3" ]]; then
+  echo "[sonic-json] sony_pico_bonedata_basis=${SONY_PICO_BONEDATA_BASIS}"
+fi
 echo "[sonic-json] bvh_stream_port=${BVH_STREAM_PORT} mocap_zmq_port=${MOCAP_ZMQ_PORT}"
 
 launcher_args=(
@@ -406,6 +412,7 @@ launcher_args=(
   --bvh-stream-bonedata-position-scale "${BONEDATA_POSITION_SCALE}" \
   --bvh-stream-bonedata-input-quat-order "${BONEDATA_INPUT_QUAT_ORDER}" \
   --bvh-stream-bonedata-rotation-mode "${BONEDATA_ROTATION_MODE}" \
+  --sony-pico-bonedata-basis "${SONY_PICO_BONEDATA_BASIS}" \
   --pose-protocol-version "${POSE_PROTOCOL_VERSION}" \
   --zmq-port "${MOCAP_ZMQ_PORT}" \
   --debug-port "${DEBUG_PORT}" \

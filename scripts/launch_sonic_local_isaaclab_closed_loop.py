@@ -42,6 +42,7 @@ BONEDATA_COORDINATE_FRAMES = (
     "left_handed_yup",
     "zup_flip_xy",
 )
+SONY_PICO_BONEDATA_BASES = ("zflip", "none", "xflip", "y180")
 
 
 @dataclass(frozen=True)
@@ -206,6 +207,15 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("input", "identity"),
         default="input",
         help="receiver-side rotation handling for raw sony_bonedata_json_v1 packets",
+    )
+    parser.add_argument(
+        "--sony-pico-bonedata-basis",
+        choices=SONY_PICO_BONEDATA_BASES,
+        default="zflip",
+        help=(
+            "basis for raw Sony BoneData packets when POSE v3 uses --source sony_pico; "
+            "zflip keeps existing behavior, none/xflip/y180 are A/B diagnostics"
+        ),
     )
     parser.add_argument(
         "--ask-bvh-stream-sender",
@@ -508,6 +518,8 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
             str(args.bvh_stream_bonedata_position_scale),
             "--bvh-stream-bonedata-input-quat-order",
             args.bvh_stream_bonedata_input_quat_order,
+            "--sony-pico-bonedata-basis",
+            args.sony_pico_bonedata_basis,
         ]
     else:
         source_type = "bvh_stream"

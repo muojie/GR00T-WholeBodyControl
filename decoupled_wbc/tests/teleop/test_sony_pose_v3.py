@@ -5,6 +5,10 @@ import pytest
 
 from gear_sonic.scripts.mocap_manager_server import build_arg_parser, _validate_args
 from gear_sonic.utils.teleop.sources.mocopi_source import parse_mocopi_json_packet
+from gear_sonic.utils.teleop.sources.sony_pico_smpl_source import (
+    SONY_PICO_BONEDATA_BASIS_BY_NAME,
+    bonedata_to_xrt_body_poses,
+)
 from gear_sonic.utils.teleop.zmq.zmq_planner_sender import HEADER_SIZE
 from gear_sonic.utils.teleop.zmq.zmq_pose_sender import PoseStreamPublisher
 
@@ -165,6 +169,51 @@ def test_bvh_stream_accepts_explicit_sony_pose_v3_line():
     assert args.pose_filter_profile == "stable"
     assert args.target_fps == 50.0
     assert args.bvh_g1_smpl_joints_source == "g1_fk"
+
+
+def test_sony_pico_accepts_bonedata_basis_switch():
+    args = _parse_and_validate(
+        [
+            "--source",
+            "sony_pico",
+            "--control-mode",
+            "pose",
+            "--pose-protocol-version",
+            "3",
+            "--pose-encoder-mode",
+            "smpl",
+            "--sony-pico-bonedata-basis",
+            "none",
+        ]
+    )
+
+    assert args.sony_pico_bonedata_basis == "none"
+
+
+def test_sony_pico_bonedata_basis_flips_raw_x_rotation_sign():
+    angle = 1.0
+    raw_x_bend_quat = np.array(
+        [[np.sin(angle * 0.5), 0.0, 0.0, np.cos(angle * 0.5)]],
+        dtype=np.float64,
+    )
+    positions = np.zeros((1, 3), dtype=np.float64)
+    slot_indices = np.array([0], dtype=np.int64)
+
+    none_pose = bonedata_to_xrt_body_poses(
+        positions,
+        raw_x_bend_quat,
+        slot_indices,
+        basis=SONY_PICO_BONEDATA_BASIS_BY_NAME["none"],
+    )
+    zflip_pose = bonedata_to_xrt_body_poses(
+        positions,
+        raw_x_bend_quat,
+        slot_indices,
+        basis=SONY_PICO_BONEDATA_BASIS_BY_NAME["zflip"],
+    )
+
+    assert none_pose[0, 3] == pytest.approx(-zflip_pose[0, 3])
+    assert none_pose[0, 6] == pytest.approx(zflip_pose[0, 6])
 
 
 def test_bvh_stream_rejects_g1_fk_smpl_joints_without_body_fk():
