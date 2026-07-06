@@ -7,7 +7,9 @@ from gear_sonic.scripts.mocap_manager_server import build_arg_parser, _validate_
 from gear_sonic.utils.teleop.sources.mocopi_source import parse_mocopi_json_packet
 from gear_sonic.utils.teleop.sources.sony_pico_smpl_source import (
     SONY_PICO_BONEDATA_BASIS_BY_NAME,
+    apply_rooted_similarity_transform,
     bonedata_to_xrt_body_poses,
+    fit_rooted_similarity_transform,
 )
 from gear_sonic.utils.teleop.zmq.zmq_planner_sender import HEADER_SIZE
 from gear_sonic.utils.teleop.zmq.zmq_pose_sender import PoseStreamPublisher
@@ -190,6 +192,25 @@ def test_sony_pico_accepts_bonedata_basis_switch():
     assert args.sony_pico_bonedata_basis == "none"
 
 
+def test_sony_pico_accepts_smpl_joints_source_switch():
+    args = _parse_and_validate(
+        [
+            "--source",
+            "sony_pico",
+            "--control-mode",
+            "pose",
+            "--pose-protocol-version",
+            "3",
+            "--pose-encoder-mode",
+            "smpl",
+            "--sony-pico-smpl-joints-source",
+            "bonedata_positions",
+        ]
+    )
+
+    assert args.sony_pico_smpl_joints_source == "bonedata_positions"
+
+
 def test_sony_pico_bonedata_basis_flips_raw_x_rotation_sign():
     angle = 1.0
     raw_x_bend_quat = np.array(
@@ -214,6 +235,39 @@ def test_sony_pico_bonedata_basis_flips_raw_x_rotation_sign():
 
     assert none_pose[0, 3] == pytest.approx(-zflip_pose[0, 3])
     assert none_pose[0, 6] == pytest.approx(zflip_pose[0, 6])
+
+
+def test_rooted_similarity_transform_recovers_target_points():
+    source = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.4, 0.6],
+            [0.0, -0.4, 0.6],
+            [0.2, 0.2, -0.8],
+            [0.2, -0.2, -0.8],
+        ],
+        dtype=np.float64,
+    )
+    angle = 0.7
+    rot = np.array(
+        [
+            [np.cos(angle), -np.sin(angle), 0.0],
+            [np.sin(angle), np.cos(angle), 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    target = source @ rot * 0.75
+
+    scale, fitted_rot = fit_rooted_similarity_transform(
+        source,
+        target,
+        joint_indices=np.arange(source.shape[0]),
+    )
+    recovered = apply_rooted_similarity_transform(source, scale, fitted_rot)
+
+    np.testing.assert_allclose(recovered, target, atol=1e-6)
 
 
 def test_bvh_stream_rejects_g1_fk_smpl_joints_without_body_fk():

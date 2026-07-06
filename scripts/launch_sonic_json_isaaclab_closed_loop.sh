@@ -16,9 +16,12 @@ BONEDATA_POSITION_SCALE=${BONEDATA_POSITION_SCALE:-1.0}
 BONEDATA_INPUT_QUAT_ORDER=${BONEDATA_INPUT_QUAT_ORDER:-xyzw}
 BONEDATA_ROTATION_MODE=${BONEDATA_ROTATION_MODE:-input}
 SONY_PICO_BONEDATA_BASIS=${SONY_PICO_BONEDATA_BASIS:-zflip}
+SONY_PICO_SMPL_JOINTS_SOURCE=${SONY_PICO_SMPL_JOINTS_SOURCE:-pico_fk}
 BVH_UNIT_SCALE=${BVH_UNIT_SCALE:-0.01}
 BVH_KEEP_YUP=${BVH_KEEP_YUP:-0}
 POSE_PROTOCOL_VERSION=${POSE_PROTOCOL_VERSION:-1}
+WAIT_FOR_DEPLOY_DATA_TIMEOUT_S=${WAIT_FOR_DEPLOY_DATA_TIMEOUT_S:-120}
+ALLOW_ISAAC_WITHOUT_DEPLOY_DATA=${ALLOW_ISAAC_WITHOUT_DEPLOY_DATA:-0}
 
 ISAACLAB_ROOT=${ISAACLAB_ROOT:-/home/nolo/xiaoyang_IssacLab/IsaacLab}
 CONDA_SH=${CONDA_SH:-/home/nolo/miniconda3/etc/profile.d/conda.sh}
@@ -77,9 +80,12 @@ Environment overrides:
   BONEDATA_INPUT_QUAT_ORDER=${BONEDATA_INPUT_QUAT_ORDER}
   BONEDATA_ROTATION_MODE=${BONEDATA_ROTATION_MODE}
   SONY_PICO_BONEDATA_BASIS=${SONY_PICO_BONEDATA_BASIS} # v3 raw BoneData basis: zflip|none|xflip|y180
+  SONY_PICO_SMPL_JOINTS_SOURCE=${SONY_PICO_SMPL_JOINTS_SOURCE} # v3 smpl_joints: pico_fk|bonedata_positions
   BVH_UNIT_SCALE=${BVH_UNIT_SCALE}           # BVH sender: cm->m scale (default 0.01)
   BVH_KEEP_YUP=${BVH_KEEP_YUP}               # BVH sender: 1=no y-up->z-up conversion
   POSE_PROTOCOL_VERSION=${POSE_PROTOCOL_VERSION}
+  WAIT_FOR_DEPLOY_DATA_TIMEOUT_S=${WAIT_FOR_DEPLOY_DATA_TIMEOUT_S}
+  ALLOW_ISAAC_WITHOUT_DEPLOY_DATA=${ALLOW_ISAAC_WITHOUT_DEPLOY_DATA}
 
 Examples:
   $0 /home/nolo/saveBoneData_Yup20260702.json
@@ -88,6 +94,7 @@ Examples:
   $0 --sender-only /home/nolo/saveBoneData_Yup20260702.json
   $0 --print-sender-command /home/nolo/saveBoneData_Yup20260702.json
   SONY_PICO_BONEDATA_BASIS=none POSE_PROTOCOL_VERSION=3 $0 /home/nolo/saveBoneData_Yup20260702.json
+  SONY_PICO_BONEDATA_BASIS=none SONY_PICO_SMPL_JOINTS_SOURCE=bonedata_positions POSE_PROTOCOL_VERSION=3 $0 /home/nolo/saveBoneData_Yup20260702.json
   POSE_PROTOCOL_VERSION=3 $0 /home/nolo/saveBoneData_Yup20260702.json
   POSE_PROTOCOL_VERSION=3 $0 /path/to/mocopi_recording.bvh
   BVH_KEEP_YUP=1 POSE_PROTOCOL_VERSION=3 $0 /path/to/recording.bvh
@@ -330,11 +337,61 @@ deadline=\$((SECONDS + 90))
 echo "[sonic-json] waiting for deploy debug port 127.0.0.1:${DEBUG_PORT}"
 until (echo >/dev/tcp/127.0.0.1/${DEBUG_PORT}) >/dev/null 2>&1; do
   if [[ "\${SECONDS}" -ge "\${deadline}" ]]; then
-    echo "[sonic-json] warning: timeout waiting for deploy debug port; starting IsaacLab anyway" >&2
-    break
+    if [[ "${ALLOW_ISAAC_WITHOUT_DEPLOY_DATA}" == "1" ]]; then
+      echo "[sonic-json] warning: timeout waiting for deploy debug port; starting IsaacLab anyway" >&2
+      break
+    fi
+    echo "[sonic-json] ERROR: timeout waiting for deploy debug port; not starting IsaacLab without deploy data" >&2
+    exit 2
   fi
   sleep 0.5
 done
+
+echo "[sonic-json] waiting for first deploy data on tcp://127.0.0.1:${DEBUG_PORT} topic=g1_debug"
+"${LAUNCHER_PY}" - "${DEBUG_PORT}" g1_debug "${WAIT_FOR_DEPLOY_DATA_TIMEOUT_S}" <<'PY'
+import sys
+import time
+
+import zmq
+
+port = int(sys.argv[1])
+topic = sys.argv[2]
+timeout_s = float(sys.argv[3])
+
+ctx = zmq.Context.instance()
+sock = ctx.socket(zmq.SUB)
+sock.setsockopt_string(zmq.SUBSCRIBE, topic)
+sock.setsockopt(zmq.RCVTIMEO, 500)
+sock.connect(f"tcp://127.0.0.1:{port}")
+
+deadline = time.monotonic() + timeout_s
+while time.monotonic() < deadline:
+    try:
+        msg = sock.recv_multipart()
+    except zmq.Again:
+        continue
+    print(
+        f"[sonic-json] first deploy data received on tcp://127.0.0.1:{port} "
+        f"topic={topic} frames={len(msg)}"
+    )
+    sys.exit(0)
+
+print(
+    f"[sonic-json] ERROR: no deploy data on tcp://127.0.0.1:{port} "
+    f"topic={topic} within {timeout_s:.1f}s",
+    file=sys.stderr,
+)
+sys.exit(2)
+PY
+wait_status=\$?
+if [[ "\${wait_status}" -ne 0 ]]; then
+  if [[ "${ALLOW_ISAAC_WITHOUT_DEPLOY_DATA}" == "1" ]]; then
+    echo "[sonic-json] warning: deploy data wait failed; starting IsaacLab anyway" >&2
+  else
+    echo "[sonic-json] not starting IsaacLab without deploy data" >&2
+    exit "\${wait_status}"
+  fi
+fi
 
 cd "${ISAACLAB_ROOT}"
 source "${CONDA_SH}"
@@ -397,6 +454,7 @@ fi
 echo "[sonic-json] receiver_coordinate_frame=${COORDINATE_FRAME}"
 if [[ "${POSE_PROTOCOL_VERSION}" == "3" ]]; then
   echo "[sonic-json] sony_pico_bonedata_basis=${SONY_PICO_BONEDATA_BASIS}"
+  echo "[sonic-json] sony_pico_smpl_joints_source=${SONY_PICO_SMPL_JOINTS_SOURCE}"
 fi
 echo "[sonic-json] bvh_stream_port=${BVH_STREAM_PORT} mocap_zmq_port=${MOCAP_ZMQ_PORT}"
 
@@ -413,6 +471,7 @@ launcher_args=(
   --bvh-stream-bonedata-input-quat-order "${BONEDATA_INPUT_QUAT_ORDER}" \
   --bvh-stream-bonedata-rotation-mode "${BONEDATA_ROTATION_MODE}" \
   --sony-pico-bonedata-basis "${SONY_PICO_BONEDATA_BASIS}" \
+  --sony-pico-smpl-joints-source "${SONY_PICO_SMPL_JOINTS_SOURCE}" \
   --pose-protocol-version "${POSE_PROTOCOL_VERSION}" \
   --zmq-port "${MOCAP_ZMQ_PORT}" \
   --debug-port "${DEBUG_PORT}" \

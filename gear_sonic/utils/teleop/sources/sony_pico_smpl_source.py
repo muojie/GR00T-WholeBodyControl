@@ -26,6 +26,11 @@ Z-up frame (sender default) or the raw BVH right-handed Y-up frame (sender
 into the XRT convention. This assumes the BVH rest pose is a world-aligned
 T-pose with identity world rotations (true for mocopi BVH exports) — the same
 bind-frame assumption the saveBoneData line relies on.
+
+For diagnostics and JSON visual replay, ``smpl_joints_source=bonedata_positions``
+can replace the PICO-FK ``smpl_joints`` field with raw BoneData positions after
+first-frame root-local alignment while keeping ``smpl_pose`` from the PICO
+rotation path.
 """
 
 from __future__ import annotations
@@ -69,6 +74,34 @@ SONY_PICO_BONEDATA_BASIS_BY_NAME: dict[str, np.ndarray] = {
     "xflip": np.diag([-1.0, 1.0, 1.0]),
     "y180": np.diag([-1.0, 1.0, -1.0]),
 }
+SONY_PICO_SMPL_JOINTS_SOURCES = ("pico_fk", "bonedata_positions")
+SMPL_JOINTS_POSITION_ALIGNMENT_INDICES = np.array(
+    [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+    ],
+    dtype=np.int64,
+)
 
 # Basis changes into the XRT convention for the world frames a bvh_stream_v1
 # payload can carry. Both compose zflip with the exact frame conversions used
@@ -235,6 +268,58 @@ def bonedata_to_xrt_body_poses(
     return np.concatenate([pos, quat], axis=1)
 
 
+def bonedata_positions_to_robot_zup_root_local(
+    positions: np.ndarray,
+    slot_indices: np.ndarray,
+    basis: np.ndarray = UNITY_TO_XRT_BASIS,
+) -> np.ndarray:
+    """Convert raw BoneData slot positions to root-local z-up coordinates."""
+    xrt_yup = positions[slot_indices] @ basis.T
+    robot_zup = np.stack(
+        [xrt_yup[:, 0], -xrt_yup[:, 2], xrt_yup[:, 1]],
+        axis=1,
+    )
+    return robot_zup - robot_zup[0]
+
+
+def fit_rooted_similarity_transform(
+    source_points: np.ndarray,
+    target_points: np.ndarray,
+    joint_indices: np.ndarray = SMPL_JOINTS_POSITION_ALIGNMENT_INDICES,
+) -> tuple[float, np.ndarray]:
+    """Fit scale and rotation for root-local point sets."""
+    source = np.asarray(source_points, dtype=np.float64)[joint_indices]
+    target = np.asarray(target_points, dtype=np.float64)[joint_indices]
+    valid = np.isfinite(source).all(axis=1) & np.isfinite(target).all(axis=1)
+    source = source[valid]
+    target = target[valid]
+    denom = float(np.sum(source * source))
+    if source.shape[0] < 3 or denom < 1e-8:
+        return 1.0, np.eye(3, dtype=np.float64)
+
+    u, _, vt = np.linalg.svd(source.T @ target)
+    rotation = u @ vt
+    if np.linalg.det(rotation) < 0.0:
+        u[:, -1] *= -1.0
+        rotation = u @ vt
+
+    rotated = source @ rotation
+    scale_denom = float(np.sum(rotated * rotated))
+    scale = float(np.sum(rotated * target) / scale_denom) if scale_denom > 1e-8 else 1.0
+    if not np.isfinite(scale) or scale <= 0.0:
+        scale = 1.0
+    return scale, rotation
+
+
+def apply_rooted_similarity_transform(
+    points: np.ndarray,
+    scale: float,
+    rotation: np.ndarray,
+) -> np.ndarray:
+    """Apply a fitted root-local scale and rotation."""
+    return (np.asarray(points, dtype=np.float64) @ rotation * float(scale)).astype(np.float32)
+
+
 class SonyPicoSmplConverter:
     """Run raw BoneData frames through the PICO manager SMPL functions."""
 
@@ -249,6 +334,8 @@ class SonyPicoSmplConverter:
         self._device = torch.device("cpu")
         self._slot_indices: np.ndarray | None = None
         self._joint_names: tuple[str, ...] | None = None
+        self._position_alignment_key: tuple[tuple[str, ...], tuple[float, ...]] | None = None
+        self._position_alignment: tuple[float, np.ndarray] | None = None
 
     @property
     def slot_indices(self) -> np.ndarray | None:
@@ -269,7 +356,13 @@ class SonyPicoSmplConverter:
         *,
         frame_index: int | None,
         basis: np.ndarray = UNITY_TO_XRT_BASIS,
+        smpl_joints_source: str = "pico_fk",
     ) -> FullBodyReference:
+        if smpl_joints_source not in SONY_PICO_SMPL_JOINTS_SOURCES:
+            raise ValueError(
+                f"unsupported smpl_joints_source {smpl_joints_source!r}; "
+                f"expected one of {SONY_PICO_SMPL_JOINTS_SOURCES}"
+            )
         names_key = tuple(joint_names)
         if self._slot_indices is None or self._joint_names != names_key:
             self._slot_indices = resolve_smpl_slot_bone_indices(joint_names)
@@ -286,6 +379,27 @@ class SonyPicoSmplConverter:
         )
         smpl_joints = data["smpl_joints_local"].detach().cpu().numpy()[0].astype(np.float32)
         body_quat_w = data["global_orient_quat"].detach().cpu().numpy()[0].astype(np.float32)
+        if smpl_joints_source == "bonedata_positions":
+            raw_smpl_joints = bonedata_positions_to_robot_zup_root_local(
+                positions, self._slot_indices, basis=basis
+            )
+            basis_key = tuple(float(x) for x in np.asarray(basis, dtype=np.float64).reshape(-1))
+            alignment_key = (names_key, basis_key)
+            if (
+                self._position_alignment is None
+                or self._position_alignment_key != alignment_key
+            ):
+                self._position_alignment = fit_rooted_similarity_transform(
+                    raw_smpl_joints,
+                    smpl_joints,
+                )
+                self._position_alignment_key = alignment_key
+            scale, rotation = self._position_alignment
+            smpl_joints = apply_rooted_similarity_transform(
+                raw_smpl_joints,
+                scale,
+                rotation,
+            )
         # joint_pos=None lets FullBodyReference derive the six G1 wrist joints
         # with the shared PICO projection (smpl_pose_to_g1_wrist_joint_pos).
         return FullBodyReference(
@@ -336,6 +450,7 @@ class SonyPicoSmplUdpSource:
         input_quat_order: str = "xyzw",
         bonedata_basis: str = "zflip",
         bvh_input_frame: str = "sonic_zup",
+        smpl_joints_source: str = "pico_fk",
     ):
         self.bind_host = bind_host
         self.port = int(port)
@@ -356,6 +471,12 @@ class SonyPicoSmplUdpSource:
                 f"expected one of {SONY_PICO_BVH_INPUT_FRAMES}"
             )
         self.bvh_input_frame = str(bvh_input_frame)
+        if smpl_joints_source not in SONY_PICO_SMPL_JOINTS_SOURCES:
+            raise ValueError(
+                f"unsupported smpl_joints_source {smpl_joints_source!r}; "
+                f"expected one of {SONY_PICO_SMPL_JOINTS_SOURCES}"
+            )
+        self.smpl_joints_source = str(smpl_joints_source)
 
         self._converter = SonyPicoSmplConverter()
         self._socket: socket.socket | None = None
@@ -488,6 +609,7 @@ class SonyPicoSmplUdpSource:
             quats_xyzw,
             frame_index=frame_index,
             basis=basis,
+            smpl_joints_source=self.smpl_joints_source,
         )
         convert_ms = (time.perf_counter() - convert_start) * 1000.0
         self._convert_ms_ema = (
@@ -528,5 +650,6 @@ class SonyPicoSmplUdpSource:
                 "bvh_input_frame": (
                     self.bvh_input_frame if payload_format in _BVH_STREAM_FORMATS else None
                 ),
+                "smpl_joints_source": self.smpl_joints_source,
             },
         )

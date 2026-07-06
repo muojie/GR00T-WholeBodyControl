@@ -40,6 +40,7 @@ from gear_sonic.utils.teleop.sources.sony_bonedata_json import (
 from gear_sonic.utils.teleop.sources.sony_pico_smpl_source import (
     SONY_PICO_BONEDATA_BASES,
     SONY_PICO_BVH_INPUT_FRAMES,
+    SONY_PICO_SMPL_JOINTS_SOURCES,
 )
 from gear_sonic.utils.teleop.zmq.zmq_planner_sender import (
     build_command_message,
@@ -329,6 +330,7 @@ def _create_source(args: argparse.Namespace):
             input_quat_order=args.bvh_stream_bonedata_input_quat_order,
             bonedata_basis=args.sony_pico_bonedata_basis,
             bvh_input_frame=args.sony_pico_bvh_frame,
+            smpl_joints_source=args.sony_pico_smpl_joints_source,
         )
         description = (
             f"listening for raw sony_bonedata_json_v1 or bvh_stream_v1 UDP on "
@@ -336,6 +338,7 @@ def _create_source(args: argparse.Namespace):
             "converting world bone rotations through the PICO SMPL stack "
             f"({args.sony_pico_bonedata_basis} basis for BoneData, "
             f"{args.sony_pico_bvh_frame} basis for BVH streams, "
+            f"smpl_joints={args.sony_pico_smpl_joints_source}, "
             f"POSE v{args.pose_protocol_version}/"
             f"{args.pose_encoder_mode}, "
             f"scale={args.bvh_stream_bonedata_position_scale:g}, "
@@ -856,6 +859,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "World frame of bvh_stream_v1 packets received by --source sony_pico. "
             "Use sonic_zup for bvh_stream_sender defaults, bvh_yup when the sender "
             "ran with --no-y-up-to-z-up."
+        ),
+    )
+    parser.add_argument(
+        "--sony-pico-smpl-joints-source",
+        choices=SONY_PICO_SMPL_JOINTS_SOURCES,
+        default="pico_fk",
+        help=(
+            "Source for protocol-v3 smpl_joints when --source sony_pico. "
+            "pico_fk preserves the PICO/SMPL FK behavior; bonedata_positions "
+            "uses raw BoneData positions after first-frame root-local alignment."
         ),
     )
     parser.add_argument("--bvh-file", help="BVH file to replay when --source bvh or bvh_g1")

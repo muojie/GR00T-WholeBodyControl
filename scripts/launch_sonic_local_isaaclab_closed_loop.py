@@ -43,6 +43,7 @@ BONEDATA_COORDINATE_FRAMES = (
     "zup_flip_xy",
 )
 SONY_PICO_BONEDATA_BASES = ("zflip", "none", "xflip", "y180")
+SONY_PICO_SMPL_JOINTS_SOURCES = ("pico_fk", "bonedata_positions")
 
 
 @dataclass(frozen=True)
@@ -215,6 +216,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "basis for raw Sony BoneData packets when POSE v3 uses --source sony_pico; "
             "zflip keeps existing behavior, none/xflip/y180 are A/B diagnostics"
+        ),
+    )
+    parser.add_argument(
+        "--sony-pico-smpl-joints-source",
+        choices=SONY_PICO_SMPL_JOINTS_SOURCES,
+        default="pico_fk",
+        help=(
+            "source for protocol-v3 smpl_joints when sony_pico is active; "
+            "pico_fk keeps PICO FK, bonedata_positions follows raw BoneData positions"
         ),
     )
     parser.add_argument(
@@ -520,6 +530,8 @@ def _mocap_manager_command(args: argparse.Namespace) -> str:
             args.bvh_stream_bonedata_input_quat_order,
             "--sony-pico-bonedata-basis",
             args.sony_pico_bonedata_basis,
+            "--sony-pico-smpl-joints-source",
+            args.sony_pico_smpl_joints_source,
         ]
     else:
         source_type = "bvh_stream"

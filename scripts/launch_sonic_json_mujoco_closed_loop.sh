@@ -35,6 +35,7 @@ BONEDATA_POSITION_SCALE=${BONEDATA_POSITION_SCALE:-1.0}
 BONEDATA_INPUT_QUAT_ORDER=${BONEDATA_INPUT_QUAT_ORDER:-xyzw}
 BONEDATA_ROTATION_MODE=${BONEDATA_ROTATION_MODE:-input}
 SONY_PICO_BONEDATA_BASIS=${SONY_PICO_BONEDATA_BASIS:-zflip}
+SONY_PICO_SMPL_JOINTS_SOURCE=${SONY_PICO_SMPL_JOINTS_SOURCE:-pico_fk}
 BVH_UNIT_SCALE=${BVH_UNIT_SCALE:-0.01}
 BVH_KEEP_YUP=${BVH_KEEP_YUP:-0}
 POSE_PROTOCOL_VERSION=${POSE_PROTOCOL_VERSION:-1}
@@ -90,6 +91,7 @@ Environment overrides:
   BONEDATA_INPUT_QUAT_ORDER=${BONEDATA_INPUT_QUAT_ORDER}
   BONEDATA_ROTATION_MODE=${BONEDATA_ROTATION_MODE}
   SONY_PICO_BONEDATA_BASIS=${SONY_PICO_BONEDATA_BASIS} # v3 raw BoneData basis: zflip|none|xflip|y180
+  SONY_PICO_SMPL_JOINTS_SOURCE=${SONY_PICO_SMPL_JOINTS_SOURCE} # v3 smpl_joints: pico_fk|bonedata_positions
   BVH_UNIT_SCALE=${BVH_UNIT_SCALE}           # BVH sender: cm->m scale (default 0.01)
   BVH_KEEP_YUP=${BVH_KEEP_YUP}               # BVH sender: 1=no y-up->z-up conversion
   POSE_PROTOCOL_VERSION=${POSE_PROTOCOL_VERSION}
@@ -105,6 +107,7 @@ Examples:
   $0 --print-sender-command /home/nolo/saveBoneData_Yup20260702.json
   COORDINATE_FRAME=sonic_zup $0 /path/to/saveBoneData.json
   SONY_PICO_BONEDATA_BASIS=none POSE_PROTOCOL_VERSION=3 $0 /path/to/saveBoneData.json
+  SONY_PICO_BONEDATA_BASIS=none SONY_PICO_SMPL_JOINTS_SOURCE=bonedata_positions POSE_PROTOCOL_VERSION=3 $0 /path/to/saveBoneData.json
   POSE_PROTOCOL_VERSION=3 $0 /home/nolo/saveBoneData_Yup20260702.json
   POSE_PROTOCOL_VERSION=3 $0 /path/to/mocopi_recording.bvh
   BVH_KEEP_YUP=1 POSE_PROTOCOL_VERSION=3 $0 /path/to/recording.bvh
@@ -361,6 +364,7 @@ if [[ "${BACKEND}" == "isaaclab" && "${MODE}" != "sender" && "${MODE}" != "print
     BONEDATA_INPUT_QUAT_ORDER="${BONEDATA_INPUT_QUAT_ORDER}" \
     BONEDATA_ROTATION_MODE="${BONEDATA_ROTATION_MODE}" \
     SONY_PICO_BONEDATA_BASIS="${SONY_PICO_BONEDATA_BASIS}" \
+    SONY_PICO_SMPL_JOINTS_SOURCE="${SONY_PICO_SMPL_JOINTS_SOURCE}" \
     POSE_PROTOCOL_VERSION="${POSE_PROTOCOL_VERSION}" \
     REPLACE="${REPLACE}" \
     "${SCRIPT_DIR}/launch_sonic_json_isaaclab_closed_loop.sh" "${isaaclab_args[@]}" --json-file "${JSON_FILE}"
@@ -434,7 +438,8 @@ EOF
   --bvh-stream-bonedata-position-scale ${BONEDATA_POSITION_SCALE} \\
   --bvh-stream-bonedata-input-quat-order ${BONEDATA_INPUT_QUAT_ORDER} \\
   --sony-pico-bonedata-basis ${SONY_PICO_BONEDATA_BASIS} \\
-  --sony-pico-bvh-frame ${SONY_PICO_BVH_FRAME}"
+  --sony-pico-bvh-frame ${SONY_PICO_BVH_FRAME} \\
+  --sony-pico-smpl-joints-source ${SONY_PICO_SMPL_JOINTS_SOURCE}"
   else
     SOURCE_TYPE=bvh_stream
     POSE_ENCODER_MODE=g1
@@ -536,6 +541,7 @@ if [[ "${INPUT_KIND}" == "bvh" ]]; then
 fi
 if [[ "${POSE_PROTOCOL_VERSION}" == "3" ]]; then
   echo "[sonic-json-mujoco] sony_pico_bonedata_basis=${SONY_PICO_BONEDATA_BASIS}"
+  echo "[sonic-json-mujoco] sony_pico_smpl_joints_source=${SONY_PICO_SMPL_JOINTS_SOURCE}"
 fi
 echo "[sonic-json-mujoco] receiver_coordinate_frame=${COORDINATE_FRAME}"
 echo "[sonic-json-mujoco] receiver_position_scale=${BONEDATA_POSITION_SCALE}"
