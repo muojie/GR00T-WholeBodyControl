@@ -29,9 +29,11 @@ OFF ──(A+B+X+Y，同时做零位标定)──► PLANNER ──(A+X)──�
 [Manager] Auto-start: data received, entering POSE mode
 ```
 
-### 为什么直接 OFF→POSE 与手动流程等价
+### 为什么直接 OFF→POSE 需要配套的 C++ 修复
 
-机器人 C++ 端（`zmq_manager.hpp` 的 `OnCommandReceived`）对 command 消息的处理是：`start`/`stop` 用 **OR 逻辑累积**，`planner` 标志**取最新值**。手动流程先发 `(start=True, planner=True)` 再发 `(start=True, planner=False)`，最终状态与直接发一次 `(start=True, planner=False)` 完全相同。
+机器人 C++ 端（`zmq_manager.hpp` 的 `OnCommandReceived`）在**接收层**对 command 消息的处理是：`start`/`stop` 用 OR 逻辑累积，`planner` 标志取最新值——这一层直接发 `(start=True, planner=False)` 与手动流程等价。
+
+但在**消费层**原本不等价：`start` 标志只有 PLANNER 模式的 `handlePlannerInput` 会消费；STREAMED_MOTION 模式把输入委托给 pose 接口，而 pose 接口的 start 只能由 C++ 终端键盘 `]` 键触发。手动流程恰好先经过 PLANNER（A+B+X+Y 发 `planner=True`），start 在那里被消费掉；直接 OFF→POSE 则没人消费 start。**本仓库已在 `ZMQManager::handle_input` 的 STREAMED_MOTION 分支补上 start 消费逻辑**（语义与 `]` 键一致），此后两条路径才真正等价。详见下文 FAQ 根因二。
 
 ### 保留的按键功能
 
@@ -66,11 +68,17 @@ auto_pose 一收到数据就开始跟随。若此刻人的姿势与机器人当�
 
 ## FAQ：进了 POSE，但机器人不动？
 
-**症状**：manager 日志正常（`StreamMode switch: OFF -> POSE`、PoseLoop 50 FPS 持续发送），但机器人保持静止。
+**症状**：manager 日志正常（`StreamMode switch: OFF -> POSE`、PoseLoop 50 FPS 持续发送），但机器人保持静止。这个问题有**两层叠加的根因**，都已修复。
 
-**根因（已修复）**：ZMQ PUB 对"尚未连接的订阅者"发送的消息**直接丢弃**（slow joiner 问题）。`start` 命令原本只在模式切换瞬间发送一次；auto_pose 收到首帧数据就立刻切 POSE，距 socket bind 可能不到 1 秒，机器人端 SUB 往往还没连上，这条命令就丢了。机器人端 `WAIT_FOR_CONTROL` 状态只等 `operator_state.start`，命令丢失 = 永远静止。手动按键流程靠人的操作延迟"天然"避开了这个窗口，auto_pose 没有这个延迟。
+**根因一：ZMQ slow joiner 丢掉一次性 start 命令（manager 端已修复）**
 
-**修复**：manager 在所有非 OFF 模式下以 1 Hz 重发当前模式的 command 消息。重发在机器人端经过验证是安全的：
+ZMQ PUB 对"尚未连接的订阅者"发送的消息**直接丢弃**。`start` 命令原本只在模式切换瞬间发送一次；auto_pose 收到首帧数据就立刻切 POSE，距 socket bind 可能不到 1 秒，机器人端 SUB 往往还没连上，命令就丢了。修复：manager 在所有非 OFF 模式下以 1 Hz 重发当前模式的 command 消息（保活）。附带收益：机器人端程序中途重启后约 1 秒自动重新接入。
+
+**根因二：start 命令在 STREAMED_MOTION 模式下无人消费（C++ 端已修复）**
+
+即使命令送达，`ZMQManager` 原本**只在 PLANNER 模式**（`handlePlannerInput`）消费 start 标志；STREAMED_MOTION 模式把输入委托给 pose 接口，后者的 start 只能靠 C++ 终端 `]` 键。auto_pose 直接发 `planner=False`，机器人立刻切到 STREAMED_MOTION——start 从未被消费，`WAIT_FOR_CONTROL` 永远等待。手动流程不踩这个坑纯粹因为它先经过 PLANNER 模式。修复：在 `ZMQManager::handle_input` 的 STREAMED_MOTION 分支补上 start 消费（与 `]` 键语义一致）。**该修复是 C++ 改动，需要重新编译——`deploy.sh` 每次运行会自动 build，正常重跑即可。**
+
+保活重发在机器人端的安全性验证：
 
 | C++ 端行为 | 位置 | 结论 |
 |-----------|------|------|
@@ -78,18 +86,21 @@ auto_pose 一收到数据就开始跟随。若此刻人的姿势与机器人当�
 | 模式切换仅在 planner 标志变化时触发 | `zmq_manager.hpp` | 重发相同模式不会触发 safety reset |
 | `Input()` 在 stop 后直接早退 | `g1_deploy_onnx_ref.cpp` | 已急停的机器人不再消费命令，不会被重新拉起 |
 
-额外收益：机器人端程序中途重启后，1 秒内会自动重新进入 CONTROL，无需重启 manager。
-
-**验证方法**：start 命令送达时，机器人端 C++ 终端必定打印：
+**验证方法**：机器人端 C++ 终端按顺序出现以下日志即为链路健康：
 
 ```
+[ZMQManager] Switched to: STREAMED MOTION mode (safety reset)   ← 命令送达（根因一排除）
+[ZMQManager] ZMQ streaming enabled
+[ZMQManager] Start command consumed in streamed-motion mode     ← start 被消费（根因二排除）
 [Control] DEBUG: operator_state.start=true, transitioning to CONTROL state
 ```
 
-**如果加了保活后这行仍不出现**，说明命令根本到不了机器人，按顺序检查：
+**临时手动兜底**：在机器人 C++ 终端按 `]` 键 = 直接触发 start（pose 接口的启动键），可用于现场快速验证是否卡在 start 消费环节。
+
+**如果第一行都不出现**，说明命令根本到不了机器人，按顺序检查：
 
 1. 机器人端启动参数是否使用 ZMQ 输入（如 `--input-type zmq_manager`）；
-2. 机器人端连接的 host/port 是否指向 manager 所在机器的发布端口（默认 5556）；
+2. 机器人端连接的 host/port 是否指向 manager 所在机器的发布端口（默认 5556；跨机器时 `--zmq-host` 不能是 localhost）；
 3. 机器人终端是否有任何 `[ZMQManager]` 收包日志——一条都没有即网络/地址问题。
 
 ## 操作建议
@@ -107,4 +118,5 @@ auto_pose 一收到数据就开始跟随。若此刻人的姿势与机器人当�
 | 同文件 → `ThreePointPose.calibrate_now` | 零位标定实现（仅异常返回 False，不校验姿势） |
 | 同文件 → `PoseStreamer.run_once` | POSE 主体数据计算（不依赖标定）与 `vr_position/vr_orientation`（依赖标定） |
 | `gear_sonic_deploy/.../input_interface/zmq_manager.hpp` → `OnCommandReceived` / `update` | command 消息 start/stop OR 累积、planner 取最新、start 幂等守卫 |
+| 同文件 → `handle_input` STREAMED_MOTION 分支 | start 命令在流式模式下的消费（根因二修复处，语义同 `]` 键） |
 | `gear_sonic_deploy/.../src/g1_deploy_onnx_ref.cpp` → `Control()` | `WAIT_FOR_CONTROL` 等待 `operator_state.start`，送达时打印 DEBUG 转换日志 |

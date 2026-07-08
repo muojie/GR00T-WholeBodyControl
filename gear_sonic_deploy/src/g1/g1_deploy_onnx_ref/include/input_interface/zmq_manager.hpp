@@ -369,6 +369,15 @@ class ZMQManager : public InputInterface {
                           has_planner, planner_state, movement_state_buffer,
                           current_motion_mutex);
       } else {
+        // Consume the start command here as well: it is otherwise only consumed
+        // by handlePlannerInput in PLANNER mode, so a command with start=true and
+        // planner=false (entering streamed motion directly from OFF) would be
+        // dropped and the robot would stay in WAIT_FOR_CONTROL forever.
+        // Mirrors the ']' key behavior of ZMQEndpointInterface.
+        if (start_control_ && !operator_state.start) {
+          operator_state.start = true;
+          std::cout << "[ZMQManager] Start command consumed in streamed-motion mode" << std::endl;
+        }
         // Streamed motion mode: delegate to pose interface
         if (pose_interface_) {
           pose_interface_->handle_input(motion_reader, current_motion, current_frame,
