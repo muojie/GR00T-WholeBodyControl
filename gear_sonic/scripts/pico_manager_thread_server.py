@@ -1953,12 +1953,16 @@ def run_pico_manager(
     with_g1_robot: bool = True,
     enable_waist_tracking: bool = False,
     enable_smpl_vis: bool = False,
+    auto_pose: bool = True,
 ):
     """
     Manager: creates shared PUB socket and runs pose/planner streamers based on current mode.
     Controller input:
       A+X: Toggle between planner and pose mode
       A+B+X+Y: Toggle policy start/stop
+    auto_pose: when True (default), skip the A+B+X+Y / A+X sequence — as soon as the
+      first body-tracking sample arrives, calibrate on it and enter POSE mode directly.
+      A+B+X+Y still works as emergency stop from any mode.
     """
     if xrt is None:
         raise ImportError(
@@ -2032,6 +2036,8 @@ def run_pico_manager(
     #   POSE_PAUSE: left_menu_button held --> POSE_PAUSE, released --> POSE
     #
     print("Manager controls: A+X=toggle mode, A+B+X+Y=start/stop policy")
+    if auto_pose:
+        print("[Manager] auto_pose enabled: will enter POSE automatically on first data")
     current_mode = StreamMode.OFF
     # Track which mode VR_3PT was entered from, so left_axis_click returns to it.
     # Will be either PLANNER or PLANNER_FROZEN_UPPER_BODY.
@@ -2062,7 +2068,17 @@ def run_pico_manager(
 
             new_mode = current_mode
             if current_mode == StreamMode.OFF:
-                if start_combo and not prev_start_combo:
+                if auto_pose:
+                    # Auto-start: the first received sample is the zero-reference
+                    # calibration frame, then enter POSE directly (no buttons needed).
+                    # If calibration fails, stay in OFF and retry on the next sample.
+                    sample = reader.get_latest()
+                    if sample is not None and three_point.calibrate_now(
+                        sample["body_poses_np"]
+                    ):
+                        new_mode = StreamMode.POSE
+                        print("[Manager] Auto-start: data received, entering POSE mode")
+                elif start_combo and not prev_start_combo:
                     new_mode = StreamMode.PLANNER
                     # Calibrate VR 3pt tracking NOW: operator should be in zero-ref pose.
                     # Uses the current Pico SMPL frame + FK of all-zero body joints.
@@ -2294,6 +2310,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable SMPL body joint visualization (24 joint spheres) in the VR3pt viewer",
     )
+    parser.add_argument(
+        "--no_auto_pose",
+        action="store_true",
+        help="Disable auto-entering POSE mode on first data; require A+B+X+Y then A+X buttons",
+    )
     args = parser.parse_args()
 
     # Standalone VR3Pt test modes (exit after finishing)
@@ -2334,6 +2355,7 @@ if __name__ == "__main__":
             with_g1_robot=with_g1_robot,
             enable_waist_tracking=args.waist_tracking,
             enable_smpl_vis=args.vis_smpl,
+            auto_pose=not args.no_auto_pose,
         )
     else:
         # Run legacy single-thread pose streaming

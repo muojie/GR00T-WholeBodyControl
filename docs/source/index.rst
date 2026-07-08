@@ -89,6 +89,7 @@ Documentation
    tutorials/gamepad
    tutorials/zmq
    tutorials/manager
+   tutorials/auto_pose
    tutorials/vr_wholebody_teleop
    tutorials/data_collection
 
