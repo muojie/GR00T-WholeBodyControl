@@ -19,7 +19,8 @@ OFF ──(A+B+X+Y，同时做零位标定)──► PLANNER ──(A+X)──�
 
 1. 用这一帧调用 `three_point.calibrate_now()` 做零位标定；
 2. 标定成功则直接切入 **POSE** 模式（跳过 PLANNER），失败则留在 OFF、下一帧重试；
-3. 进 POSE 时自动执行 `pose_streamer.reset_yaw()`，并向机器人发送 `command` 消息（`start=True, stop=False, planner=False`）。
+3. 进 POSE 时自动执行 `pose_streamer.reset_yaw()`，并向机器人发送 `command` 消息（`start=True, stop=False, planner=False`）；
+4. 之后在所有非 OFF 模式下，**以 1 Hz 周期性重发当前模式的 command 消息**（保活），确保晚连接或中途重启的机器人端也能收到 start（见下文 FAQ）。
 
 无需按任何组合键。终端会打印：
 
@@ -63,18 +64,47 @@ python gear_sonic/scripts/pico_manager_thread_server.py --manager --no_auto_pose
 
 auto_pose 一收到数据就开始跟随。若此刻人的姿势与机器人当前姿势（通常为站立位）差异很大，参考轨迹第一帧就是大跳变，机器人可能猛动。手动流程中文档要求"先把手臂对齐机器人再按 A+X"，就是为了规避这一点。
 
+## FAQ：进了 POSE，但机器人不动？
+
+**症状**：manager 日志正常（`StreamMode switch: OFF -> POSE`、PoseLoop 50 FPS 持续发送），但机器人保持静止。
+
+**根因（已修复）**：ZMQ PUB 对"尚未连接的订阅者"发送的消息**直接丢弃**（slow joiner 问题）。`start` 命令原本只在模式切换瞬间发送一次；auto_pose 收到首帧数据就立刻切 POSE，距 socket bind 可能不到 1 秒，机器人端 SUB 往往还没连上，这条命令就丢了。机器人端 `WAIT_FOR_CONTROL` 状态只等 `operator_state.start`，命令丢失 = 永远静止。手动按键流程靠人的操作延迟"天然"避开了这个窗口，auto_pose 没有这个延迟。
+
+**修复**：manager 在所有非 OFF 模式下以 1 Hz 重发当前模式的 command 消息。重发在机器人端经过验证是安全的：
+
+| C++ 端行为 | 位置 | 结论 |
+|-----------|------|------|
+| `if (start_control_ && !operator_state.start)` | `zmq_manager.hpp` | start 幂等，已启动时重复收到是空操作 |
+| 模式切换仅在 planner 标志变化时触发 | `zmq_manager.hpp` | 重发相同模式不会触发 safety reset |
+| `Input()` 在 stop 后直接早退 | `g1_deploy_onnx_ref.cpp` | 已急停的机器人不再消费命令，不会被重新拉起 |
+
+额外收益：机器人端程序中途重启后，1 秒内会自动重新进入 CONTROL，无需重启 manager。
+
+**验证方法**：start 命令送达时，机器人端 C++ 终端必定打印：
+
+```
+[Control] DEBUG: operator_state.start=true, transitioning to CONTROL state
+```
+
+**如果加了保活后这行仍不出现**，说明命令根本到不了机器人，按顺序检查：
+
+1. 机器人端启动参数是否使用 ZMQ 输入（如 `--input-type zmq_manager`）；
+2. 机器人端连接的 host/port 是否指向 manager 所在机器的发布端口（默认 5556）；
+3. 机器人终端是否有任何 `[ZMQManager]` 收包日志——一条都没有即网络/地址问题。
+
 ## 操作建议
 
 1. **数据源可控时（回放/合成数据/自建 UDP 源）**：让数据流第一帧从接近零位/站立的姿势开始，偏移和跳变问题都不存在。
 2. **真人驱动时**：保持原操作习惯——先摆好零位标定姿势，再开始发送数据。
-3. **启动顺序**：先启动机器人侧 C++ deploy 程序，再启动 manager。`start` 命令只在自动进 POSE 那一刻**发送一次**（ZMQ PUB 对未连接的订阅者直接丢消息，即 slow joiner 问题）；手动流程靠人按键天然有延迟，auto_pose 没有，必须靠启动顺序保证。
-4. **急停**：A+B+X+Y 始终可用；机器人侧 C++ 终端的 `O`/`o` 键急停也不受影响。
+3. **启动顺序**：不再有硬性要求。command 消息以 1 Hz 保活重发（见 FAQ），机器人端无论先启动、后启动还是中途重启，都会在约 1 秒内收到 start 并进入 CONTROL。
+4. **急停**：A+B+X+Y 始终可用；机器人侧 C++ 终端的 `O`/`o` 键急停也不受影响（急停后保活重发不会重新拉起机器人）。
 
 ## 相关代码位置
 
 | 位置 | 内容 |
 |------|------|
-| `gear_sonic/scripts/pico_manager_thread_server.py` → `run_pico_manager` | 状态机与 auto_pose 分支（OFF 状态下收到首帧即标定+进 POSE） |
+| `gear_sonic/scripts/pico_manager_thread_server.py` → `run_pico_manager` | 状态机与 auto_pose 分支（OFF 状态下收到首帧即标定+进 POSE）、1 Hz command 保活重发 |
 | 同文件 → `ThreePointPose.calibrate_now` | 零位标定实现（仅异常返回 False，不校验姿势） |
 | 同文件 → `PoseStreamer.run_once` | POSE 主体数据计算（不依赖标定）与 `vr_position/vr_orientation`（依赖标定） |
-| `gear_sonic_deploy/.../input_interface/zmq_manager.hpp` → `OnCommandReceived` | command 消息 start/stop OR 累积、planner 取最新的语义 |
+| `gear_sonic_deploy/.../input_interface/zmq_manager.hpp` → `OnCommandReceived` / `update` | command 消息 start/stop OR 累积、planner 取最新、start 幂等守卫 |
+| `gear_sonic_deploy/.../src/g1_deploy_onnx_ref.cpp` → `Control()` | `WAIT_FOR_CONTROL` 等待 `operator_state.start`，送达时打印 DEBUG 转换日志 |

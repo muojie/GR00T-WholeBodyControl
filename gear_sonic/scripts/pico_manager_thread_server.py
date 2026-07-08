@@ -2063,6 +2063,14 @@ def run_pico_manager(
         # so "pressed A+B+X+Y but nothing happened" can be diagnosed from the console.
         prev_btn_state = (False, False, False, False)
         last_btn_heartbeat = time.time()
+        # ZMQ PUB drops messages sent before a subscriber connects (slow joiner),
+        # so the one-shot command sent on a mode transition can be lost if the
+        # robot-side app connects late (or restarts). Re-send the current mode's
+        # command at 1 Hz while running. This is safe on the robot side: start is
+        # idempotent (guarded by !operator_state.start), same-mode commands cause
+        # no safety reset, and a stopped robot no longer reads input at all.
+        last_command_resend = time.time()
+        print("[Manager] Command keepalive: re-sending current mode command at 1 Hz")
         while True:
             # Poll Pico controller for buttons/axes
             a_pressed, b_pressed, x_pressed, y_pressed = get_abxy_buttons()
@@ -2238,6 +2246,12 @@ def run_pico_manager(
 
                 print(f"[Manager] StreamMode switch: {current_mode.name} -> {new_mode.name}")
                 current_mode = new_mode
+                last_command_resend = now  # transition just sent a fresh command
+            elif current_mode != StreamMode.OFF and now - last_command_resend >= 1.0:
+                # Keepalive: repeat the current mode's command for late joiners.
+                last_command_resend = now
+                planner_flag = current_mode not in (StreamMode.POSE, StreamMode.POSE_PAUSE)
+                socket.send(build_command_message(start=True, stop=False, planner=planner_flag))
 
             # Mode-independent: send manager_state for data exporter
             toggle_dc_tmp = bool(a_pressed) and left_grip_mgr > 0.5
