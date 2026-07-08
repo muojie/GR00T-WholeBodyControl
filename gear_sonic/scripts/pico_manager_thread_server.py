@@ -818,8 +818,14 @@ def get_face_buttons():
         return False, False
 
 
+_abxy_warn_last = 0.0
+
+
 def get_abxy_buttons():
-    """Fetch A,B,X,Y face buttons as booleans (a,b,x,y)."""
+    """Fetch A,B,X,Y face buttons as booleans (a,b,x,y).
+    Read failures are logged (rate-limited to 1/s) instead of silently
+    returning all-False, so a dead button path is visible in the console."""
+    global _abxy_warn_last
     if xrt is None:
         return False, False, False, False
     try:
@@ -828,7 +834,11 @@ def get_abxy_buttons():
         x_pressed = bool(xrt.get_X_button())
         y_pressed = bool(xrt.get_Y_button())
         return a_pressed, b_pressed, x_pressed, y_pressed
-    except Exception:
+    except Exception as e:
+        now = time.time()
+        if now - _abxy_warn_last >= 1.0:
+            _abxy_warn_last = now
+            print(f"[Buttons] WARNING: A/B/X/Y read failed, treating as not pressed: {e}")
         return False, False, False, False
 
 
@@ -2049,6 +2059,10 @@ def run_pico_manager(
         prev_by_pressed = False
         prev_start_combo = False
         prev_left_axis_click = False
+        # Button-tracking debug state: log raw A/B/X/Y on every change + 5s heartbeat,
+        # so "pressed A+B+X+Y but nothing happened" can be diagnosed from the console.
+        prev_btn_state = (False, False, False, False)
+        last_btn_heartbeat = time.time()
         while True:
             # Poll Pico controller for buttons/axes
             a_pressed, b_pressed, x_pressed, y_pressed = get_abxy_buttons()
@@ -2066,9 +2080,42 @@ def run_pico_manager(
             # Rising edge: A+B+X+Y pressed together -> toggle policy start/stop (planner=True)
             start_combo = (a_pressed) and (b_pressed) and (x_pressed) and (y_pressed)
 
+            # --- Button/combo tracking logs ---
+            btn_state = (a_pressed, b_pressed, x_pressed, y_pressed)
+            if btn_state != prev_btn_state:
+                # Shows exactly which buttons registered; a combo "not reacting" is
+                # usually one button never reaching 1 here (e.g. sleeping controller).
+                print(
+                    f"[Manager] Buttons: A={int(a_pressed)} B={int(b_pressed)} "
+                    f"X={int(x_pressed)} Y={int(y_pressed)} | "
+                    f"A+X={int(ax_pressed)} B+Y={int(by_pressed)} "
+                    f"A+B+X+Y={int(start_combo)} | mode={current_mode.name}"
+                )
+                prev_btn_state = btn_state
+            if ax_pressed and not prev_ax_pressed:
+                print(f"[Manager] Combo A+X detected (mode={current_mode.name})")
+            if by_pressed and not prev_by_pressed:
+                print(f"[Manager] Combo B+Y detected (mode={current_mode.name})")
+            if start_combo and not prev_start_combo:
+                print(f"[Manager] Combo A+B+X+Y detected (mode={current_mode.name})")
+            now = time.time()
+            if now - last_btn_heartbeat >= 5.0:
+                last_btn_heartbeat = now
+                print(
+                    f"[Manager] Poll alive: mode={current_mode.name} "
+                    f"A={int(a_pressed)} B={int(b_pressed)} "
+                    f"X={int(x_pressed)} Y={int(y_pressed)}"
+                )
+
             new_mode = current_mode
             if current_mode == StreamMode.OFF:
                 if auto_pose:
+                    if start_combo and not prev_start_combo:
+                        print(
+                            "[Manager] A+B+X+Y pressed in OFF, but auto_pose is active: "
+                            "combo ignored, waiting for first data sample "
+                            "(use --no_auto_pose for the button start flow)"
+                        )
                     # Auto-start: the first received sample is the zero-reference
                     # calibration frame, then enter POSE directly (no buttons needed).
                     # If calibration fails, stay in OFF and retry on the next sample.

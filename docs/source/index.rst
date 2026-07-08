@@ -90,6 +90,7 @@ Documentation
    tutorials/zmq
    tutorials/manager
    tutorials/auto_pose
+   tutorials/button_troubleshooting
    tutorials/vr_wholebody_teleop
    tutorials/data_collection
 
