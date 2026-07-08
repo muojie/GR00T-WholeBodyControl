@@ -54,6 +54,19 @@ def _load_default_network_config() -> None:
 _load_default_network_config()
 
 
+def _normalise_robot_id(value: object) -> str:
+    robot_id = str(value).strip()
+    return robot_id if robot_id else "1"
+
+
+def _robot_env(robot_id: str, suffix: str, default: object) -> object:
+    return os.environ.get(f"G1_{robot_id}_{suffix}", os.environ.get(f"G1_{suffix}", default))
+
+
+def _robot_config_value(config: dict, key: str, suffix: str, robot_id: str, default: object) -> object:
+    return config.get(key, _robot_env(robot_id, suffix, default))
+
+
 class UnitreeSdk2Bridge:
     """
     This class is responsible for bridging the Unitree SDK2 with the Groot environment.
@@ -133,18 +146,41 @@ class UnitreeSdk2Bridge:
         self.left_hand_cmd_lock = threading.Lock()
         self.right_hand_cmd_lock = threading.Lock()
 
+        self.robot_id = _normalise_robot_id(
+            config.get("ROBOT_ID", os.environ.get("G1_LOCAL_ROBOT_ID", os.environ.get("ROBOT_ID", "1")))
+        )
         self.root_zmq_socket = None
         self.root_zmq_context = None
-        self.root_zmq_topic = str(config.get("ROOT_STATE_ZMQ_TOPIC", "g1_root")).encode("utf-8")
-        self.root_zmq_port = int(config.get("ROOT_STATE_ZMQ_PORT", os.environ.get("G1_ROOT_ZMQ_PORT", 5558)))
-        if bool(config.get("ROOT_STATE_ZMQ_ENABLE", True)):
+        self.root_zmq_topic = str(
+            _robot_config_value(config, "ROOT_STATE_ZMQ_TOPIC", "ROOT_ZMQ_TOPIC", self.robot_id, "g1_root")
+        ).encode("utf-8")
+        self.root_zmq_port = int(
+            _robot_config_value(config, "ROOT_STATE_ZMQ_PORT", "ROOT_ZMQ_PORT", self.robot_id, 5558)
+        )
+        root_zmq_enable = str(
+            _robot_config_value(config, "ROOT_STATE_ZMQ_ENABLE", "ROOT_ZMQ_ENABLE", self.robot_id, "1")
+        ).lower() not in {"0", "false", "no", "off"}
+        if root_zmq_enable:
             self._init_root_state_zmq()
         self.root_udp_socket = None
-        self.root_udp_topic = str(config.get("ROOT_STATE_UDP_TOPIC", os.environ.get("G1_ROOT_UDP_TOPIC", "g1_root"))).encode("utf-8")
-        self.root_udp_host = str(config.get("ROOT_STATE_UDP_HOST", os.environ.get("G1_ROOT_UDP_HOST", "127.0.0.1")))
-        self.root_udp_bind_host = str(config.get("ROOT_STATE_UDP_BIND_HOST", os.environ.get("G1_ROOT_UDP_BIND_HOST", "192.168.10.230")))
-        self.root_udp_port = int(config.get("ROOT_STATE_UDP_PORT", os.environ.get("G1_ROOT_UDP_PORT", 5558)))
-        if bool(config.get("ROOT_STATE_UDP_ENABLE", True)):
+        self.root_udp_topic = str(
+            _robot_config_value(config, "ROOT_STATE_UDP_TOPIC", "ROOT_UDP_TOPIC", self.robot_id, "g1_root")
+        ).encode("utf-8")
+        self.root_udp_host = str(
+            _robot_config_value(config, "ROOT_STATE_UDP_HOST", "ROOT_UDP_HOST", self.robot_id, "127.0.0.1")
+        )
+        self.root_udp_bind_host = str(
+            _robot_config_value(
+                config, "ROOT_STATE_UDP_BIND_HOST", "ROOT_UDP_BIND_HOST", self.robot_id, "192.168.10.230"
+            )
+        )
+        self.root_udp_port = int(
+            _robot_config_value(config, "ROOT_STATE_UDP_PORT", "ROOT_UDP_PORT", self.robot_id, 5558)
+        )
+        root_udp_enable = str(
+            _robot_config_value(config, "ROOT_STATE_UDP_ENABLE", "ROOT_UDP_ENABLE", self.robot_id, "1")
+        ).lower() not in {"0", "false", "no", "off"}
+        if root_udp_enable:
             self._init_root_state_udp()
 
         self.wireless_controller = unitree_go_msg_dds__WirelessController_()
@@ -257,6 +293,7 @@ class UnitreeSdk2Bridge:
         vel = np.asarray(obs["floating_base_vel"], dtype=np.float64)
         payload = {
             "time": float(obs["time"]),
+            "robot_id": int(self.robot_id) if self.robot_id.isdigit() else self.robot_id,
             "root_pos_w": pose[:3].tolist(),
             "root_quat_w": pose[3:7].tolist(),
             "root_lin_vel_w": vel[:3].tolist(),
