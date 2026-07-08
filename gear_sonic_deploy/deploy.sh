@@ -47,6 +47,23 @@ for ((idx = 1; idx <= $#; idx++)); do
     fi
 done
 
+expand_env_value() {
+    local value="$1"
+    local var_name
+    local var_value
+    while [[ "$value" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\} ]]; do
+        var_name="${BASH_REMATCH[1]}"
+        var_value="${!var_name:-}"
+        value="${value//\$\{$var_name\}/$var_value}"
+    done
+    while [[ "$value" =~ \$([A-Za-z_][A-Za-z0-9_]*) ]]; do
+        var_name="${BASH_REMATCH[1]}"
+        var_value="${!var_name:-}"
+        value="${value//\$$var_name/$var_value}"
+    done
+    printf '%s' "$value"
+}
+
 if [[ -f "$NETWORK_CONFIG_FILE" ]]; then
     while IFS= read -r line || [[ -n "$line" ]]; do
         line="${line%$'\r'}"
@@ -64,6 +81,7 @@ if [[ -f "$NETWORK_CONFIG_FILE" ]]; then
         value="${value#\"}"
         value="${value%\'}"
         value="${value#\'}"
+        value="$(expand_env_value "$value")"
         [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && export "$key=$value"
     done < "$NETWORK_CONFIG_FILE"
     echo -e "${CYAN}Loaded network config: $NETWORK_CONFIG_FILE${NC}"
@@ -364,18 +382,26 @@ ZMQ_TOPIC_DEFAULT="pose"
 G1_LOCAL_ROBOT_ID_DEFAULT="${G1_LOCAL_ROBOT_ID:-${ROBOT_ID:-1}}"
 case "$G1_LOCAL_ROBOT_ID_DEFAULT" in
     2)
+        UBUNTU_SENDER_IP_DEFAULT="${UBUNTU_ROBOT_2_SENDER_IP:-${G1_2_SENDER_IP:-192.168.10.231}}"
+        WINDOWS_ISAACLAB_IP_DEFAULT="${WINDOWS_ROBOT_2_ISAACLAB_IP:-${ISAACLAB_G1_2_HOST_IP:-127.0.0.1}}"
         ZMQ_OUT_PORT_DEFAULT="${G1_2_ZMQ_OUT_PORT:-${G1_ZMQ_OUT_PORT:-5567}}"
         ZMQ_OUT_TOPIC_DEFAULT="${G1_2_ZMQ_OUT_TOPIC:-${G1_ZMQ_OUT_TOPIC:-g1_2_debug}}"
+        UDP_OUT_HOST_DEFAULT="${G1_2_UDP_OUT_HOST:-${G1_UDP_OUT_HOST:-$WINDOWS_ISAACLAB_IP_DEFAULT}}"
+        UDP_OUT_BIND_HOST_DEFAULT="${G1_2_UDP_OUT_BIND_HOST:-${G1_UDP_OUT_BIND_HOST:-$UBUNTU_SENDER_IP_DEFAULT}}"
+        UDP_OUT_PORT_DEFAULT="${G1_2_UDP_OUT_PORT:-${G1_UDP_OUT_PORT:-5567}}"
+        UDP_OUT_TOPIC_DEFAULT="${G1_2_UDP_OUT_TOPIC:-${G1_UDP_OUT_TOPIC:-g1_2_debug}}"
         ;;
     *)
+        UBUNTU_SENDER_IP_DEFAULT="${UBUNTU_ROBOT_1_SENDER_IP:-${G1_1_SENDER_IP:-192.168.10.230}}"
+        WINDOWS_ISAACLAB_IP_DEFAULT="${WINDOWS_ROBOT_1_ISAACLAB_IP:-${ISAACLAB_G1_1_HOST_IP:-127.0.0.1}}"
         ZMQ_OUT_PORT_DEFAULT="${G1_1_ZMQ_OUT_PORT:-${G1_ZMQ_OUT_PORT:-5557}}"
         ZMQ_OUT_TOPIC_DEFAULT="${G1_1_ZMQ_OUT_TOPIC:-${G1_ZMQ_OUT_TOPIC:-g1_1_debug}}"
+        UDP_OUT_HOST_DEFAULT="${G1_1_UDP_OUT_HOST:-${G1_UDP_OUT_HOST:-$WINDOWS_ISAACLAB_IP_DEFAULT}}"
+        UDP_OUT_BIND_HOST_DEFAULT="${G1_1_UDP_OUT_BIND_HOST:-${G1_UDP_OUT_BIND_HOST:-$UBUNTU_SENDER_IP_DEFAULT}}"
+        UDP_OUT_PORT_DEFAULT="${G1_1_UDP_OUT_PORT:-${G1_UDP_OUT_PORT:-5557}}"
+        UDP_OUT_TOPIC_DEFAULT="${G1_1_UDP_OUT_TOPIC:-${G1_UDP_OUT_TOPIC:-g1_1_debug}}"
         ;;
 esac
-UDP_OUT_HOST_DEFAULT="${G1_UDP_OUT_HOST:-127.0.0.1}"
-UDP_OUT_BIND_HOST_DEFAULT="${G1_UDP_OUT_BIND_HOST:-192.168.10.230}"
-UDP_OUT_PORT_DEFAULT="${G1_UDP_OUT_PORT:-5557}"
-UDP_OUT_TOPIC_DEFAULT="${G1_UDP_OUT_TOPIC:-g1_debug}"
 
 # Initialize with defaults (will be set after parsing)
 CHECKPOINT="$CHECKPOINT_DEFAULT"

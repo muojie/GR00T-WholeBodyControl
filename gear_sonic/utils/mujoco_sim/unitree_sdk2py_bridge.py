@@ -6,6 +6,7 @@ so the WBC policy sees the sim as a real robot.
 """
 
 import os
+import re
 import socket
 import sys
 import threading
@@ -24,6 +25,18 @@ from unitree_sdk2py.idl.unitree_go.msg.dds_ import WirelessController_
 from unitree_sdk2py.idl.unitree_hg.msg.dds_ import HandCmd_, HandState_, OdoState_
 
 
+_ENV_REF_RE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+
+
+def _expand_env_value(value: str) -> str:
+    for _ in range(10):
+        expanded = _ENV_REF_RE.sub(lambda match: os.environ.get(match.group(1) or match.group(2), ""), value)
+        if expanded == value:
+            return expanded
+        value = expanded
+    return value
+
+
 def _load_env_file(path: Path) -> None:
     if not path.exists():
         return
@@ -39,7 +52,7 @@ def _load_env_file(path: Path) -> None:
         key = key.strip()
         value = value.strip().strip('"').strip("'")
         if key:
-            os.environ.setdefault(key, value)
+            os.environ.setdefault(key, _expand_env_value(value))
 
 
 def _load_default_network_config() -> None:
@@ -61,6 +74,20 @@ def _normalise_robot_id(value: object) -> str:
 
 def _robot_env(robot_id: str, suffix: str, default: object) -> object:
     return os.environ.get(f"G1_{robot_id}_{suffix}", os.environ.get(f"G1_{suffix}", default))
+
+
+def _ubuntu_sender_ip(robot_id: str, default: object) -> object:
+    return os.environ.get(
+        f"UBUNTU_ROBOT_{robot_id}_SENDER_IP",
+        os.environ.get(f"G1_{robot_id}_SENDER_IP", default),
+    )
+
+
+def _windows_isaaclab_ip(robot_id: str, default: object) -> object:
+    return os.environ.get(
+        f"WINDOWS_ROBOT_{robot_id}_ISAACLAB_IP",
+        os.environ.get(f"ISAACLAB_G1_{robot_id}_HOST_IP", default),
+    )
 
 
 def _robot_config_value(config: dict, key: str, suffix: str, robot_id: str, default: object) -> object:
@@ -167,11 +194,21 @@ class UnitreeSdk2Bridge:
             _robot_config_value(config, "ROOT_STATE_UDP_TOPIC", "ROOT_UDP_TOPIC", self.robot_id, "g1_root")
         ).encode("utf-8")
         self.root_udp_host = str(
-            _robot_config_value(config, "ROOT_STATE_UDP_HOST", "ROOT_UDP_HOST", self.robot_id, "127.0.0.1")
+            _robot_config_value(
+                config,
+                "ROOT_STATE_UDP_HOST",
+                "ROOT_UDP_HOST",
+                self.robot_id,
+                _windows_isaaclab_ip(self.robot_id, "127.0.0.1"),
+            )
         )
         self.root_udp_bind_host = str(
             _robot_config_value(
-                config, "ROOT_STATE_UDP_BIND_HOST", "ROOT_UDP_BIND_HOST", self.robot_id, "192.168.10.230"
+                config,
+                "ROOT_STATE_UDP_BIND_HOST",
+                "ROOT_UDP_BIND_HOST",
+                self.robot_id,
+                _ubuntu_sender_ip(self.robot_id, "192.168.10.230"),
             )
         )
         self.root_udp_port = int(
