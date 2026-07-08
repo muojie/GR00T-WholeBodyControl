@@ -11,7 +11,7 @@ import socket
 import sys
 import threading
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import scipy.spatial.transform
@@ -92,6 +92,33 @@ def _windows_isaaclab_ip(robot_id: str, default: object) -> object:
 
 def _robot_config_value(config: dict, key: str, suffix: str, robot_id: str, default: object) -> object:
     return config.get(key, _robot_env(robot_id, suffix, default))
+
+
+def _split_udp_targets(value: object) -> List[str]:
+    targets = []
+    seen = set()
+    for item in str(value).split(","):
+        item = item.strip()
+        if not item or item in seen:
+            continue
+        targets.append(item)
+        seen.add(item)
+    return targets
+
+
+def _parse_udp_target(target: str, default_port: int) -> Tuple[str, int]:
+    host = target.strip()
+    port = default_port
+    if ":" in host:
+        host_part, port_part = host.rsplit(":", 1)
+        host_part = host_part.strip()
+        port_part = port_part.strip()
+        if port_part:
+            port = int(port_part)
+            host = host_part
+    if not host:
+        raise ValueError("empty UDP destination host")
+    return host, port
 
 
 class UnitreeSdk2Bridge:
@@ -193,15 +220,17 @@ class UnitreeSdk2Bridge:
         self.root_udp_topic = str(
             _robot_config_value(config, "ROOT_STATE_UDP_TOPIC", "ROOT_UDP_TOPIC", self.robot_id, "g1_root")
         ).encode("utf-8")
-        self.root_udp_host = str(
-            _robot_config_value(
+        root_udp_hosts = _robot_config_value(config, "ROOT_STATE_UDP_HOSTS", "ROOT_UDP_HOSTS", self.robot_id, "")
+        if not root_udp_hosts:
+            root_udp_hosts = _robot_config_value(
                 config,
                 "ROOT_STATE_UDP_HOST",
                 "ROOT_UDP_HOST",
                 self.robot_id,
                 _windows_isaaclab_ip(self.robot_id, "127.0.0.1"),
             )
-        )
+        self.root_udp_hosts = _split_udp_targets(root_udp_hosts)
+        self.root_udp_targets = []
         self.root_udp_bind_host = str(
             _robot_config_value(
                 config,
@@ -313,14 +342,24 @@ class UnitreeSdk2Bridge:
             if self.root_udp_bind_host:
                 self.root_udp_socket.bind((self.root_udp_bind_host, 0))
             self.root_udp_socket.setblocking(False)
-            self.root_udp_socket.connect((self.root_udp_host, self.root_udp_port))
+            self.root_udp_targets = []
+            for target in self.root_udp_hosts:
+                host, port = _parse_udp_target(target, self.root_udp_port)
+                infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_DGRAM)
+                if not infos:
+                    raise RuntimeError(f"getaddrinfo({host}:{port}) returned no targets")
+                self.root_udp_targets.append(infos[0][4])
+            if not self.root_udp_targets:
+                raise RuntimeError("no root-state UDP destination host configured")
+            target_labels = ",".join(f"{host}:{port}" for host, port in self.root_udp_targets)
             print(
                 f"[UnitreeSdk2Bridge] Publishing MuJoCo root state on "
                 f"udp://{self.root_udp_bind_host or 'auto'} -> "
-                f"{self.root_udp_host}:{self.root_udp_port}/{self.root_udp_topic.decode('utf-8')}"
+                f"{target_labels}/{self.root_udp_topic.decode('utf-8')}"
             )
         except Exception as exc:
             self.root_udp_socket = None
+            self.root_udp_targets = []
             print(f"[UnitreeSdk2Bridge] Root-state UDP disabled: {exc}")
 
     def _pack_root_state_payload(self, obs: Dict[str, any]) -> bytes:
@@ -379,12 +418,15 @@ class UnitreeSdk2Bridge:
         if self.root_udp_socket is None:
             return
         try:
-            self.root_udp_socket.send(self.root_udp_topic + packed)
+            packet = self.root_udp_topic + packed
+            for target in self.root_udp_targets:
+                self.root_udp_socket.sendto(packet, target)
         except (BlockingIOError, InterruptedError):
             pass
         except Exception as exc:
             print(f"[UnitreeSdk2Bridge] Root-state UDP publish failed once: {exc}")
             self.root_udp_socket = None
+            self.root_udp_targets = []
 
     def _publish_root_state(self, obs: Dict[str, any]):
         if self.root_zmq_socket is None and self.root_udp_socket is None:

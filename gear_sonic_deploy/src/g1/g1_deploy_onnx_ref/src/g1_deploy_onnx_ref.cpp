@@ -4162,7 +4162,7 @@ int main(int argc, char const* argv[]) {
     std::cout << "  --zmq-verbose: enable ZMQ subscriber verbose logs" << std::endl;
     std::cout << "  --zmq-out-port <port>: ZMQ port for output (default: 5557)" << std::endl;
     std::cout << "  --zmq-out-topic <topic>: ZMQ topic/prefix for output (default: g1_debug)" << std::endl;
-    std::cout << "  --udp-out-host <host>: UDP destination host for output (default: 127.0.0.1)" << std::endl;
+    std::cout << "  --udp-out-host <hosts>: UDP destination host(s), comma-separated, with optional :port (default: 127.0.0.1)" << std::endl;
     std::cout << "  --udp-out-bind-host <host>: UDP local source address to bind (default: auto)" << std::endl;
     std::cout << "  --udp-out-port <port>: UDP destination port for output (default: 5557)" << std::endl;
     std::cout << "  --udp-out-topic <topic>: UDP topic/prefix for output (default: g1_debug)" << std::endl;

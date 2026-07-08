@@ -108,6 +108,9 @@
 #include <variant>
 #include <stdexcept>
 #include <cerrno>
+#include <cctype>
+#include <sstream>
+#include <utility>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -267,8 +270,12 @@ private:
     bool enable_zmq_ = true;
     bool enable_udp_ = false;
     int udp_socket_fd_ = -1;
-    sockaddr_storage udp_addr_ {};
-    socklen_t udp_addr_len_ = 0;
+    struct UdpDestination {
+        sockaddr_storage addr {};
+        socklen_t addr_len = 0;
+        std::string label;
+    };
+    std::vector<UdpDestination> udp_destinations_;
     std::vector<char> udp_packet_buffer_;
     bool udp_send_error_printed_ = false;
 
@@ -283,7 +290,59 @@ private:
     msgpack::sbuffer config_sbuf_cache_;  ///< Serialised config (populated on first publish_config()).
     std::chrono::steady_clock::time_point config_last_publish_time_;
 
-    void init_udp_sender(const std::string& host, int port, const std::string& bind_host) {
+    static std::string trim_copy(const std::string& value) {
+        size_t start = 0;
+        while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start]))) {
+            ++start;
+        }
+        size_t end = value.size();
+        while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+            --end;
+        }
+        return value.substr(start, end - start);
+    }
+
+    static std::vector<std::string> split_udp_targets(const std::string& targets) {
+        std::vector<std::string> result;
+        std::stringstream stream(targets);
+        std::string item;
+        while (std::getline(stream, item, ',')) {
+            item = trim_copy(item);
+            if (item.empty()) {
+                continue;
+            }
+            bool exists = false;
+            for (const auto& existing : result) {
+                if (existing == item) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) {
+                result.push_back(item);
+            }
+        }
+        return result;
+    }
+
+    static std::pair<std::string, int> parse_udp_target(const std::string& target, int default_port) {
+        std::string host = trim_copy(target);
+        int port = default_port;
+        const size_t colon_pos = host.rfind(':');
+        if (colon_pos != std::string::npos) {
+            const std::string port_text = trim_copy(host.substr(colon_pos + 1));
+            if (!port_text.empty()) {
+                port = std::stoi(port_text);
+                host = trim_copy(host.substr(0, colon_pos));
+            }
+        }
+        if (host.empty()) {
+            throw std::runtime_error("[UDP Output ERROR] empty UDP destination host");
+        }
+        return {host, port};
+    }
+
+    void init_udp_sender(const std::string& hosts, int port, const std::string& bind_host) {
         udp_socket_fd_ = ::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
         if (udp_socket_fd_ < 0) {
             throw std::runtime_error("[UDP Output ERROR] socket() failed: " + std::string(std::strerror(errno)));
@@ -311,23 +370,40 @@ private:
         hints.ai_family = AF_INET;
         hints.ai_socktype = SOCK_DGRAM;
 
-        addrinfo* result = nullptr;
-        const std::string port_str = std::to_string(port);
-        int rc = ::getaddrinfo(host.c_str(), port_str.c_str(), &hints, &result);
-        if (rc != 0 || result == nullptr) {
-            if (result) {
-                ::freeaddrinfo(result);
+        for (const auto& target : split_udp_targets(hosts)) {
+            const auto [host, target_port] = parse_udp_target(target, port);
+            addrinfo* result = nullptr;
+            const std::string port_str = std::to_string(target_port);
+            int rc = ::getaddrinfo(host.c_str(), port_str.c_str(), &hints, &result);
+            if (rc != 0 || result == nullptr) {
+                if (result) {
+                    ::freeaddrinfo(result);
+                }
+                throw std::runtime_error("[UDP Output ERROR] getaddrinfo(" + host + ":" + port_str + ") failed");
             }
-            throw std::runtime_error("[UDP Output ERROR] getaddrinfo(" + host + ":" + port_str + ") failed");
+
+            UdpDestination destination;
+            std::memcpy(&destination.addr, result->ai_addr, result->ai_addrlen);
+            destination.addr_len = static_cast<socklen_t>(result->ai_addrlen);
+            destination.label = host + ":" + port_str;
+            udp_destinations_.push_back(destination);
+            ::freeaddrinfo(result);
         }
 
-        std::memcpy(&udp_addr_, result->ai_addr, result->ai_addrlen);
-        udp_addr_len_ = static_cast<socklen_t>(result->ai_addrlen);
-        ::freeaddrinfo(result);
+        if (udp_destinations_.empty()) {
+            throw std::runtime_error("[UDP Output ERROR] no UDP destination host configured");
+        }
 
         std::cout << "[INFO] Realtime debug UDP output enabled: "
                   << (bind_host.empty() ? std::string("auto") : bind_host)
-                  << " -> " << host << ":" << port << "/" << udp_topic_ << std::endl;
+                  << " -> ";
+        for (size_t i = 0; i < udp_destinations_.size(); ++i) {
+            if (i > 0) {
+                std::cout << ",";
+            }
+            std::cout << udp_destinations_[i].label;
+        }
+        std::cout << "/" << udp_topic_ << std::endl;
     }
 
     /// Non-blocking send of [topic][msgpack payload] over the configured transports.
@@ -361,18 +437,21 @@ private:
         std::memcpy(udp_packet_buffer_.data(), topic.data(), topic.size());
         std::memcpy(udp_packet_buffer_.data() + topic.size(), sbuf.data(), sbuf.size());
 
-        ssize_t sent = ::sendto(
-            udp_socket_fd_,
-            udp_packet_buffer_.data(),
-            udp_packet_buffer_.size(),
-            MSG_DONTWAIT,
-            reinterpret_cast<const sockaddr*>(&udp_addr_),
-            udp_addr_len_
-        );
-        if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != ENOBUFS) {
-            if (!udp_send_error_printed_) {
-                std::cerr << "[UDP Output ERROR] sendto() failed: " << std::strerror(errno) << std::endl;
-                udp_send_error_printed_ = true;
+        for (const auto& destination : udp_destinations_) {
+            ssize_t sent = ::sendto(
+                udp_socket_fd_,
+                udp_packet_buffer_.data(),
+                udp_packet_buffer_.size(),
+                MSG_DONTWAIT,
+                reinterpret_cast<const sockaddr*>(&destination.addr),
+                destination.addr_len
+            );
+            if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != ENOBUFS) {
+                if (!udp_send_error_printed_) {
+                    std::cerr << "[UDP Output ERROR] sendto(" << destination.label << ") failed: "
+                              << std::strerror(errno) << std::endl;
+                    udp_send_error_printed_ = true;
+                }
             }
         }
     }
