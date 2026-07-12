@@ -5,6 +5,7 @@ simulated sensor state (joint pos/vel, IMU, odometry) back over DDS,
 so the WBC policy sees the sim as a real robot.
 """
 
+import os
 import sys
 import threading
 from typing import Dict, Tuple
@@ -100,6 +101,13 @@ class UnitreeSdk2Bridge:
         self.left_hand_cmd_lock = threading.Lock()
         self.right_hand_cmd_lock = threading.Lock()
 
+        self.root_zmq_socket = None
+        self.root_zmq_context = None
+        self.root_zmq_topic = str(config.get("ROOT_STATE_ZMQ_TOPIC", "g1_root")).encode("utf-8")
+        self.root_zmq_port = int(config.get("ROOT_STATE_ZMQ_PORT", os.environ.get("G1_ROOT_ZMQ_PORT", 5558)))
+        if bool(config.get("ROOT_STATE_ZMQ_ENABLE", True)):
+            self._init_root_state_zmq()
+
         self.wireless_controller = unitree_go_msg_dds__WirelessController_()
         self.wireless_controller_puber = ChannelPublisher(
             "rt/wirelesscontroller", WirelessController_
@@ -167,6 +175,48 @@ class UnitreeSdk2Bridge:
             right_hand_cmd_received = self.right_hand_cmd_received
         return low_cmd_received or left_hand_cmd_received or right_hand_cmd_received
 
+    def _init_root_state_zmq(self):
+        try:
+            import zmq
+
+            self.root_zmq = zmq
+            self.root_zmq_context = zmq.Context()
+            self.root_zmq_socket = self.root_zmq_context.socket(zmq.PUB)
+            self.root_zmq_socket.setsockopt(zmq.SNDHWM, 5)
+            self.root_zmq_socket.setsockopt(zmq.LINGER, 0)
+            self.root_zmq_socket.bind(f"tcp://*:{self.root_zmq_port}")
+            print(
+                f"[UnitreeSdk2Bridge] Publishing MuJoCo root state on "
+                f"tcp://*:{self.root_zmq_port}/{self.root_zmq_topic.decode('utf-8')}"
+            )
+        except Exception as exc:
+            self.root_zmq_socket = None
+            self.root_zmq_context = None
+            print(f"[UnitreeSdk2Bridge] Root-state ZMQ disabled: {exc}")
+
+    def _publish_root_state_zmq(self, obs: Dict[str, any]):
+        if self.root_zmq_socket is None:
+            return
+        try:
+            import msgpack
+
+            pose = np.asarray(obs["floating_base_pose"], dtype=np.float64)
+            vel = np.asarray(obs["floating_base_vel"], dtype=np.float64)
+            payload = {
+                "time": float(obs["time"]),
+                "root_pos_w": pose[:3].tolist(),
+                "root_quat_w": pose[3:7].tolist(),
+                "root_lin_vel_w": vel[:3].tolist(),
+                "root_ang_vel_w": vel[3:6].tolist(),
+            }
+            packed = msgpack.packb(payload, use_bin_type=True)
+            self.root_zmq_socket.send_multipart([self.root_zmq_topic, packed], flags=self.root_zmq.NOBLOCK)
+        except self.root_zmq.Again:
+            pass
+        except Exception as exc:
+            print(f"[UnitreeSdk2Bridge] Root-state ZMQ publish failed once: {exc}")
+            self.root_zmq_socket = None
+
     def PublishLowState(self, obs: Dict[str, any]):
         # publish body state
         if self.use_sensor:
@@ -204,6 +254,7 @@ class UnitreeSdk2Bridge:
 
         self.odo_state.tick = int(obs["time"] * 1e3)
         self.odo_state_puber.Write(self.odo_state)
+        self._publish_root_state_zmq(obs)
 
         self.torso_imu_puber.Write(self.torso_imu_state)
 

@@ -64,9 +64,9 @@ public:
 
         if (planner_session_) {
             const auto &input_names = planner_session_->get_input_node_names_str();
-            if (config_.version == 1) {
+            if (config_.version == 1 || config_.version == 2) {
                 if (input_names.size() != 11) {
-                    std::cout << "Model version: 1" << std::endl;
+                    std::cout << "Model version: " << config_.version << std::endl;
                     std::cout << "Model has " << input_names.size() << " inputs, expected 11" << std::endl;
                     std::cout << "✗ Failed to initialize ONNX engine" << std::endl;
                     throw std::runtime_error("Failed to initialize ONNX engine");
@@ -94,7 +94,7 @@ public:
                 std::string("facing_direction"),
                 std::string("random_seed")
             };
-            if (config_.version == 1) {
+            if (config_.version == 1 || config_.version == 2) {
                 requiredNames.push_back("height");
                 requiredNames.push_back("has_specific_target");
                 requiredNames.push_back("specific_target_positions");
@@ -264,7 +264,7 @@ private:
         
         // Update target velocity
         target_vel_values_[0] = target_vel;
-        if (config_.version == 1) {
+        if (config_.version == 1 || config_.version == 2) {
             target_height_values_[0] = target_height;
         }
         
@@ -307,7 +307,7 @@ private:
                 std::cout << "UNKNOWN";
                 break;
         }
-        if (config_.version == 1) {
+        if (config_.version == 1 || config_.version == 2) {
             std::cout << ", target_height: " << target_height_values_[0];
         }
         std::cout << ", target_vel: " << target_vel_values_[0]

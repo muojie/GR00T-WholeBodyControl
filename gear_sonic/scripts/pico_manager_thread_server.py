@@ -362,7 +362,7 @@ def run_vr3pt_live_visualizer():
     print("=" * 60)
 
     # Initialize XRT
-    subprocess.Popen(["bash", "/opt/apps/roboticsservice/runService.sh"])
+    _start_robotics_service_if_available()
     xrt.init()
     print("Waiting for body tracking data...")
     while not xrt.is_body_data_available():
@@ -412,7 +412,7 @@ def run_vr3pt_realtime_visualizer(update_hz: int = 10):
     print("=" * 60)
 
     # Initialize XRT
-    subprocess.Popen(["bash", "/opt/apps/roboticsservice/runService.sh"])
+    _start_robotics_service_if_available()
     xrt.init()
     print("Waiting for body tracking data...")
     while not xrt.is_body_data_available():
@@ -514,6 +514,21 @@ def generate_finger_data(hand: str, trigger: float, grip: float) -> np.ndarray:
 
 # Joystick deadzone threshold
 JOYSTICK_DEADZONE = 0.15
+ROBOTICS_SERVICE_SCRIPT = os.environ.get(
+    "ROBOTICS_SERVICE_SCRIPT", "/opt/apps/roboticsservice/runService.sh"
+)
+
+
+def _start_robotics_service_if_available():
+    if os.path.isfile(ROBOTICS_SERVICE_SCRIPT):
+        return subprocess.Popen(["bash", ROBOTICS_SERVICE_SCRIPT])
+
+    print(
+        f"Warning: XRoboToolkit PC service launcher not found: {ROBOTICS_SERVICE_SCRIPT}. "
+        "Install/start XRoboToolkit PC Service if body tracking data never becomes available.",
+        flush=True,
+    )
+    return None
 
 
 class YawAccumulator:
@@ -1510,7 +1525,7 @@ def run_pico(
         raise ImportError(
             "XRoboToolkit SDK not available. Install xrobotoolkit_sdk to run Pico streaming."
         )
-    subprocess.Popen(["bash", "/opt/apps/roboticsservice/runService.sh"])
+    _start_robotics_service_if_available()
     xrt.init()
     print("Waiting for body tracking data...")
     while not xrt.is_body_data_available():
@@ -1825,7 +1840,7 @@ def run_pico_manager(
         raise ImportError(
             "XRoboToolkit SDK not available. Install xrobotoolkit_sdk to run the manager."
         )
-    subprocess.Popen(["bash", "/opt/apps/roboticsservice/runService.sh"])
+    _start_robotics_service_if_available()
     xrt.init()
     print("Waiting for body tracking data...")
     while not xrt.is_body_data_available():

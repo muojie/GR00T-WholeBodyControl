@@ -5,12 +5,18 @@
 
 #include <vector>
 #include <fstream>
+#include <filesystem>
 
 TEST(FK, TestFKAndGlobalVelocities) {
 
     // read some exapmle motion data:
+    const std::string motion_dir = "reference/bones_072925_test/";
+    if (!std::filesystem::exists(motion_dir)) {
+        GTEST_SKIP() << "Missing FK test fixture: " << motion_dir;
+    }
+
     MotionDataReader motion_reader;
-    motion_reader.ReadFromCSV("reference/bones_072925_test/");
+    motion_reader.ReadFromCSV(motion_dir);
 
     RobotFK fk("g1/g1_29dof.xml");
 

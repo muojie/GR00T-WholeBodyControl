@@ -81,7 +81,12 @@ def resolve_interface(interface: str) -> tuple[str, str]:
     # Check if interface is an IP address
     if re.match(r"^\d+\.\d+\.\d+\.\d+$", interface):
         if interface == "127.0.0.1":
-            return interface, "sim"
+            lo_interface = find_interface_by_ip("127.0.0.1")
+            if lo_interface:
+                if platform.system() == "Darwin" and lo_interface == "lo":
+                    return "lo0", "sim"
+                return lo_interface, "sim"
+            return ("lo0" if platform.system() == "Darwin" else "lo"), "sim"
         else:
             return interface, "real"
 

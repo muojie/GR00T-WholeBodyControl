@@ -13,7 +13,7 @@ from cyclonedds.util import duration
 from cyclonedds.internal import dds_c_t, InvalidSample
 
 # for channel config
-from .channel_config import ChannelConfigAutoDetermine, ChannelConfigHasInterface
+from .channel_config import ChannelConfigAutoDetermine, ChannelConfigHasInterface, ChannelConfigLoopback
 
 # for singleton
 from ..utils.singleton import Singleton
@@ -196,10 +196,18 @@ class ChannelFactory(Singleton):
         super().__init__()
 
     def Init(self, id: int, networkInterface: str = None, qos: Qos = None):
+        if self.__domain is not None and self.__participant is not None:
+            self.__qos = qos
+            return True
+
         config = None
         # choose config
         if networkInterface is None:
             config = ChannelConfigAutoDetermine
+        elif networkInterface in ("lo", "lo0", "127.0.0.1"):
+            if networkInterface == "127.0.0.1":
+                networkInterface = "lo"
+            config = ChannelConfigLoopback.replace('$__IF_NAME__$', networkInterface)
         else:
             config = ChannelConfigHasInterface.replace('$__IF_NAME__$', networkInterface)
 

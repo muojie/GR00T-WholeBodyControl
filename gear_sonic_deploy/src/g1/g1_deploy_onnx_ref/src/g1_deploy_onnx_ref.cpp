@@ -93,6 +93,7 @@
 
 // New Planner Classes
 #include "../include/localmotion_kplanner.hpp"
+#include "../include/localmotion_kplanner_onnx.hpp"
 #include "../include/localmotion_kplanner_tensorrt.hpp"
 
 // Utility classes
@@ -221,6 +222,8 @@ class G1Deploy {
     // New unified planner interface
     std::string planner_path;
     std::unique_ptr<LocalMotionPlannerBase> planner_;
+    std::unique_ptr<Ort::Env> planner_ort_env_;
+    std::unique_ptr<Ort::AllocatorWithDefaultOptions> planner_ort_allocator_;
     std::shared_ptr<MotionSequence> planner_motion_;
     
     // Movement momentum system
@@ -2405,12 +2408,30 @@ class G1Deploy {
         {
           planner_config.version = 2;
         }
+        else if (planner_path.find("planner_sonic") != std::string::npos)
+        {
+          planner_config.version = 2;
+          std::cout << "[WARN] Planner path does not contain V0/V1/V2; treating planner_sonic as V2: "
+                    << planner_path << std::endl;
+        }
         else
         {
           std::cout << "Unsupported planner version: " << planner_path << std::endl;
           throw std::runtime_error("Unsupported planner version: " + planner_path);
         }
-        planner_ = std::make_unique<LocalMotionPlannerTensorRT>(planner_fp16, 0, planner_config);
+        if (planner_path.find("planner_sonic") != std::string::npos)
+        {
+          std::cout << "[INFO] Using ONNX Runtime planner backend for planner_sonic; "
+                    << "TensorRT 11 cannot build this ONNX graph on this system." << std::endl;
+          planner_ort_env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "planner");
+          planner_ort_allocator_ = std::make_unique<Ort::AllocatorWithDefaultOptions>();
+          planner_ = std::make_unique<LocalMotionPlannerONNX>(
+            *planner_ort_env_, *planner_ort_allocator_, planner_config);
+        }
+        else
+        {
+          planner_ = std::make_unique<LocalMotionPlannerTensorRT>(planner_fp16, 0, planner_config);
+        }
       }
       
       // Initialize observation function map
@@ -4465,4 +4486,3 @@ int main(int argc, char const* argv[]) {
   std::cout << "[DEBUG] Program exiting normally..." << std::endl;
   return 0;
 }
-
