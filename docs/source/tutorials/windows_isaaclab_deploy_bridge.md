@@ -325,7 +325,7 @@ PYTHONUNBUFFERED=1 .venv_teleop/bin/python -u gear_sonic/scripts/bvh_stream_send
 入口：
 
 ```bash
-~/tools/sony-isaaclab-sonic-launcher/launch_sony_isaaclab_closed_loop.py \
+scripts/launch_sony_isaaclab_closed_loop.py \
   --backend isaaclab \
   --input-source sony \
   --bvh-source bvh_stream

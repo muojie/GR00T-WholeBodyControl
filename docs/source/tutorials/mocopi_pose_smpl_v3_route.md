@@ -259,7 +259,7 @@ motion_joint_positions_wrists_10frame_step1
 外置 tmux 启动工具等价写法：
 
 ```bash
-~/tools/sony-isaaclab-sonic-launcher/launch_sony_isaaclab_closed_loop.py \
+scripts/launch_sony_isaaclab_closed_loop.py \
   --backend isaaclab \
   --input-source sony \
   --bvh-source bvh_stream \

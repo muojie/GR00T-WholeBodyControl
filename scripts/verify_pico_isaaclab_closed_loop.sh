@@ -18,8 +18,8 @@
 #   其余参数原样透传给外置 launcher
 #     （如 --task Isaac-SonicFullscene-Locomanipulation-G1-v0）
 #
-# 依赖: 外置 tmux launcher ~/tools/sony-isaaclab-sonic-launcher/
-#   launch_sony_isaaclab_closed_loop.py（可用 SONY_SONIC_LAUNCHER 环境变量覆盖位置）。
+# 依赖: 仓内 tmux launcher scripts/launch_sony_isaaclab_closed_loop.py
+#   （与本脚本同目录；可用 SONY_SONIC_LAUNCHER 环境变量覆盖位置）。
 #   GR00T 仓库根默认取本脚本所在检出（worktree 里跑即验证该 worktree），
 #   可用 GROOT_REPO_ROOT 覆盖；IsaacLab 用 ISAACLAB_ROOT 覆盖。
 #
@@ -43,7 +43,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GROOT_ROOT="${GROOT_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-LAUNCHER="${SONY_SONIC_LAUNCHER:-$HOME/tools/sony-isaaclab-sonic-launcher/launch_sony_isaaclab_closed_loop.py}"
+LAUNCHER="${SONY_SONIC_LAUNCHER:-$SCRIPT_DIR/launch_sony_isaaclab_closed_loop.py}"
 HISTORY_DIR="${SONIC_VERIFY_LOG_DIR:-$HOME/.sonic_verify_logs}"
 
 ISAACLAB_ROOT_DIR="${ISAACLAB_ROOT:-$HOME/xiaoyang_IssacLab/IsaacLab}"
