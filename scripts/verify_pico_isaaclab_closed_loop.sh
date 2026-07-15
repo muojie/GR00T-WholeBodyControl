@@ -18,6 +18,8 @@
 #   scripts/verify_pico_isaaclab_closed_loop.sh --check-only       # 不启动，只核验当前最新日志
 #   scripts/verify_pico_isaaclab_closed_loop.sh --dry-run          # 只打印各 pane 命令
 #   scripts/verify_pico_isaaclab_closed_loop.sh --timeout 600      # 核验轮询超时秒数（默认 360）
+#   scripts/verify_pico_isaaclab_closed_loop.sh --record FILE      # PICO pane 录制头显输入到 FILE（需头显）
+#   scripts/verify_pico_isaaclab_closed_loop.sh --replay FILE      # PICO pane 回放 FILE（无需头显；加 --replay-loop 循环）
 #   其余参数原样透传给外置 launcher
 #     （如 --task Isaac-SonicFullscene-Locomanipulation-G1-v0）
 #
@@ -60,19 +62,28 @@ BACKEND=isaaclab
 TIMEOUT=360
 CHECK_ONLY=0
 DRY_RUN=0
+RECORD_FILE=""
+REPLAY_FILE=""
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --backend)    BACKEND="${2:?--backend 需要 isaaclab|mujoco}"; shift ;;
-    --check-only) CHECK_ONLY=1 ;;
-    --dry-run)    DRY_RUN=1 ;;
-    --timeout)    TIMEOUT="${2:?--timeout 需要秒数}"; shift ;;
-    -h|--help)    awk 'NR>1 && !/^#/{exit} NR>1{sub(/^# ?/,""); print}' "$0"; exit 0 ;;
-    *)            EXTRA_ARGS+=("$1") ;;
+    --backend)     BACKEND="${2:?--backend 需要 isaaclab|mujoco}"; shift ;;
+    --check-only)  CHECK_ONLY=1 ;;
+    --dry-run)     DRY_RUN=1 ;;
+    --timeout)     TIMEOUT="${2:?--timeout 需要秒数}"; shift ;;
+    --record)      RECORD_FILE="${2:?--record 需要录制文件路径}"; EXTRA_ARGS+=(--pico-record "$2"); shift ;;
+    --replay)      REPLAY_FILE="${2:?--replay 需要录制文件路径}"; EXTRA_ARGS+=(--pico-replay "$2"); shift ;;
+    --replay-loop) EXTRA_ARGS+=(--pico-replay-loop) ;;
+    -h|--help)     awk 'NR>1 && !/^#/{exit} NR>1{sub(/^# ?/,""); print}' "$0"; exit 0 ;;
+    *)             EXTRA_ARGS+=("$1") ;;
   esac
   shift
 done
+
+if [[ -n "$RECORD_FILE" && -n "$REPLAY_FILE" ]]; then
+  echo "❌ --record 与 --replay 互斥，只能选一个" >&2; exit 2
+fi
 
 case "$BACKEND" in
   isaaclab) CHECK_KEYS=(proxy_src stabilized env_hz tilt nan deploy) ;;
@@ -341,6 +352,12 @@ if [[ "$CHECK_ONLY" == 0 ]]; then
   "$LAUNCHER" "${LAUNCHER_ARGS[@]}" --replace --no-attach "${EXTRA_ARGS[@]}" \
     || { echo "❌ launcher 启动失败（preflight 未过?）"; rm -f "$MARKER"; exit 2; }
   echo "  已启动。attach: tmux attach -t sony_sonic"
+  if [[ -n "$RECORD_FILE" ]]; then
+    echo "  📼 录制模式：PICO pane 跑 record 包装器 → $RECORD_FILE"
+    echo "     做完动作后到该 pane 按 Ctrl-C 收尾录制（回放用 --replay 同一文件）。"
+  elif [[ -n "$REPLAY_FILE" ]]; then
+    echo "  ▶️  回放模式：PICO pane 回放 $REPLAY_FILE（无需头显）。IsaacLab 里按 U 解锁即可看复现。"
+  fi
   echo
 fi
 

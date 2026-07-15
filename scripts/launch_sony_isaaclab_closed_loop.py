@@ -363,6 +363,16 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="fail preflight unless RoboticsServiceProcess is already running",
     )
+    parser.add_argument(
+        "--pico-record", type=Path, default=None, metavar="FILE",
+        help="record pico_manager's headset input to FILE (needs headset; PICO pane runs scripts/record_pico_input.py)",
+    )
+    parser.add_argument(
+        "--pico-replay", type=Path, default=None, metavar="FILE",
+        help="replay recorded headset input from FILE (no headset; PICO pane runs scripts/replay_pico_input.py)",
+    )
+    parser.add_argument("--pico-replay-loop", action="store_true", help="loop the replay timeline (with --pico-replay)")
+    parser.add_argument("--pico-replay-rate", type=float, default=1.0, help="replay speed multiplier (keep ~1.0)")
     parser.add_argument("--zmq-topic", default="pose", help="deploy ZMQ topic/prefix for zmq-style input types")
     parser.add_argument("--zmq-conflate", action="store_true", help="enable deploy-side ZMQ CONFLATE")
 
@@ -911,6 +921,14 @@ def _preflight(args: argparse.Namespace) -> None:
         (args.planner_file.exists(), f"planner ONNX not found: {args.planner_file}"),
         (args.obs_config.exists(), f"observation config not found: {args.obs_config}"),
         (args.motion_data.exists(), f"motion data path not found: {args.motion_data}"),
+        (
+            not (args.pico_record is not None and args.pico_replay is not None),
+            "--pico-record 与 --pico-replay 互斥，只能选一个",
+        ),
+        (
+            not ((args.pico_record is not None or args.pico_replay is not None) and args.input_source != "pico"),
+            "--pico-record/--pico-replay 仅用于 --input-source pico",
+        ),
     ]
     if args.input_source == "sony":
         checks.extend(
@@ -934,43 +952,63 @@ def _preflight(args: argparse.Namespace) -> None:
     else:
         if args.input_source == "pico":
             teleop_python = args.repo_root / ".venv_teleop" / "bin" / "python"
-            pico_service_binary = args.pico_service_script.parent / "RoboticsServiceProcess"
-            checks.extend(
-                [
-                    (teleop_python.exists(), ".venv_teleop Python not found"),
-                    (
-                        (args.repo_root / "gear_sonic" / "scripts" / "pico_manager_thread_server.py").exists(),
-                        "gear_sonic/scripts/pico_manager_thread_server.py not found",
-                    ),
-                    (
-                        args.pico_service_script.exists(),
-                        f"PICO XRoboToolkit service script not found: {args.pico_service_script}",
-                    ),
-                    (
-                        os.access(args.pico_service_script, os.X_OK),
-                        f"PICO XRoboToolkit service script is not executable: {args.pico_service_script}",
-                    ),
-                    (
-                        pico_service_binary.exists(),
-                        f"PICO RoboticsServiceProcess not found: {pico_service_binary}",
-                    ),
-                    (
-                        os.access(pico_service_binary, os.X_OK),
-                        f"PICO RoboticsServiceProcess is not executable: {pico_service_binary}",
-                    ),
-                    (
-                        _python_can_import_xrobotoolkit(teleop_python, cwd=args.repo_root),
-                        "xrobotoolkit_sdk is not importable from .venv_teleop",
-                    ),
-                ]
+            checks.append((teleop_python.exists(), ".venv_teleop Python not found"))
+            checks.append(
+                (
+                    (args.repo_root / "gear_sonic" / "scripts" / "pico_manager_thread_server.py").exists(),
+                    "gear_sonic/scripts/pico_manager_thread_server.py not found",
+                )
             )
-            if args.require_pico_service_running:
+            if args.pico_replay is not None:
+                # replay: no headset / SDK / XRoboToolkit service needed
+                checks.append((args.pico_replay.exists(), f"replay 录制文件不存在: {args.pico_replay}"))
                 checks.append(
                     (
-                        _pico_service_process_running(),
-                        "PICO XRoboToolkit service process is not running: RoboticsServiceProcess",
+                        (args.repo_root / "scripts" / "replay_pico_input.py").exists(),
+                        "scripts/replay_pico_input.py not found",
                     )
                 )
+            else:
+                # live OR record: needs the headset SDK + XRoboToolkit PC Service
+                if args.pico_record is not None:
+                    checks.append(
+                        (
+                            (args.repo_root / "scripts" / "record_pico_input.py").exists(),
+                            "scripts/record_pico_input.py not found",
+                        )
+                    )
+                pico_service_binary = args.pico_service_script.parent / "RoboticsServiceProcess"
+                checks.extend(
+                    [
+                        (
+                            args.pico_service_script.exists(),
+                            f"PICO XRoboToolkit service script not found: {args.pico_service_script}",
+                        ),
+                        (
+                            os.access(args.pico_service_script, os.X_OK),
+                            f"PICO XRoboToolkit service script is not executable: {args.pico_service_script}",
+                        ),
+                        (
+                            pico_service_binary.exists(),
+                            f"PICO RoboticsServiceProcess not found: {pico_service_binary}",
+                        ),
+                        (
+                            os.access(pico_service_binary, os.X_OK),
+                            f"PICO RoboticsServiceProcess is not executable: {pico_service_binary}",
+                        ),
+                        (
+                            _python_can_import_xrobotoolkit(teleop_python, cwd=args.repo_root),
+                            "xrobotoolkit_sdk is not importable from .venv_teleop",
+                        ),
+                    ]
+                )
+                if args.require_pico_service_running:
+                    checks.append(
+                        (
+                            _pico_service_process_running(),
+                            "PICO XRoboToolkit service process is not running: RoboticsServiceProcess",
+                        )
+                    )
     if args.backend == "isaaclab":
         checks.extend(
             [
@@ -1015,7 +1053,7 @@ def _preflight(args: argparse.Namespace) -> None:
         for error in errors:
             print(f"  - {error}")
         sys.exit(1)
-    if args.input_source == "pico" and not _pico_service_process_running():
+    if args.input_source == "pico" and args.pico_replay is None and not _pico_service_process_running():
         print(
             "WARN: RoboticsServiceProcess is not running; "
             f"pico_manager_thread_server.py will try to start {args.pico_service_script}. "
@@ -1135,23 +1173,35 @@ def _pane_commands(args: argparse.Namespace) -> dict[str, str]:
 
 def _input_source_commands(args: argparse.Namespace) -> dict[str, str]:
     if args.input_source == "pico":
-        parts = [
-            "PYTHONUNBUFFERED=1 .venv_teleop/bin/python -u",
-            "gear_sonic/scripts/pico_manager_thread_server.py",
+        # args passed through to pico_manager, identical in live / record / replay
+        pm_args = [
             "--manager",
-            "--port",
-            str(args.zmq_port),
-            "--target_fps",
-            str(args.pico_target_fps),
-            "--buffer_size",
-            str(args.pico_buffer_size),
+            "--port", str(args.zmq_port),
+            "--target_fps", str(args.pico_target_fps),
+            "--buffer_size", str(args.pico_buffer_size),
         ]
         if args.pico_vis_vr3pt:
-            parts.append("--vis_vr3pt")
+            pm_args.append("--vis_vr3pt")
         if args.pico_vis_smpl:
-            parts.append("--vis_smpl")
+            pm_args.append("--vis_smpl")
         if args.pico_waist_tracking:
-            parts.append("--waist_tracking")
+            pm_args.append("--waist_tracking")
+
+        py = "PYTHONUNBUFFERED=1 .venv_teleop/bin/python -u"
+        if args.pico_replay is not None:
+            # PICO pane replays recorded headset input (no headset); scripts/replay_pico_input.py
+            # runs pico_manager in-process with a replay shim standing in for xrobotoolkit_sdk.
+            wrap = ["scripts/replay_pico_input.py", "-i", _quote(args.pico_replay)]
+            if args.pico_replay_loop:
+                wrap.append("--loop")
+            if args.pico_replay_rate != 1.0:
+                wrap += ["--rate", str(args.pico_replay_rate)]
+            parts = [py, *wrap, "--", *pm_args]
+        elif args.pico_record is not None:
+            # PICO pane records the live headset input while the closed loop runs normally.
+            parts = [py, "scripts/record_pico_input.py", "-o", _quote(args.pico_record), "--", *pm_args]
+        else:
+            parts = [py, "gear_sonic/scripts/pico_manager_thread_server.py", *pm_args]
         return {"input": " && ".join([f"cd {_quote(args.repo_root)}", " ".join(parts)])}
 
     if args.input_source != "sony":
