@@ -1031,6 +1031,12 @@ def _pane_commands(args: argparse.Namespace) -> dict[str, str]:
         f"cd {_quote(args.isaaclab_root)}",
         f"source {_quote(args.conda_sh)}",
         f"conda activate {_quote(args.conda_env)}",
+        # CUDA 库冲突防护（同 IsaacLab/scripts/start_ubuntu_isaaclab_sonic.sh，勿删）：
+        # ~/.bashrc 把系统 CUDA 12.5 塞进 LD_LIBRARY_PATH，其 libnvJitLink.so.12 缺
+        # __nvJitLinkCreate_12_8，torch(cu128) 的 libcusparse 一加载就崩 Kit（undefined
+        # symbol）。仅本次启动生效、不动 bashrc：① 剔除 cuda-12.5 ② 预加载 env 自带 12.8。
+        r'''export LD_LIBRARY_PATH="$(printf '%s' "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v 'cuda-12\.5' | paste -sd: || true)"''',
+        r'''{ NVJITLINK="$(ls "${CONDA_PREFIX:-$HOME/miniconda3/envs/env_isaaclab}"/lib/python*/site-packages/nvidia/nvjitlink/lib/libnvJitLink.so.12 2>/dev/null | head -1)"; [ -n "$NVJITLINK" ] && export LD_PRELOAD="$NVJITLINK${LD_PRELOAD:+:$LD_PRELOAD}"; true; }''',
         "export PYTHONUNBUFFERED=1",
         f"export UNITREE_DDS_INTERFACE={_quote(args.interface)}",
         f"export UNITREE_DDS_DOMAIN_ID={args.domain_id}",
