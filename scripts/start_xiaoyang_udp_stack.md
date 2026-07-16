@@ -20,6 +20,9 @@ Pico 4U 头显 ──XRoboToolkit App──> RoboticsService(PC Service)
                            │            run_sim_loop MuJoCo   [pane 0, .venv_sim]
                            v
                   IsaacLab teleop_se3_agent(--xr)            [pane 3, conda env_isaaclab]
+                           │ OpenXR(XR_RUNTIME_JSON)
+                           v
+                  SteamVR(vrserver) ──NOLO driver──> PICO 无线串流   [默认 XR 通路]
 ```
 
 ## 用法
@@ -43,6 +46,8 @@ deploy 的 `Proceed with deployment? [Y/n]` 提示由脚本自动应答(最多�
 | `ISAAC_TASK` | `Isaac-PickPlace-Locomanipulation-G1-Abs-v0` | IsaacLab 任务名 |
 | `CONDA_ENV` / `CONDA_BASE` | `env_isaaclab` / 自动探测 | IsaacLab 的 python 环境 |
 | `XROBO_TRANSPORT` | `sdk` | 见下节 |
+| `ISAACLAB_XR_RUNTIME` | `steamvr` | XR 通路(`steamvr`/`cloudxr`),见同名节 |
+| `STEAMVR_XR_JSON` | `~/.steam/steam/steamapps/common/SteamVR/steamxr_linux64.json` | SteamVR 的 OpenXR manifest |
 
 ## XROBO_TRANSPORT:sdk 与 udp 两条头显数据链
 
@@ -58,6 +63,35 @@ deploy 的 `Proceed with deployment? [Y/n]` 提示由脚本自动应答(最多�
 XROBO_TRANSPORT=udp scripts/start_xiaoyang_udp_stack.sh   # 测 UDP 协议时
 ```
 
+## ISAACLAB_XR_RUNTIME:SteamVR 与 CloudXR 两条 XR 通路
+
+Kit 只在**进程启动时**读一次 `XR_RUNTIME_JSON`,且它的优先级高于
+`~/.config/openxr/1/active_runtime.json`;不设或设错会报
+`Cannot start OpenXR! No valid active runtime is set`,XR 视口黑屏无响应。
+脚本的 `--isaaclab-pane` 会按本变量自动准备 runtime
+(移植自 IsaacLab 仓库提交 `1bef53791`/`c8b6a295f`,feat/sonic-* 系分支):
+
+- **`steamvr`(默认)**:Isaac Sim → SteamVR(OpenXR runtime) → NOLO driver →
+  PICO 无线串流。导出 `XR_RUNTIME_JSON` 指向 `steamxr_linux64.json`。
+  要求 SteamVR **已在运行**(vrclient.so 要连 vrserver,没起来 OpenXR 会话
+  建不起来);没起来时 pane 会打印启动命令并等最多 180s:
+
+  ```bash
+  env -u http_proxy -u https_proxy -u all_proxy DISPLAY=:0 setsid /usr/games/steam steam://run/250820
+  ```
+
+  必须走 `steam://` 让它跑在 sniper 容器里,裸跑 vrstartup 会崩。
+  KB:NVIDIA/CloudXR-OpenXR/NOLO-XRLink-SteamVR-driver部署实战.md
+
+- **`cloudxr`**:原通路,Isaac Sim → NVIDIA CloudXR runtime → WebXR/WebRTC →
+  头显。要求 CloudXR runtime 已启动(`~/.cloudxr/run/ipc_cloudxr` socket 存在),
+  脚本会 source `~/.cloudxr/run/cloudxr.env`。
+  KB:NVIDIA/IsaacLab/IsaacSim-StartAR-OpenXR经CloudXR-runtime启动指南.md
+
+```bash
+ISAACLAB_XR_RUNTIME=cloudxr scripts/start_xiaoyang_udp_stack.sh   # 切回 CloudXR
+```
+
 ## 前置条件
 
 1. `.venv_sim` —— `bash install_scripts/install_mujoco_sim.sh`(run_sim_loop 用;
@@ -66,6 +100,8 @@ XROBO_TRANSPORT=udp scripts/start_xiaoyang_udp_stack.sh   # 测 UDP 协议时
 3. IsaacLab 检出 + conda `env_isaaclab`
 4. 头显与本机同网段,XRoboToolkit App 已连上本机 PC Service
    (可用 `adb devices` / `ss -tnp | grep -i robotics` 核验)
+5. XR:默认 SteamVR 通路要求 SteamVR 已在运行
+   (`pgrep -x vrserver` 核验;启动命令见 ISAACLAB_XR_RUNTIME 节)
 
 脚本启动前会自检以上路径,缺什么直接报错并给出安装/恢复命令。
 
@@ -101,6 +137,17 @@ XROBO_TRANSPORT=udp scripts/start_xiaoyang_udp_stack.sh   # 测 UDP 协议时
 3. **IsaacLab 报"找不到 43dof"**:USD finder 在
    `locomanipulation_g1_env_cfg.py:_find_gr00t_g1_43dof_usd`,依赖
    `GR00T_WBC_ROOT` 指向本机检出且 `g1_43dof.usd` 存在(见坑 1 与网络配置节)。
+4. **PICO 已连上但黑屏(compositor 之死,2026-07-16 实锤)**:Isaac 首次加载
+   PickPlace 大场景时渲染线程停摆 >6s → vrcompositor watchdog
+   `Failed Watchdog timeout in thread Render in WaitForPresent ... Aborting` 自杀,
+   此后头显怎么重连都黑屏,"像没连上"。**判据双指标**
+   (`~/nolo_driver_deploy/log/nolo-link-driver.log`):
+   `Connected to <PICO_IP>:9936` = 连接建立;持续 `FrameEncoder FPS=xx`
+   (正常 ~78-100)= 画面真在串。只有前者没后者时查 `pgrep -x vrcompositor`,
+   空了就是这病。**处置固定两步**:重启 SteamVR(`pkill -x vrserver vrmonitor`
+   后再 `steam://run/250820`)→ 重跑 isaaclab pane(旧 XR 会话挂死在旧 vrserver
+   上救不回;场景已热,二次约 17s 接合)。PICO 端 CloudVR 客户端会自动重连,
+   无需动头显。更稳的启动顺序:先让 PICO 串上 SteamVR 画面,再起 Isaac。
 
 ## 故障排查速查
 
@@ -112,4 +159,10 @@ XROBO_TRANSPORT=udp scripts/start_xiaoyang_udp_stack.sh   # 测 UDP 协议时
 | `No module named gear_sonic.data...` / 找不到 `human_joints_info.pkl` | 坑 1,按恢复命令补 |
 | IsaacLab `undefined symbol __nvJitLinkCreate_12_8` | 坑 2,走脚本启动 |
 | IsaacLab `Could not locate GR00T G1 43-DoF USD` | 坑 3 |
+| IsaacLab `Cannot start OpenXR! No valid active runtime is set` / XR 视口黑屏 | `XR_RUNTIME_JSON` 未设或 runtime 没跑 → 走脚本启动;steamvr 通路先开 SteamVR(见 ISAACLAB_XR_RUNTIME 节) |
+| isaaclab pane 卡 `等待 vrserver 出现` | SteamVR 未启动 → 按 pane 里给出的 `steam://run/250820` 命令启动,180s 内自动继续 |
+| 缺 SteamVR OpenXR manifest 报错 | SteamVR 没装或路径不同 → `STEAMVR_XR_JSON` 覆盖,或 `ISAACLAB_XR_RUNTIME=cloudxr` 切 CloudXR |
+| PICO 连上了(driver 日志有 `Connected`)但黑屏 | 坑 4:vrcompositor 死了 → 重启 SteamVR + 重跑 isaaclab pane |
+| Kit 刷 `Render thread is not responsive, skipping rendering` | XR 会话的 present 完不成(compositor 死/旧 vrserver 没了)→ 同坑 4 |
+| vrserver 刷 `UpdateBooleanComponent failed. Invalid handle` | NOLO driver 输入组件注册 bug,噪音;刷屏反证手柄数据在进来,非堵点 |
 | deploy 卡确认提示 | 脚本 120s 内自动喂 y;超时后 attach 进 pane 1 手动回车 |

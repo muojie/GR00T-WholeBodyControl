@@ -7,6 +7,7 @@
 #                      （自动应答 "Proceed with deployment? [Y/n]"）
 #   pane 2  manager  : pico_manager_thread_server.py --manager --port 5556（.venv_teleop）
 #   pane 3  isaaclab : IsaacLab teleop_se3_agent.py --xr --teleop_device motion_controllers
+#                      （XR runtime 默认 SteamVR，可切 CloudXR，见 ISAACLAB_XR_RUNTIME）
 #
 # 注意: run_sim_loop 用 .venv_sim（install_scripts/install_mujoco_sim.sh 创建），
 #       .venv_teleop 没装 sim 依赖（tyro/mujoco/onnxruntime 等），跑不了 sim。
@@ -22,6 +23,10 @@
 #   ISAACLAB_ROOT    默认 ~/xiaoyang_IssacLab/IsaacLab
 #   ISAAC_TASK       默认 Isaac-PickPlace-Locomanipulation-G1-Abs-v0
 #   CONDA_ENV        默认 env_isaaclab（IsaacLab 的 python 环境）
+#   ISAACLAB_XR_RUNTIME  默认 steamvr（Isaac Sim→SteamVR→NOLO driver→PICO 无线串流）;
+#                    设 cloudxr 切回 CloudXR runtime（WebXR/WebRTC 通路）
+#   STEAMVR_XR_JSON  SteamVR 的 OpenXR manifest，默认
+#                    ~/.steam/steam/steamapps/common/SteamVR/steamxr_linux64.json
 #
 # tmux 常用键: Ctrl+b d 退出不杀进程 / Ctrl+b 方向键 切 pane / 鼠标点选已开启
 
@@ -34,6 +39,9 @@ ISAAC_TASK="${ISAAC_TASK:-Isaac-PickPlace-Locomanipulation-G1-Abs-v0}"
 CONDA_ENV="${CONDA_ENV:-env_isaaclab}"
 CONDA_BASE="${CONDA_BASE:-$(conda info --base 2>/dev/null || echo "$HOME/miniconda3")}"
 CONDA_SH="$CONDA_BASE/etc/profile.d/conda.sh"
+# XR runtime 二选一（移植自 IsaacLab 提交 1bef53791/c8b6a295f，默认 SteamVR）
+ISAACLAB_XR_RUNTIME="${ISAACLAB_XR_RUNTIME:-steamvr}"
+STEAMVR_XR_JSON="${STEAMVR_XR_JSON:-$HOME/.steam/steam/steamapps/common/SteamVR/steamxr_linux64.json}"
 SESSION=xiaoyang_udp
 
 # ---- IsaacLab pane 内部入口（由 tmux pane 调用，勿手动使用）----
@@ -51,6 +59,50 @@ if [[ "${1:-}" == "--isaaclab-pane" ]]; then
   NVJITLINK="$(ls "${CONDA_PREFIX:-$CONDA_BASE/envs/$CONDA_ENV}"/lib/python*/site-packages/nvidia/nvjitlink/lib/libnvJitLink.so.12 2>/dev/null | head -1)"
   [[ -n "$NVJITLINK" ]] && export LD_PRELOAD="$NVJITLINK${LD_PRELOAD:+:$LD_PRELOAD}"
   export PYTHONUNBUFFERED=1
+  # ---- OpenXR runtime（--xr 必需，勿删；移植自 IsaacLab 提交 1bef53791）----
+  # Kit 只在进程启动时读一次 XR_RUNTIME_JSON，且优先级高于
+  # ~/.config/openxr/1/active_runtime.json；不设或设错会报
+  # "Cannot start OpenXR! No valid active runtime is set"，XR 视口黑屏无响应。
+  case "$ISAACLAB_XR_RUNTIME" in
+    steamvr)
+      # Isaac Sim → SteamVR(OpenXR runtime) → NOLO driver → PICO 无线串流
+      # KB: NVIDIA/CloudXR-OpenXR/NOLO-XRLink-SteamVR-driver部署实战.md
+      [[ -f "$STEAMVR_XR_JSON" ]] \
+        || { echo "✗ 缺 SteamVR OpenXR manifest: $STEAMVR_XR_JSON（SteamVR 装了吗？）" >&2; exit 1; }
+      export XR_RUNTIME_JSON="$STEAMVR_XR_JSON"
+      # SteamVR 必须已在运行：vrclient.so 要连 vrserver，没起来 OpenXR 会话建不起来
+      if ! pgrep -x vrserver >/dev/null 2>&1; then
+        echo "⚠ SteamVR(vrserver) 未运行，--xr 会黑屏。请在另一终端启动：" >&2
+        echo "    env -u http_proxy -u https_proxy -u all_proxy DISPLAY=:0 setsid /usr/games/steam steam://run/250820" >&2
+        echo "    （必须走 steam:// 让它跑在 sniper 容器里，裸跑 vrstartup 会崩）" >&2
+        echo "  等待 vrserver 出现（最多 180s，Ctrl+C 放弃）..." >&2
+        for _ in $(seq 1 90); do
+          pgrep -x vrserver >/dev/null 2>&1 && break
+          sleep 2
+        done
+        pgrep -x vrserver >/dev/null 2>&1 \
+          || { echo "✗ 等待超时；启动 SteamVR 后在本 pane 按 ↑ + Enter 重跑" >&2; exit 1; }
+      fi
+      echo "XR 通路: steamvr（vrserver pid $(pgrep -x vrserver | head -1)）"
+      echo "XR_RUNTIME_JSON=$XR_RUNTIME_JSON"
+      ;;
+    cloudxr)
+      # 原 CloudXR 通路：Isaac Sim → CloudXR runtime → WebXR/WebRTC → 头显
+      CLOUDXR_ENV="$HOME/.cloudxr/run/cloudxr.env"
+      if [[ -f "$CLOUDXR_ENV" ]]; then
+        # shellcheck disable=SC1090
+        source "$CLOUDXR_ENV"
+      else
+        echo "⚠ 未找到 $CLOUDXR_ENV，CloudXR runtime 可能没启动，--xr 会黑屏" >&2
+      fi
+      [[ -S "$HOME/.cloudxr/run/ipc_cloudxr" ]] \
+        || echo "⚠ CloudXR 的 ipc socket 不存在，请先启动 runtime（isaacteleop.cloudxr.runtime）" >&2
+      echo "XR 通路: cloudxr; XR_RUNTIME_JSON=${XR_RUNTIME_JSON:-<未设置>}"
+      ;;
+    *)
+      echo "✗ ISAACLAB_XR_RUNTIME 只能是 steamvr 或 cloudxr，当前: $ISAACLAB_XR_RUNTIME" >&2
+      exit 1 ;;
+  esac
   exec ./isaaclab.sh -p scripts/environments/teleoperation/teleop_se3_agent.py \
     --xr --device cuda:0 --task "$ISAAC_TASK" \
     --teleop_device motion_controllers --enable_pinocchio
@@ -83,6 +135,8 @@ MANAGER_CMD="cd $REPO_ROOT && source $VENV_ACTIVATE && XROBO_TRANSPORT=$XROBO_TR
 # tmux pane 的 shell 不继承本脚本环境，覆盖值随命令显式透传给内部入口
 ISAAC_CMD="ISAACLAB_ROOT=$(printf %q "$ISAACLAB_ROOT") ISAAC_TASK=$(printf %q "$ISAAC_TASK")"
 ISAAC_CMD+=" CONDA_ENV=$(printf %q "$CONDA_ENV") CONDA_BASE=$(printf %q "$CONDA_BASE")"
+ISAAC_CMD+=" ISAACLAB_XR_RUNTIME=$(printf %q "$ISAACLAB_XR_RUNTIME")"
+ISAAC_CMD+=" STEAMVR_XR_JSON=$(printf %q "$STEAMVR_XR_JSON")"
 ISAAC_CMD+=" bash $(printf %q "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")") --isaaclab-pane"
 
 if [[ "$DRY_RUN" == 1 ]]; then
@@ -91,8 +145,9 @@ if [[ "$DRY_RUN" == 1 ]]; then
   echo "pane 2 manager  : $MANAGER_CMD"
   echo "pane 3 isaaclab : $ISAAC_CMD"
   echo "  （--isaaclab-pane 内部做: cd $ISAACLAB_ROOT && conda activate $CONDA_ENV"
-  echo "    && CUDA 12.5/nvJitLink 冲突防护 && ./isaaclab.sh -p .../teleop_se3_agent.py"
+  echo "    && CUDA 12.5/nvJitLink 冲突防护 && XR runtime 准备 && ./isaaclab.sh -p .../teleop_se3_agent.py"
   echo "    --xr --device cuda:0 --task $ISAAC_TASK --teleop_device motion_controllers --enable_pinocchio）"
+  echo "  XR 通路: $ISAACLAB_XR_RUNTIME（切换: ISAACLAB_XR_RUNTIME=steamvr|cloudxr）"
   exit 0
 fi
 
@@ -117,6 +172,23 @@ command -v tmux >/dev/null || { echo "❌ 缺 tmux（sudo apt install tmux）" >
   || { echo "❌ 缺 conda.sh: $CONDA_SH（用 CONDA_BASE 覆盖）" >&2; errs=$((errs+1)); }
 [[ -d "$CONDA_BASE/envs/$CONDA_ENV" ]] \
   || { echo "❌ 缺 conda 环境 $CONDA_ENV（$CONDA_BASE/envs/ 下未找到，用 CONDA_ENV 覆盖）" >&2; errs=$((errs+1)); }
+# XR runtime 预检（详细校验在 --isaaclab-pane 内部再做一次）
+case "$ISAACLAB_XR_RUNTIME" in
+  steamvr)
+    [[ -f "$STEAMVR_XR_JSON" ]] \
+      || { echo "❌ 缺 SteamVR OpenXR manifest: $STEAMVR_XR_JSON" >&2
+           echo "     （SteamVR 没装？或 ISAACLAB_XR_RUNTIME=cloudxr 切 CloudXR 通路）" >&2; errs=$((errs+1)); }
+    pgrep -x vrserver >/dev/null 2>&1 \
+      || echo "⚠ SteamVR(vrserver) 未运行——isaaclab pane 会等它最多 180s，启动命令见该 pane 提示" >&2
+    ;;
+  cloudxr)
+    [[ -S "$HOME/.cloudxr/run/ipc_cloudxr" ]] \
+      || echo "⚠ CloudXR runtime 的 ipc socket 不存在，isaaclab pane 的 --xr 可能黑屏" >&2
+    ;;
+  *)
+    echo "❌ ISAACLAB_XR_RUNTIME 只能是 steamvr 或 cloudxr，当前: $ISAACLAB_XR_RUNTIME" >&2
+    errs=$((errs+1)) ;;
+esac
 [[ "$errs" == 0 ]] || exit 1
 
 # ---- 启动 tmux 四 pane（2x2）----
