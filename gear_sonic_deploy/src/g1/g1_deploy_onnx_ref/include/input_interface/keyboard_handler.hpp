@@ -175,6 +175,12 @@ class SimpleKeyboard : public InputInterface {
       // Read keyboard input (using shared buffered reading)
       char ch;
       while (ReadStdinChar(ch)) {
+        const bool previous_use_planner = use_planner;
+        const int previous_motion_set_index = motion_set_index;
+        const LocomotionMode previous_movement_mode = planner_use_movement_mode;
+        const double previous_movement_speed = planner_use_movement_speed;
+        const double previous_height = planner_use_height;
+
         if (use_planner) {
             switch (ch) {
                 case 'r':
@@ -202,14 +208,13 @@ class SimpleKeyboard : public InputInterface {
                 case '=':
                 case '+': if(planner_use_height != -1) { planner_use_height = planner_use_height + 0.1; } break; // Delta height up
                 case '9':
-                case '(': if(planner_use_movement_speed != -1) { planner_use_movement_speed = planner_use_movement_speed - 0.1; } break; // Delta speed up
+                case '(': if(planner_use_movement_speed != -1) { planner_use_movement_speed = planner_use_movement_speed - 0.1; } break; // Decrease speed
                 case '0':
-                case ')': if(planner_use_movement_speed != -1) { planner_use_movement_speed = planner_use_movement_speed + 0.1; } break; // Delta speed down
+                case ')': if(planner_use_movement_speed != -1) { planner_use_movement_speed = planner_use_movement_speed + 0.1; } break; // Increase speed
                 case 'n':
                 case 'N': motion_set_index = (motion_set_index + 1) % 4; 
                           current_motion_set = get_motion_set(motion_set_index); 
                           planner_use_movement_mode = current_motion_set[0]; 
-                          std::cout << "Motion set: " << motion_set_index << std::endl;
                           if (motion_set_index == 1) {
                             planner_use_height = 0.8;
                           }
@@ -218,7 +223,6 @@ class SimpleKeyboard : public InputInterface {
                 case 'P': motion_set_index = (motion_set_index - 1 + 4) % 4; 
                           current_motion_set = get_motion_set(motion_set_index); 
                           planner_use_movement_mode = current_motion_set[0]; 
-                          std::cout << "Motion set: " << motion_set_index << std::endl;
                           if (motion_set_index == 1) {
                             planner_use_height = 0.8;
                           }
@@ -319,7 +323,28 @@ class SimpleKeyboard : public InputInterface {
             case 'H': report_temperature = true; break; // Report motor temperatures
           }
         }
-        
+
+        if (use_planner != previous_use_planner) {
+          std::cout << "[Keyboard] planner requested: "
+                    << (use_planner ? "enabled" : "disabled") << std::endl;
+        }
+        if (motion_set_index != previous_motion_set_index) {
+          std::cout << "[Keyboard] motion set: " << motion_set_name(motion_set_index)
+                    << " (" << motion_set_index << ")" << std::endl;
+        }
+        if (planner_use_movement_mode != previous_movement_mode) {
+          std::cout << "[Keyboard] locomotion mode: "
+                    << locomotion_mode_name(planner_use_movement_mode)
+                    << " (" << static_cast<int>(planner_use_movement_mode) << ")" << std::endl;
+        }
+        if (planner_use_movement_speed != previous_movement_speed) {
+          std::cout << "[Keyboard] target speed: " << planner_use_movement_speed
+                    << " m/s" << std::endl;
+        }
+        if (planner_use_height != previous_height) {
+          std::cout << "[Keyboard] target height: " << planner_use_height
+                    << " m" << std::endl;
+        }
       }
     }
 
@@ -375,6 +400,7 @@ class SimpleKeyboard : public InputInterface {
             current_motion->SetEncodeMode(new_encoder_mode);
           }
         }
+
       }
 
       // Handle motion control commands
@@ -460,6 +486,10 @@ class SimpleKeyboard : public InputInterface {
       }
 
       // Handle planner control - copy the toggle state from keyboard
+      if (this->use_planner && !operator_state.control_active) {
+        std::cout << "Wait for the CONTROL state after pressing ']' before enabling the planner" << std::endl;
+        this->use_planner = false;
+      }
       if (this->use_planner && !has_planner) {
         std::cout << "Planner not loaded - cannot enable" << std::endl;
         this->use_planner = false;

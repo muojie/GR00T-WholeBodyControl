@@ -29,6 +29,7 @@
 #ifndef MOTION_DATA_READER_HPP
 #define MOTION_DATA_READER_HPP
 
+#include <algorithm>
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -693,6 +694,11 @@ class MotionDataReader {
         std::cerr << "Error reading directory: " << e.what() << std::endl;
         return false;
       }
+
+      // std::filesystem::directory_iterator does not guarantee an order.
+      // Stable ordering keeps numeric motion indexes and the default first
+      // motion reproducible across filesystems and successive launches.
+      std::sort(motion_names.begin(), motion_names.end());
 
       std::cout << "Found " << motion_names.size() << " motion folders" << std::endl;
 

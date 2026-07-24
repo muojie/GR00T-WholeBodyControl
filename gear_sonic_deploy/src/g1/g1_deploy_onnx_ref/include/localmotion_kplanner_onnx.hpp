@@ -123,6 +123,11 @@ public:
         // ==== CLEANUP EXISTING STATE BEFORE INITIALIZATION ====
         std::cout << "Cleaning up existing ONNX planner state..." << std::endl;
         
+        // Ort::Value objects alias the input buffers below.  Release those
+        // handles before clearing or resizing any aliased vector.
+        planner_input_tensors_.clear();
+        planner_output_tensors_.clear();
+
         // Clear all input value vectors
         mode_values_.clear();
         target_vel_values_.clear();
@@ -200,8 +205,6 @@ public:
             }
         }
 
-        planner_output_tensors_.clear();
-        
         // Reset data pointers
         mujoco_qpos_data_ = nullptr;
         num_pred_frames_data_ = nullptr;
@@ -284,29 +287,11 @@ private:
             random_seed_values_[0] = random_seed;
         }
         
-        // Log replanning values
-        std::cout << "Replanning with mode: ";
-        switch(mode_values_[0])
-        {
-            case 0:
-                std::cout << "IDLE";
-                break;
-            case 1:
-                std::cout << "SLOW_WALK";
-                break;
-            case 2:
-                std::cout << "WALK";
-                break;
-            case 3:
-                std::cout << "RUN";
-                break;
-            case 4:
-                std::cout << "BOXING";
-                break;
-            default:
-                std::cout << "UNKNOWN";
-                break;
-        }
+        // Log the exact protocol value and its canonical meaning.  Keeping the
+        // numeric value in the line makes end-to-end keyboard tests auditable.
+        std::cout << "Replanning with mode: "
+                  << locomotion_mode_name(static_cast<LocomotionMode>(mode_values_[0]))
+                  << " (" << mode_values_[0] << ")";
         if (config_.version == 1 || config_.version == 2) {
             std::cout << ", target_height: " << target_height_values_[0];
         }

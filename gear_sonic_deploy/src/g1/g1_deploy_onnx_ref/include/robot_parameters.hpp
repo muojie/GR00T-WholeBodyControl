@@ -66,6 +66,7 @@ struct HeadingState {
 struct OperatorState {
   bool stop = false;   ///< Emergency stop requested.
   bool start = false;  ///< Control-system start requested.
+  bool control_active = false;  ///< Control state machine has actually entered CONTROL.
   bool play = false;   ///< Motion playback active.
 };
 

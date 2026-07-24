@@ -105,6 +105,56 @@ struct MovementState {
     SCARE_WALK = 26,
 };
 
+/**
+ * @brief Stable human-readable name for planner protocol values.
+ *
+ * Keep this mapping next to the enum so logs from every input/planner backend
+ * agree on the meaning of a numeric mode.  In particular, protocol value 4 is
+ * the idle-squat mode (older ONNX logging incorrectly labelled it BOXING).
+ */
+inline constexpr const char* locomotion_mode_name(LocomotionMode mode) noexcept {
+    switch (mode) {
+        case LocomotionMode::IDLE: return "IDLE";
+        case LocomotionMode::SLOW_WALK: return "SLOW_WALK";
+        case LocomotionMode::WALK: return "WALK";
+        case LocomotionMode::RUN: return "RUN";
+        case LocomotionMode::IDEL_SQUAT: return "IDLE_SQUAT";
+        case LocomotionMode::IDEL_KNEEL_TWO_LEGS: return "IDLE_KNEEL_TWO_LEGS";
+        case LocomotionMode::IDEL_KNEEL: return "IDLE_KNEEL";
+        case LocomotionMode::IDEL_LYING_FACE_DOWN: return "IDLE_LYING_FACE_DOWN";
+        case LocomotionMode::CRAWLING: return "CRAWLING";
+        case LocomotionMode::IDEL_BOXING: return "IDLE_BOXING";
+        case LocomotionMode::WALK_BOXING: return "WALK_BOXING";
+        case LocomotionMode::LEFT_PUNCH: return "LEFT_PUNCH";
+        case LocomotionMode::RIGHT_PUNCH: return "RIGHT_PUNCH";
+        case LocomotionMode::RANDOM_PUNCH: return "RANDOM_PUNCH";
+        case LocomotionMode::ELBOW_CRAWLING: return "ELBOW_CRAWLING";
+        case LocomotionMode::LEFT_HOOK: return "LEFT_HOOK";
+        case LocomotionMode::RIGHT_HOOK: return "RIGHT_HOOK";
+        case LocomotionMode::FORWARD_JUMP: return "FORWARD_JUMP";
+        case LocomotionMode::STEALTH_WALK: return "STEALTH_WALK";
+        case LocomotionMode::INJURED_WALK: return "INJURED_WALK";
+        case LocomotionMode::LEDGE_WALKING: return "LEDGE_WALKING";
+        case LocomotionMode::OBJECT_CARRYING: return "OBJECT_CARRYING";
+        case LocomotionMode::STEALTH_WALK_2: return "STEALTH_WALK_2";
+        case LocomotionMode::HAPPY_DANCE_WALK: return "HAPPY_DANCE_WALK";
+        case LocomotionMode::ZOMBIE_WALK: return "ZOMBIE_WALK";
+        case LocomotionMode::GUN_WALK: return "GUN_WALK";
+        case LocomotionMode::SCARE_WALK: return "SCARE_WALK";
+    }
+    return "UNKNOWN";
+}
+
+inline constexpr const char* motion_set_name(int motion_set_index) noexcept {
+    switch (motion_set_index) {
+        case 0: return "standing";
+        case 1: return "squat";
+        case 2: return "boxing";
+        case 3: return "styled_walking";
+        default: return "unknown";
+    }
+}
+
 inline constexpr bool is_static_motion_mode(LocomotionMode mode) {
     return mode == LocomotionMode::IDLE || 
            mode == LocomotionMode::IDEL_SQUAT || 

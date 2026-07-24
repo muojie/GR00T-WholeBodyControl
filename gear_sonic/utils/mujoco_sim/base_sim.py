@@ -548,6 +548,7 @@ class BaseSimulator:
         self.reward_dt = self.config.get("REWARD_DT", 0.02)
         self.image_dt = self.config.get("IMAGE_DT", 0.033333)
         self.viewer_dt = self.config.get("VIEWER_DT", 0.02)
+        self.stats_interval = max(0.5, float(self.config.get("STATS_INTERVAL", 5.0)))
         self._running = True
 
         self.robot = Robot(self.config)
@@ -601,6 +602,12 @@ class BaseSimulator:
         """Main simulation loop"""
         sim_cnt = 0
         ts = time.time()
+        stats_start = time.monotonic()
+        stats_sim_steps = 0
+        stats_viewer_updates = 0
+        stats_overruns = 0
+        stats_work_time = 0.0
+        stats_max_work_time = 0.0
 
         try:
             while self._running and (
@@ -610,6 +617,7 @@ class BaseSimulator:
                 step_start = time.monotonic()
 
                 self.sim_env.sim_step()
+                stats_sim_steps += 1
                 now = time.time()
                 if now - ts > 1 / 10.0 and self.redis_client is not None:
                     head_pose = self.sim_env.get_head_pose()
@@ -619,6 +627,8 @@ class BaseSimulator:
 
                 if sim_cnt % int(self.viewer_dt / self.sim_dt) == 0:
                     self.sim_env.update_viewer()
+                    if self.sim_env.viewer is not None:
+                        stats_viewer_updates += 1
 
                 if sim_cnt % int(self.reward_dt / self.sim_dt) == 0:
                     self.sim_env.update_reward()
@@ -627,10 +637,44 @@ class BaseSimulator:
                     self.sim_env.update_render_caches()
 
                 # Simple rate limiter (replaces ROS rate)
-                elapsed = time.monotonic() - step_start
-                sleep_time = self.sim_dt - elapsed
+                work_time = time.monotonic() - step_start
+                stats_work_time += work_time
+                stats_max_work_time = max(stats_max_work_time, work_time)
+                sleep_time = self.sim_dt - work_time
                 if sleep_time > 0:
                     time.sleep(sleep_time)
+                else:
+                    stats_overruns += 1
+
+                stats_now = time.monotonic()
+                stats_elapsed = stats_now - stats_start
+                if stats_elapsed >= self.stats_interval:
+                    low_cmd_count, low_state_count = self.unitree_bridge.take_timing_counts()
+                    physics_hz = stats_sim_steps / stats_elapsed
+                    viewer_hz = stats_viewer_updates / stats_elapsed
+                    low_cmd_hz = low_cmd_count / stats_elapsed
+                    low_state_hz = low_state_count / stats_elapsed
+                    real_time_factor = stats_sim_steps * self.sim_dt / stats_elapsed
+                    mean_work_ms = (
+                        1000.0 * stats_work_time / stats_sim_steps if stats_sim_steps else 0.0
+                    )
+                    overrun_ratio = (
+                        100.0 * stats_overruns / stats_sim_steps if stats_sim_steps else 0.0
+                    )
+                    print(
+                        "[MuJoCo Timing] "
+                        f"physics={physics_hz:.1f}Hz, viewer={viewer_hz:.1f}Hz, "
+                        f"fresh_lowstate={low_state_hz:.1f}Hz, lowcmd_packets={low_cmd_hz:.1f}Hz, "
+                        f"RTF={real_time_factor:.3f}, work_mean={mean_work_ms:.2f}ms, "
+                        f"work_max={stats_max_work_time * 1000.0:.2f}ms, "
+                        f"overruns={overrun_ratio:.1f}%"
+                    )
+                    stats_start = stats_now
+                    stats_sim_steps = 0
+                    stats_viewer_updates = 0
+                    stats_overruns = 0
+                    stats_work_time = 0.0
+                    stats_max_work_time = 0.0
 
                 sim_cnt += 1
         except KeyboardInterrupt:

@@ -17,7 +17,7 @@
  * ## PID Gain Computation
  *
  * Stiffness (Kp) and damping (Kd) values are computed from motor armature
- * constants using a second-order critically-damped model:
+ * constants using a second-order model with damping ratio 2.0 (overdamped):
  *   - stiffness = armature × ω²   (ω = 10 Hz × 2π)
  *   - damping   = 2 × ζ × armature × ω   (ζ = 2.0)
  *

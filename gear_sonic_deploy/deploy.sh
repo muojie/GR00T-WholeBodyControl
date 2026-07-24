@@ -7,8 +7,9 @@ set -e
 # This script handles the complete setup and deployment process for g1_deploy
 # Following the steps from the README.md
 #
-# Usage: ./deploy.sh [sim|real|<interface_name>|<ip_address>]
-#   sim   - Use loopback interface for simulation (MuJoCo)
+# Usage: ./deploy.sh [sim|isaac|real|<interface_name>|<ip_address>]
+#   sim   - MuJoCo loopback profile (DDS domain 0, CRC disabled)
+#   isaac - Isaac Lab loopback profile (DDS domain 1, CRC enabled)
 #   real  - Auto-detect robot network interface (192.168.123.x)
 #   <interface_name> - Use specific interface (e.g., enP8p1s0, eth0)
 #   <ip_address> - Use interface with specific IP
@@ -209,7 +210,7 @@ interface_has_ip() {
 }
 
 # Resolve interface parameter to actual network interface name and environment type
-# Arguments: interface - "sim", "real", or direct interface name or IP address
+# Arguments: interface - "sim", "isaac", "real", or direct interface name or IP address
 # Outputs: Sets TARGET and ENV_TYPE variables
 resolve_interface() {
     local interface="$1"
@@ -241,7 +242,7 @@ resolve_interface() {
         return 0
     fi
     
-    if [[ "$interface" == "sim" ]]; then
+    if [[ "$interface" == "sim" || "$interface" == "isaac" ]]; then
         local lo_interface
         lo_interface=$(find_interface_by_ip "127.0.0.1")
         
@@ -260,7 +261,7 @@ resolve_interface() {
                 TARGET="lo"
             fi
         fi
-        ENV_TYPE="sim"
+        ENV_TYPE="$interface"
         return 0
     
     elif [[ "$interface" == "real" ]]; then
@@ -318,7 +319,7 @@ resolve_interface() {
 # ============================================================================
 
 show_usage() {
-    echo "Usage: $0 [OPTIONS] [sim|real|<interface>]"
+    echo "Usage: $0 [OPTIONS] [sim|isaac|real|<interface>]"
     echo ""
     echo "Options:"
     echo "  -h, --help              Show this help message"
@@ -329,6 +330,12 @@ show_usage() {
     echo "  --motion-data PATH      Set the motion data path (default: $MOTION_DATA_DEFAULT)"
     echo "  --input-type TYPE       Set the input type (default: $INPUT_TYPE_DEFAULT)"
     echo "  --output-type TYPE      Set the output type (default: $OUTPUT_TYPE_DEFAULT)"
+    echo "  --dds-domain ID         Override the DDS domain selected by the mode"
+    echo "  --init-duration SEC     Override the initial pose-ramp duration"
+    echo "  --initial-motion NAME   Select the initial reference-motion folder"
+    echo "  --initial-frame INDEX   Select its initial zero-based frame (default: 0)"
+    echo "  --enable-crc-check      Force LowState CRC validation"
+    echo "  --disable-crc-check     Disable LowState CRC validation (MuJoCo compatibility)"
     echo "  --zmq-host HOST         Set the ZMQ host (default: $ZMQ_HOST_DEFAULT)"
     echo "  --zmq-port PORT         Set the ZMQ input port (default: $ZMQ_PORT_DEFAULT)"
     echo "  --zmq-topic TOPIC       Set the ZMQ input topic (default: $ZMQ_TOPIC_DEFAULT)"
@@ -340,7 +347,8 @@ show_usage() {
     echo "  --udp-out-topic TOPIC   Set the UDP output topic prefix (default: $UDP_OUT_TOPIC_DEFAULT)"
     echo ""
     echo "Interface modes:"
-    echo "  sim              Use loopback interface for simulation (MuJoCo)"
+    echo "  sim              MuJoCo: loopback, DDS domain 0, CRC check disabled"
+    echo "  isaac            Isaac Lab: loopback, DDS domain 1, CRC check enabled"
     echo "  real             Auto-detect robot network (192.168.123.x)"
     echo "  <interface>      Use specific interface (e.g., enP8p1s0, eth0)"
     echo "  <ip_address>     Use interface by IP address"
@@ -348,7 +356,8 @@ show_usage() {
     echo "Default: real"
     echo ""
     echo "Examples:"
-    echo "  $0 sim           # Run in simulation mode"
+    echo "  $0 sim           # Run with the MuJoCo DDS profile"
+    echo "  $0 --input-type keyboard isaac  # Run non-VR Isaac Lab control"
     echo "  $0 real          # Auto-detect real robot interface"
     echo "  $0 enP8p1s0      # Use specific interface"
     echo "  $0 192.168.x.x # Use interface with this IP"
@@ -420,6 +429,11 @@ UDP_OUT_HOST="$UDP_OUT_HOST_DEFAULT"
 UDP_OUT_BIND_HOST="$UDP_OUT_BIND_HOST_DEFAULT"
 UDP_OUT_PORT="$UDP_OUT_PORT_DEFAULT"
 UDP_OUT_TOPIC="$UDP_OUT_TOPIC_DEFAULT"
+DDS_DOMAIN_OVERRIDE=""
+CRC_CHECK_OVERRIDE=""
+INIT_DURATION_OVERRIDE=""
+INITIAL_MOTION=""
+INITIAL_FRAME="0"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -485,6 +499,46 @@ while [[ $# -gt 0 ]]; do
             fi
             OUTPUT_TYPE="$2"
             shift 2
+            ;;
+        --dds-domain)
+            if [[ -z "$2" ]] || [[ ! "$2" =~ ^[0-9]+$ ]]; then
+                echo -e "${RED}Error: --dds-domain requires a non-negative integer${NC}" >&2
+                exit 1
+            fi
+            DDS_DOMAIN_OVERRIDE="$2"
+            shift 2
+            ;;
+        --init-duration)
+            if [[ -z "$2" ]] || [[ ! "$2" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]; then
+                echo -e "${RED}Error: --init-duration requires a non-negative number of seconds${NC}" >&2
+                exit 1
+            fi
+            INIT_DURATION_OVERRIDE="$2"
+            shift 2
+            ;;
+        --initial-motion)
+            if [[ -z "$2" ]] || [[ "$2" == --* ]]; then
+                echo -e "${RED}Error: --initial-motion requires a motion folder name${NC}" >&2
+                exit 1
+            fi
+            INITIAL_MOTION="$2"
+            shift 2
+            ;;
+        --initial-frame)
+            if [[ -z "$2" ]] || [[ ! "$2" =~ ^[0-9]+$ ]]; then
+                echo -e "${RED}Error: --initial-frame requires a non-negative integer${NC}" >&2
+                exit 1
+            fi
+            INITIAL_FRAME="$2"
+            shift 2
+            ;;
+        --enable-crc-check)
+            CRC_CHECK_OVERRIDE="enabled"
+            shift
+            ;;
+        --disable-crc-check)
+            CRC_CHECK_OVERRIDE="disabled"
+            shift
             ;;
         --zmq-host)
             if [[ -z "$2" ]]; then
@@ -558,7 +612,7 @@ while [[ $# -gt 0 ]]; do
             UDP_OUT_TOPIC="$2"
             shift 2
             ;;
-        sim|real)
+        sim|isaac|real)
             INTERFACE_MODE="$1"
             shift
             ;;
@@ -622,13 +676,48 @@ CHECKPOINT_ENCODER="${CHECKPOINT}_encoder.onnx"
 # ZMQ host (set via command line or default)
 # ZMQ_HOST is already set from argument parsing above
 
-# Additional flags for simulation mode
-EXTRA_ARGS=""
-if [[ "$ENV_TYPE" == "sim" ]]; then
-    EXTRA_ARGS="--disable-crc-check"
-    echo -e "${YELLOW}📋 Simulation mode: CRC check will be disabled${NC}"
-    echo ""
+# DDS defaults are selected by the named environment profile. Explicit CLI
+# overrides remain available for diagnostics and custom network setups.
+case "$ENV_TYPE" in
+    sim)
+        DDS_DOMAIN_DEFAULT="0"
+        CRC_CHECK_DEFAULT="disabled"
+        INIT_DURATION_DEFAULT="3.0"
+        ;;
+    isaac)
+        DDS_DOMAIN_DEFAULT="1"
+        CRC_CHECK_DEFAULT="enabled"
+        INIT_DURATION_DEFAULT="3.0"
+        ;;
+    real)
+        DDS_DOMAIN_DEFAULT="0"
+        CRC_CHECK_DEFAULT="enabled"
+        INIT_DURATION_DEFAULT="3.0"
+        ;;
+    *)
+        echo -e "${RED}Error: unsupported environment type '$ENV_TYPE'${NC}" >&2
+        exit 1
+        ;;
+esac
+
+DDS_DOMAIN="${DDS_DOMAIN_OVERRIDE:-$DDS_DOMAIN_DEFAULT}"
+CRC_CHECK_MODE="${CRC_CHECK_OVERRIDE:-$CRC_CHECK_DEFAULT}"
+INIT_DURATION="${INIT_DURATION_OVERRIDE:-$INIT_DURATION_DEFAULT}"
+EXTRA_ARGS=(--dds-domain "$DDS_DOMAIN" --init-duration "$INIT_DURATION")
+if [[ -n "$INITIAL_MOTION" ]]; then
+    EXTRA_ARGS+=(--initial-motion "$INITIAL_MOTION")
 fi
+EXTRA_ARGS+=(--initial-frame "$INITIAL_FRAME")
+if [[ "$ENV_TYPE" == "isaac" ]]; then
+    EXTRA_ARGS+=(--isaac-sim)
+fi
+if [[ "$CRC_CHECK_MODE" == "disabled" ]]; then
+    EXTRA_ARGS+=(--disable-crc-check)
+fi
+
+echo -e "${YELLOW}📋 DDS profile: mode=$ENV_TYPE, domain=$DDS_DOMAIN, CRC check=$CRC_CHECK_MODE${NC}"
+echo -e "${YELLOW}📋 Control startup: init duration=${INIT_DURATION}s${NC}"
+echo ""
 
 # ============================================================================
 # Step 1: Check Prerequisites
@@ -752,6 +841,11 @@ echo -e "${CYAN}═════════════════════�
 echo ""
 echo -e "  Environment:        ${GREEN}$ENV_TYPE${NC}"
 echo -e "  Network Interface:  ${GREEN}$TARGET${NC}"
+echo -e "  DDS Domain:         ${GREEN}$DDS_DOMAIN${NC}"
+echo -e "  CRC Check:          ${GREEN}$CRC_CHECK_MODE${NC}"
+echo -e "  Init Duration:      ${GREEN}${INIT_DURATION}s${NC}"
+echo -e "  Initial Motion:     ${GREEN}${INITIAL_MOTION:-sorted first motion}${NC}"
+echo -e "  Initial Frame:      ${GREEN}${INITIAL_FRAME}${NC}"
 echo -e "  Decoder Model:      ${GREEN}$CHECKPOINT_DECODER${NC}"
 echo -e "  Encoder Model:      ${GREEN}$CHECKPOINT_ENCODER${NC}"
 echo -e "  Motion Data:        ${GREEN}$MOTION_DATA${NC}"
@@ -765,9 +859,7 @@ echo -e "  ZMQ Port:           ${GREEN}$ZMQ_PORT${NC}"
 echo -e "  ZMQ Topic:          ${GREEN}$ZMQ_TOPIC${NC}"
 echo -e "  ZMQ Output:         ${GREEN}*:$ZMQ_OUT_PORT/$ZMQ_OUT_TOPIC${NC}"
 echo -e "  UDP Output:         ${GREEN}${UDP_OUT_BIND_HOST:-auto} -> $UDP_OUT_HOST:$UDP_OUT_PORT/$UDP_OUT_TOPIC${NC}"
-if [[ -n "$EXTRA_ARGS" ]]; then
-echo -e "  Extra Args:         ${GREEN}$EXTRA_ARGS${NC}"
-fi
+echo -e "  Extra Args:         ${GREEN}${EXTRA_ARGS[*]}${NC}"
 echo ""
 echo -e "${CYAN}═══════════════════════════════════════════════════════════════════════${NC}"
 echo ""
@@ -787,10 +879,8 @@ echo -e "${BLUE}    --zmq-out-topic $ZMQ_OUT_TOPIC \\${NC}"
 echo -e "${BLUE}    --udp-out-host $UDP_OUT_HOST \\${NC}"
 echo -e "${BLUE}    --udp-out-bind-host $UDP_OUT_BIND_HOST \\${NC}"
 echo -e "${BLUE}    --udp-out-port $UDP_OUT_PORT \\${NC}"
-echo -e "${BLUE}    --udp-out-topic $UDP_OUT_TOPIC${NC}"
-if [[ -n "$EXTRA_ARGS" ]]; then
-echo -e "${BLUE}    $EXTRA_ARGS${NC}"
-fi
+echo -e "${BLUE}    --udp-out-topic $UDP_OUT_TOPIC \\${NC}"
+echo -e "${BLUE}    ${EXTRA_ARGS[*]}${NC}"
 echo ""
 echo -e "${CYAN}═══════════════════════════════════════════════════════════════════════${NC}"
 echo ""
@@ -809,41 +899,22 @@ if [[ "$confirm" =~ ^[Yy]$ ]] || [[ -z "$confirm" ]]; then
     echo -e "${GREEN}🚀 Starting deployment...${NC}"
     echo ""
     
-    # Build the command with optional extra args
-    if [[ -n "$EXTRA_ARGS" ]]; then
-        just run g1_deploy_onnx_ref "$TARGET" "$CHECKPOINT_DECODER" "$MOTION_DATA" \
-            --obs-config "$OBS_CONFIG" \
-            --encoder-file "$CHECKPOINT_ENCODER" \
-            --planner-file "$PLANNER" \
-            --input-type "$INPUT_TYPE" \
-            --output-type "$OUTPUT_TYPE" \
-            --zmq-host "$ZMQ_HOST" \
-            --zmq-port "$ZMQ_PORT" \
-            --zmq-topic "$ZMQ_TOPIC" \
-            --zmq-out-port "$ZMQ_OUT_PORT" \
-            --zmq-out-topic "$ZMQ_OUT_TOPIC" \
-            --udp-out-host "$UDP_OUT_HOST" \
-            --udp-out-bind-host "$UDP_OUT_BIND_HOST" \
-            --udp-out-port "$UDP_OUT_PORT" \
-            --udp-out-topic "$UDP_OUT_TOPIC" \
-            $EXTRA_ARGS
-    else
-        just run g1_deploy_onnx_ref "$TARGET" "$CHECKPOINT_DECODER" "$MOTION_DATA" \
-            --obs-config "$OBS_CONFIG" \
-            --encoder-file "$CHECKPOINT_ENCODER" \
-            --planner-file "$PLANNER" \
-            --input-type "$INPUT_TYPE" \
-            --output-type "$OUTPUT_TYPE" \
-            --zmq-host "$ZMQ_HOST" \
-            --zmq-port "$ZMQ_PORT" \
-            --zmq-topic "$ZMQ_TOPIC" \
-            --zmq-out-port "$ZMQ_OUT_PORT" \
-            --zmq-out-topic "$ZMQ_OUT_TOPIC" \
-            --udp-out-host "$UDP_OUT_HOST" \
-            --udp-out-bind-host "$UDP_OUT_BIND_HOST" \
-            --udp-out-port "$UDP_OUT_PORT" \
-            --udp-out-topic "$UDP_OUT_TOPIC"
-    fi
+    just run g1_deploy_onnx_ref "$TARGET" "$CHECKPOINT_DECODER" "$MOTION_DATA" \
+        --obs-config "$OBS_CONFIG" \
+        --encoder-file "$CHECKPOINT_ENCODER" \
+        --planner-file "$PLANNER" \
+        --input-type "$INPUT_TYPE" \
+        --output-type "$OUTPUT_TYPE" \
+        --zmq-host "$ZMQ_HOST" \
+        --zmq-port "$ZMQ_PORT" \
+        --zmq-topic "$ZMQ_TOPIC" \
+        --zmq-out-port "$ZMQ_OUT_PORT" \
+        --zmq-out-topic "$ZMQ_OUT_TOPIC" \
+        --udp-out-host "$UDP_OUT_HOST" \
+        --udp-out-bind-host "$UDP_OUT_BIND_HOST" \
+        --udp-out-port "$UDP_OUT_PORT" \
+        --udp-out-topic "$UDP_OUT_TOPIC" \
+        "${EXTRA_ARGS[@]}"
 else
     echo ""
     echo -e "${YELLOW}Deployment cancelled.${NC}"

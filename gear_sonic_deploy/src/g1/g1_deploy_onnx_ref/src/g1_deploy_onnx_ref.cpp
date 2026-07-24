@@ -42,9 +42,13 @@
  *   --input-type          | keyboard / gamepad / zmq / ros2 / interface_manager / gamepad_manager / zmq_manager
  *   --output-type         | zmq / udp / ros2 / all
  *   --disable-crc-check   | Skip CRC validation (for MuJoCo sim)
+ *   --dds-domain          | Unitree DDS domain ID (default: 0)
+ *   --initial-motion      | Initial reference-motion folder name
+ *   --initial-frame       | Initial reference-motion frame (default: 0)
  *   --planner-fp16        | Use FP16 for planner TensorRT engine
  *   --policy-fp16         | Use FP16 for policy TensorRT engine
  */
+#include <atomic>
 #include <cmath>
 #include <cuda_runtime_api.h>
 #include <memory>
@@ -65,6 +69,7 @@
 #include <chrono>
 #include <algorithm>
 #include <numeric>
+#include <stdexcept>
 
 // DDS
 #include <unitree/robot/channel/channel_publisher.hpp>
@@ -251,6 +256,11 @@ class G1Deploy {
     // =========================================================================
     // Flag to disable CRC checking for MuJoCo simulation
     bool disable_crc_check_ = false;
+    bool isaac_sim_ = false;
+    static constexpr uint8_t ISAAC_BRIDGE_INIT = 0xA0;
+    static constexpr uint8_t ISAAC_BRIDGE_WAIT = 0xA1;
+    static constexpr uint8_t ISAAC_BRIDGE_CONTROL = 0xA2;
+    std::atomic<uint8_t> isaac_bridge_state_{ISAAC_BRIDGE_INIT};
     
     bool reinitialize_heading_ = true;
     bool report_temperature_ = false;
@@ -297,6 +307,15 @@ class G1Deploy {
     // =========================================================================
     static constexpr std::chrono::milliseconds LOW_STATE_LATE_THRESHOLD{50};
     static constexpr std::chrono::milliseconds LOW_STATE_ABSENT_THRESHOLD{500};
+    static constexpr std::chrono::milliseconds IMU_STATE_ABSENT_THRESHOLD{500};
+    // Isaac Lab may temporarily stop publishing state while an articulation
+    // reset is applied.  Keep the 500 ms fail-fast limit for a real robot, but
+    // allow a bounded Isaac-only gap so an intentional reset does not
+    // terminate the policy process.  A genuinely stopped simulator still
+    // causes deploy to exit after this deadline.
+    static constexpr std::chrono::milliseconds ISAAC_SIM_STATE_ABSENT_THRESHOLD{5000};
+    bool isaac_low_state_delay_warned_ = false;
+    bool isaac_imu_delay_warned_ = false;
     ProgramState program_state_;
     std::array<double, G1_NUM_MOTOR> last_action;
     std::array<double, 7> last_left_hand_action;
@@ -2135,6 +2154,7 @@ class G1Deploy {
       std::string networkInterface,
       std::string model_file_path,
       std::string motion_data_path,
+      int dds_domain = 0,
       bool disable_crc_check = false,
       std::string obs_config_path = "",
       std::string encoder_file_path = "",
@@ -2163,17 +2183,23 @@ class G1Deploy {
       std::string udp_out_bind_host = "",
       bool enable_motion_recording = false,
       std::array<double, 3> initial_compliance = {0.05, 0.05, 0.0},
-      double initial_max_close_ratio = 1.0)
+      double initial_max_close_ratio = 1.0,
+      double init_duration = 3.0,
+      bool isaac_sim = false,
+      std::string initial_motion_name = "",
+      int initial_motion_frame = 0)
       : time_(0.0),
         publish_dt_(0.002),
         control_dt_(0.02),
         planner_dt_(0.1),
         input_dt_(0.01),
-        duration_(3.0),
+        duration_(std::max(0.0, init_duration)),
         counter_(0),
         mode_pr_(Mode::PR),
         mode_machine_(0),
         disable_crc_check_(disable_crc_check),
+        isaac_sim_(isaac_sim),
+        isaac_bridge_state_(ISAAC_BRIDGE_INIT),
         program_state_(ProgramState::INIT),
         last_action {0.0},
         last_left_hand_action {0.0},
@@ -2186,7 +2212,12 @@ class G1Deploy {
         planner_path(planner_file_path) {
       
       // Initialize ChannelFactory
-      ChannelFactory::Instance()->Init(0, networkInterface);
+      ChannelFactory::Instance()->Init(dds_domain, networkInterface);
+      std::cout << "[INFO] DDS domain: " << dds_domain << std::endl;
+      std::cout << "[INFO] Initial pose-ramp duration: " << duration_ << " s" << std::endl;
+      if (isaac_sim_) {
+        std::cout << "[INFO] Isaac bridge state markers enabled" << std::endl;
+      }
 
       // Initialize Dex3 hands (ChannelFactory already initialized above)
       dex3_hands_.initialize("");
@@ -2271,16 +2302,46 @@ class G1Deploy {
         if (!motion_reader_.motions.empty()) {
           std::cout << "✓ Motion data loaded successfully!" << std::endl;
           // motion_reader_.PrintSummary();
-          motion_reader_.current_motion_index_ = 0;
+          size_t selected_motion_index = 0;
+          if (!initial_motion_name.empty()) {
+            const auto selected_motion = std::find_if(
+                motion_reader_.motions.begin(), motion_reader_.motions.end(),
+                [&initial_motion_name](const auto& motion) {
+                  return motion && motion->name == initial_motion_name;
+                });
+            if (selected_motion == motion_reader_.motions.end()) {
+              std::ostringstream message;
+              message << "Initial motion '" << initial_motion_name
+                      << "' was not found. Available motions: ";
+              for (size_t i = 0; i < motion_reader_.motions.size(); ++i) {
+                if (i > 0) message << ", ";
+                message << motion_reader_.motions[i]->name;
+              }
+              throw std::runtime_error(message.str());
+            }
+            selected_motion_index = static_cast<size_t>(
+                std::distance(motion_reader_.motions.begin(), selected_motion));
+          }
+
+          motion_reader_.current_motion_index_ = static_cast<int>(selected_motion_index);
           std::string motion_name;
           {
             std::lock_guard<std::mutex> lock(current_motion_mutex_);
             current_motion_ = motion_reader_.GetMotionShared(motion_reader_.current_motion_index_);
-            current_frame_ = 0;
+            if (initial_motion_frame < 0 ||
+                initial_motion_frame >= static_cast<int>(current_motion_->timesteps)) {
+              std::ostringstream message;
+              message << "Initial frame " << initial_motion_frame
+                      << " is outside motion '" << current_motion_->name
+                      << "' range [0, " << (current_motion_->timesteps - 1) << "]";
+              throw std::runtime_error(message.str());
+            }
+            current_frame_ = initial_motion_frame;
             motion_name = current_motion_->name;
           }
           operator_state.play = false;
-          std::cout << "Started with motion: " << motion_name << " (paused at frame 0)" << std::endl;
+          std::cout << "Started with motion: " << motion_name
+                    << " (paused at frame " << initial_motion_frame << ")" << std::endl;
         } else {
           std::cout << "✗ Error: Motion directory found but no valid motions loaded from " << motion_data_path
                     << std::endl;
@@ -2695,7 +2756,9 @@ class G1Deploy {
     void LowCommandWriter() {
       LowCmd_ dds_low_command;
       dds_low_command.mode_pr() = static_cast<uint8_t>(mode_pr_);
-      dds_low_command.mode_machine() = mode_machine_;
+      dds_low_command.mode_machine() = isaac_sim_
+          ? isaac_bridge_state_.load(std::memory_order_relaxed)
+          : mode_machine_;
 
       const std::shared_ptr<const MotorCommand> mc = motor_command_buffer_.GetDataWithTime().data;
       if (mc) {
@@ -2786,6 +2849,7 @@ class G1Deploy {
         dex3_hands_.close(false);
       } else {
         program_state_ = ProgramState::WAIT_FOR_CONTROL;
+        isaac_bridge_state_.store(ISAAC_BRIDGE_WAIT, std::memory_order_relaxed);
         dex3_hands_.open(true);
         dex3_hands_.open(false);
         std::cout << "Init Done" << std::endl;
@@ -2797,15 +2861,70 @@ class G1Deploy {
     /// Check for valid LowState data and recent updates; if invalid, transition to ERROR state.
     bool CheckSafety() {
       auto low_state_data = low_state_buffer_.GetDataWithTime();
+      auto imu_data = imu_torso_buffer_.GetDataWithTime();
       const std::shared_ptr<const LowState_> ls = low_state_data.data;
+      const std::shared_ptr<const IMUState_> imu_torso = imu_data.data;
       if (!ls) {
         std::cout << "[ERROR] LowState data is not available in the middle of the control loop!" << std::endl;
         return false;
       }
+      if (!imu_torso) {
+        std::cout << "[ERROR] Secondary IMU data is not available in the middle of the control loop!" << std::endl;
+        return false;
+      }
 
-      auto now = std::chrono::steady_clock::now();
-      if (now - low_state_data.timestamp > LOW_STATE_ABSENT_THRESHOLD) {
-        std::cout << "[ERROR] Lost LowState data connection from robot!" << std::endl;
+      const auto now = std::chrono::steady_clock::now();
+      const auto low_state_age = std::chrono::duration_cast<std::chrono::milliseconds>(
+          now - low_state_data.timestamp);
+      const auto imu_age = std::chrono::duration_cast<std::chrono::milliseconds>(
+          now - imu_data.timestamp);
+      const auto low_state_limit = isaac_sim_
+          ? ISAAC_SIM_STATE_ABSENT_THRESHOLD
+          : LOW_STATE_ABSENT_THRESHOLD;
+      const auto imu_limit = isaac_sim_
+          ? ISAAC_SIM_STATE_ABSENT_THRESHOLD
+          : IMU_STATE_ABSENT_THRESHOLD;
+
+      if (isaac_sim_ && low_state_age > LOW_STATE_ABSENT_THRESHOLD) {
+        if (!isaac_low_state_delay_warned_) {
+          std::cout << "[WARN] Isaac LowState publication paused for "
+                    << low_state_age.count() << "ms; tolerating up to "
+                    << low_state_limit.count()
+                    << "ms for an articulation reset/render stall." << std::endl;
+          isaac_low_state_delay_warned_ = true;
+        }
+      } else if (isaac_low_state_delay_warned_) {
+        std::cout << "[INFO] Isaac LowState publication recovered; age="
+                  << low_state_age.count() << "ms." << std::endl;
+        isaac_low_state_delay_warned_ = false;
+      }
+
+      if (isaac_sim_ && imu_age > IMU_STATE_ABSENT_THRESHOLD) {
+        if (!isaac_imu_delay_warned_) {
+          std::cout << "[WARN] Isaac secondary IMU publication paused for "
+                    << imu_age.count() << "ms; tolerating up to "
+                    << imu_limit.count()
+                    << "ms for an articulation reset/render stall." << std::endl;
+          isaac_imu_delay_warned_ = true;
+        }
+      } else if (isaac_imu_delay_warned_) {
+        std::cout << "[INFO] Isaac secondary IMU publication recovered; age="
+                  << imu_age.count() << "ms." << std::endl;
+        isaac_imu_delay_warned_ = false;
+      }
+
+      if (low_state_age > low_state_limit) {
+        std::cout << "[ERROR] Lost LowState data connection from robot: age="
+                  << low_state_age.count() << "ms, limit="
+                  << low_state_limit.count() << "ms, isaac_sim="
+                  << (isaac_sim_ ? "true" : "false") << "." << std::endl;
+        return false;
+      }
+      if (imu_age > imu_limit) {
+        std::cout << "[ERROR] Lost secondary IMU data connection from robot: age="
+                  << imu_age.count() << "ms, limit="
+                  << imu_limit.count() << "ms, isaac_sim="
+                  << (isaac_sim_ ? "true" : "false") << "." << std::endl;
         return false;
       }
 
@@ -2863,8 +2982,8 @@ class G1Deploy {
         body_q[i] =
             unitree_joint_state[mujoco_to_isaaclab[i]].q() - default_angles[mujoco_to_isaaclab[i]]; // URDF order
         body_dq[i] = unitree_joint_state[mujoco_to_isaaclab[i]].dq(); // URDF order
-        if (body_dq[i] > 35 && !disable_crc_check_) {
-          std::cout << "✗ Error: body_dq[" << i << "] = " << body_dq[i] << " > 35."
+        if (std::abs(body_dq[i]) > 35.0) {
+          std::cout << "✗ Error: abs(body_dq[" << i << "]) = " << std::abs(body_dq[i]) << " > 35."
                     << std::endl;
           return false;
         }
@@ -3867,6 +3986,8 @@ class G1Deploy {
             }
             std::cout << "[Control] DEBUG: operator_state.start=true, transitioning to CONTROL state" << std::endl;
             program_state_ = ProgramState::CONTROL;
+            operator_state.control_active = true;
+            isaac_bridge_state_.store(ISAAC_BRIDGE_CONTROL, std::memory_order_relaxed);
           }
           break;
 
@@ -4151,6 +4272,11 @@ int main(int argc, char const* argv[]) {
     std::cout << "  --planner-motion-logfile <path>: write planner motion to a csv file if provided" << std::endl;
     std::cout << "  --policy-input-logfile <path>: write policy input tensors to a csv file if provided" << std::endl;
     std::cout << "  --disable-crc-check: disable CRC validation for MuJoCo simulation" << std::endl;
+    std::cout << "  --dds-domain <id>: DDS domain ID (default: 0)" << std::endl;
+    std::cout << "  --init-duration <seconds>: initial pose-ramp duration (default: 3.0)" << std::endl;
+    std::cout << "  --isaac-sim: publish Isaac bridge lifecycle markers in LowCmd" << std::endl;
+    std::cout << "  --initial-motion <name>: start from this reference-motion folder (default: sorted first motion)" << std::endl;
+    std::cout << "  --initial-frame <index>: initial zero-based reference frame (default: 0)" << std::endl;
     std::cout << "  --obs-config <path>: specify observation configuration YAML file" << std::endl;
     std::cout << "  --encoder-file <path>: specify encoder ONNX file (optional)" << std::endl;
     std::cout << "  --planner-precision <16|32>: specify precision to run the planner model at (default: 16)" << std::endl;
@@ -4194,7 +4320,12 @@ int main(int argc, char const* argv[]) {
   std::string plannerFile = "";
 
   // Parse optional arguments
-  bool disableCrcCheck = false;\
+  bool disableCrcCheck = false;
+  int ddsDomain = 0;
+  double initDuration = 3.0;
+  bool isaacSim = false;
+  std::string initialMotionName = "";
+  int initialMotionFrame = 0;
   std::string obsConfigPath = "";
   std::string encoderFile = "";
   std::string targetMotionLogfile = "";
@@ -4226,6 +4357,74 @@ int main(int argc, char const* argv[]) {
     if (std::string(argv[i]) == "--disable-crc-check") {
       disableCrcCheck = true;
       std::cout << "[INFO] CRC checking disabled for MuJoCo simulation" << std::endl;
+    } else if (std::string(argv[i]) == "--dds-domain") {
+      if (i + 1 < argc) {
+        const std::string domain_arg = argv[++i];
+        try {
+          std::size_t parsed_chars = 0;
+          ddsDomain = std::stoi(domain_arg, &parsed_chars);
+          if (parsed_chars != domain_arg.size() || ddsDomain < 0) {
+            throw std::invalid_argument("domain must be a non-negative integer");
+          }
+        } catch (const std::exception&) {
+          std::cerr << "Error: --dds-domain must be a non-negative integer, got '"
+                    << domain_arg << "'" << std::endl;
+          exit(1);
+        }
+        std::cout << "[INFO] Using DDS domain: " << ddsDomain << std::endl;
+      } else {
+        std::cerr << "Error: --dds-domain requires an integer argument" << std::endl;
+        exit(1);
+      }
+    } else if (std::string(argv[i]) == "--init-duration") {
+      if (i + 1 < argc) {
+        const std::string duration_arg = argv[++i];
+        try {
+          std::size_t parsed_chars = 0;
+          initDuration = std::stod(duration_arg, &parsed_chars);
+          if (parsed_chars != duration_arg.size() || !std::isfinite(initDuration) || initDuration < 0.0) {
+            throw std::invalid_argument("duration must be a finite non-negative number");
+          }
+        } catch (const std::exception&) {
+          std::cerr << "Error: --init-duration must be a finite non-negative number, got '"
+                    << duration_arg << "'" << std::endl;
+          exit(1);
+        }
+        std::cout << "[INFO] Using initial pose-ramp duration: " << initDuration << " s" << std::endl;
+      } else {
+        std::cerr << "Error: --init-duration requires a numeric argument" << std::endl;
+        exit(1);
+      }
+    } else if (std::string(argv[i]) == "--isaac-sim") {
+      isaacSim = true;
+      std::cout << "[INFO] Isaac simulation bridge mode enabled" << std::endl;
+    } else if (std::string(argv[i]) == "--initial-motion") {
+      if (i + 1 < argc && std::string(argv[i + 1]).rfind("--", 0) != 0) {
+        initialMotionName = argv[++i];
+        std::cout << "[INFO] Initial motion: " << initialMotionName << std::endl;
+      } else {
+        std::cerr << "Error: --initial-motion requires a motion folder name" << std::endl;
+        exit(1);
+      }
+    } else if (std::string(argv[i]) == "--initial-frame") {
+      if (i + 1 < argc) {
+        const std::string frame_arg = argv[++i];
+        try {
+          std::size_t parsed_chars = 0;
+          initialMotionFrame = std::stoi(frame_arg, &parsed_chars);
+          if (parsed_chars != frame_arg.size() || initialMotionFrame < 0) {
+            throw std::invalid_argument("frame must be a non-negative integer");
+          }
+        } catch (const std::exception&) {
+          std::cerr << "Error: --initial-frame must be a non-negative integer, got '"
+                    << frame_arg << "'" << std::endl;
+          exit(1);
+        }
+        std::cout << "[INFO] Initial frame: " << initialMotionFrame << std::endl;
+      } else {
+        std::cerr << "Error: --initial-frame requires an integer argument" << std::endl;
+        exit(1);
+      }
     } else if (std::string(argv[i]) == "--obs-config") {
       if (i + 1 < argc) {
         obsConfigPath = argv[i + 1];
@@ -4462,11 +4661,14 @@ int main(int argc, char const* argv[]) {
     }
   }
 
+  std::cout << "[INFO] LowState CRC check: "
+            << (disableCrcCheck ? "disabled" : "enabled") << std::endl;
   std::cout << "[DEBUG] Creating G1Deploy object..." << std::endl;
   G1Deploy custom(
     networkInterface,
     modelFile,
     motionDataPath,
+    ddsDomain,
     disableCrcCheck,
     obsConfigPath,
     encoderFile,
@@ -4495,7 +4697,11 @@ int main(int argc, char const* argv[]) {
     udp_out_bind_host,
     enableMotionRecording,
     initial_compliance,
-    initial_max_close_ratio
+    initial_max_close_ratio,
+    initDuration,
+    isaacSim,
+    initialMotionName,
+    initialMotionFrame
   );
   std::cout << "[DEBUG] G1Deploy object created successfully!" << std::endl;
   

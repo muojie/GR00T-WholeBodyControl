@@ -199,6 +199,9 @@ class UnitreeSdk2Bridge:
         self.low_cmd_lock = threading.Lock()
         self.left_hand_cmd_lock = threading.Lock()
         self.right_hand_cmd_lock = threading.Lock()
+        self.timing_lock = threading.Lock()
+        self._timing_low_cmd_received = 0
+        self._timing_low_state_published = 0
 
         self.robot_id = _normalise_robot_id(
             config.get("ROBOT_ID", os.environ.get("G1_LOCAL_ROBOT_ID", os.environ.get("ROBOT_ID", "1")))
@@ -294,6 +297,8 @@ class UnitreeSdk2Bridge:
             self.low_cmd = msg
             self.low_cmd_received = True
             self.new_low_cmd = True
+        with self.timing_lock:
+            self._timing_low_cmd_received += 1
 
     def LeftHandCmdHandler(self, msg):
         with self.left_hand_cmd_lock:
@@ -315,6 +320,16 @@ class UnitreeSdk2Bridge:
         with self.right_hand_cmd_lock:
             right_hand_cmd_received = self.right_hand_cmd_received
         return low_cmd_received or left_hand_cmd_received or right_hand_cmd_received
+
+    def take_timing_counts(self) -> tuple[int, int]:
+        """Return and reset DDS packet counters used by simulator diagnostics."""
+
+        with self.timing_lock:
+            low_cmd_received = self._timing_low_cmd_received
+            low_state_published = self._timing_low_state_published
+            self._timing_low_cmd_received = 0
+            self._timing_low_state_published = 0
+        return low_cmd_received, low_state_published
 
     def _init_root_state_zmq(self):
         try:
@@ -475,6 +490,8 @@ class UnitreeSdk2Bridge:
             raise NotImplementedError("Frame sensor data is not implemented yet.")
         self.low_state.tick = int(obs["time"] * 1e3)
         self.low_state_puber.Write(self.low_state)
+        with self.timing_lock:
+            self._timing_low_state_published += 1
 
         self.odo_state.tick = int(obs["time"] * 1e3)
         self.odo_state_puber.Write(self.odo_state)
