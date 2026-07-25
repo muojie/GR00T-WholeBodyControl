@@ -187,6 +187,13 @@ class StateLogger {
   size_t capacity() const;
   size_t size() const;
 
+  /**
+   * Clear the in-memory observation/history ring after a discontinuous robot
+   * reset.  CSV output and the monotonic entry index are intentionally kept;
+   * only samples that must not cross the reset boundary are discarded.
+   */
+  void ClearHistory();
+
   // Returns copies of the latest n entries (up to available size)
   // If newest_first is true (default), returns [newest, ..., oldest]; otherwise [oldest, ..., newest]
   std::vector<Entry> GetLatest(size_t n, bool newest_first = true) const;

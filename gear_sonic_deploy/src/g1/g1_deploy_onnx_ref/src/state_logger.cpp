@@ -177,6 +177,12 @@ size_t StateLogger::size() const {
   return size_;
 }
 
+void StateLogger::ClearHistory() {
+  std::lock_guard<std::mutex> lock(ring_mutex_);
+  start_ = 0;
+  size_ = 0;
+}
+
 std::vector<Entry> StateLogger::GetLatest(size_t n, bool newest_first) const {
   std::lock_guard<std::mutex> lock(ring_mutex_);
   const size_t count = n < size_ ? n : size_;
@@ -503,4 +509,3 @@ Entry StateLogger::makeZeroEntry_() const {
   e.token_state.clear();
   return e;
 }
-

@@ -66,7 +66,7 @@ public:
     /// Number of already-consumed frames to retain before the playback cursor
     /// (provides look-back for interpolation / blending).
     static constexpr int HISTORY_FRAMES = 5;
-    /// Maximum tolerated gap (in current-rate frames) before a catch-up reset.
+    /// Maximum tolerated gap (in current-rate frames) before a hard catch-up reset.
     static constexpr int MAX_GAP_FRAMES = 200;
     
     /// Returned by MergeIncomingData() to communicate what happened.
@@ -75,6 +75,10 @@ public:
         int window_start = 0;                    ///< Global frame index of motion[0].
         int frame_offset_adjustment = 0;         ///< Subtract from current_frame to compensate for window shift.
         bool did_catchup_reset = false;           ///< True → caller should reset playback to frame 0.
+        int recommended_playback_frame = -1;      ///< >= 0 → use this cursor in the newly merged motion.
+        bool did_low_latency_rebase = false;      ///< True → stale reference frames were skipped without a hard reset.
+        int playback_lag_frames_before = 0;       ///< Latest incoming frame minus normal playback cursor.
+        int playback_lag_frames_after = 0;        ///< Remaining lag after an optional low-latency rebase.
         int frame_step = 1;                       ///< Detected stride between consecutive frame indices.
         int protocol_version = 0;                 ///< Protocol version of the incoming data (1, 2, or 3).
     };
@@ -105,7 +109,8 @@ public:
         int num_smpl_poses = 0;   ///< SMPL pose parameters per frame.
     };
     
-    StreamedMotionMerger() {
+    explicit StreamedMotionMerger(int target_playback_lag_frames = -1)
+        : target_playback_lag_frames_(target_playback_lag_frames) {
         Reset();
     }
     
@@ -192,6 +197,51 @@ public:
         int window_shift_ticks = new_window_start - old_window_start;
         int window_shift = (frame_step > 0) ? (window_shift_ticks / frame_step) : 0;
         
+        // Compute where the old playback cursor lands in the newly merged
+        // window.  In low-latency mode we may advance this cursor to discard
+        // stale reference frames while retaining the newest target frames as
+        // policy look-ahead.  This changes only the reference cursor; it does
+        // not execute extra policy or physics steps.
+        int normal_playback_frame = did_catchup
+            ? 0
+            : current_playback_frame - window_shift;
+        normal_playback_frame = std::clamp(
+            normal_playback_frame,
+            0,
+            std::max(0, new_motion->timesteps - 1));
+
+        const int normal_global_playback_frame =
+            new_window_start + frame_step * normal_playback_frame;
+        const int playback_lag_frames_before = (frame_step > 0)
+            ? std::max(0, (incoming_frame_end - normal_global_playback_frame) / frame_step)
+            : 0;
+
+        int recommended_playback_frame = -1;
+        bool did_low_latency_rebase = false;
+        int playback_lag_frames_after = playback_lag_frames_before;
+        if (!did_catchup && target_playback_lag_frames_ >= 0 &&
+            playback_lag_frames_before > target_playback_lag_frames_) {
+            const int desired_global_playback_frame =
+                incoming_frame_end - target_playback_lag_frames_ * frame_step;
+            int desired_playback_frame = (frame_step > 0)
+                ? (desired_global_playback_frame - new_window_start) / frame_step
+                : normal_playback_frame;
+            desired_playback_frame = std::clamp(
+                desired_playback_frame,
+                normal_playback_frame,
+                std::max(0, new_motion->timesteps - 1));
+
+            if (desired_playback_frame > normal_playback_frame) {
+                recommended_playback_frame = desired_playback_frame;
+                did_low_latency_rebase = true;
+                const int rebased_global_playback_frame =
+                    new_window_start + frame_step * desired_playback_frame;
+                playback_lag_frames_after = (frame_step > 0)
+                    ? std::max(0, (incoming_frame_end - rebased_global_playback_frame) / frame_step)
+                    : 0;
+            }
+        }
+
         // Update state
         streamed_motion_ = new_motion;
         stream_window_start_ = new_window_start;
@@ -201,6 +251,10 @@ public:
         result.window_start = new_window_start;
         result.frame_offset_adjustment = did_catchup ? 0 : window_shift;
         result.did_catchup_reset = did_catchup;
+        result.recommended_playback_frame = recommended_playback_frame;
+        result.did_low_latency_rebase = did_low_latency_rebase;
+        result.playback_lag_frames_before = playback_lag_frames_before;
+        result.playback_lag_frames_after = playback_lag_frames_after;
         result.frame_step = frame_step;
         result.protocol_version = data.protocol_version;
         
@@ -210,6 +264,9 @@ public:
 private:
     std::shared_ptr<MotionSequence> streamed_motion_;
     int stream_window_start_ = 0;
+    /// Disabled when negative.  Otherwise the playback cursor is kept at most
+    /// this many source frames behind the newest received reference frame.
+    int target_playback_lag_frames_ = -1;
     
     // Validate incoming data structure
     bool ValidateIncomingData(const IncomingData& data) const {
@@ -514,4 +571,3 @@ private:
 };
 
 #endif // STREAMED_MOTION_MERGER_HPP
-

@@ -87,7 +87,8 @@ class ZMQManager : public InputInterface {
       const std::string& command_topic = "command",
       const std::string& planner_topic = "planner",
       bool zmq_conflate = false,
-      bool zmq_verbose = false
+      bool zmq_verbose = false,
+      int target_playback_lag_frames = -1
     ) : InputInterface(), 
         zmq_host_(zmq_host), 
         zmq_port_(zmq_port), 
@@ -102,7 +103,8 @@ class ZMQManager : public InputInterface {
       
       // Create pose interface (for streamed motion mode)
       pose_interface_ = std::make_unique<ZMQEndpointInterface>(
-        zmq_host_, zmq_port_, pose_topic_, zmq_conflate_, zmq_verbose_
+        zmq_host_, zmq_port_, pose_topic_, zmq_conflate_, zmq_verbose_,
+        target_playback_lag_frames
       );
       
       // Create command subscriber

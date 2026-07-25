@@ -129,8 +129,15 @@ public:
         int port = 5556,
         const std::string& topic = "pose",
         bool use_conflate = false,
-        bool verbose = false
-    ) : InputInterface(), host_(host), port_(port), topic_(topic), verbose_(verbose), is_localhost_(host == LOCALHOST) {
+        bool verbose = false,
+        int target_playback_lag_frames = -1
+    ) : InputInterface(),
+        motion_merger_(target_playback_lag_frames),
+        host_(host),
+        port_(port),
+        topic_(topic),
+        verbose_(verbose),
+        is_localhost_(host == LOCALHOST) {
         type_ = InputType::NETWORK;
         
         // Set terminal to non-blocking mode (same as SimpleKeyboard)
@@ -166,6 +173,11 @@ public:
         
         std::cout << "[ZMQEndpointInterface] Connected to " << host << ":" << port 
                   << " topic='" << topic << "'" << std::endl;
+        if (target_playback_lag_frames >= 0) {
+            std::cout << "[ZMQEndpointInterface] Low-latency reference mode enabled: target lag="
+                      << target_playback_lag_frames
+                      << " source frames (stale reference frames may be skipped)" << std::endl;
+        }
         std::cout << "[ZMQEndpointInterface] Press ENTER to toggle between loaded motions and ZMQ stream" << std::endl;
     }
     
@@ -376,10 +388,20 @@ public:
 
         // If ZMQ mode is active, use streamed motion data
         if (use_zmq_stream) {
+            int playback_frame_snapshot = 0;
+            {
+                std::lock_guard<std::mutex> lock(current_motion_mutex);
+                playback_frame_snapshot = current_frame;
+            }
+
             // Check and decode new network data if available
             std::shared_ptr<MotionSequence> new_motion;
             int frame_offset_adjustment = 0;
             bool did_catchup = false;
+            int recommended_playback_frame = -1;
+            bool did_low_latency_rebase = false;
+            int playback_lag_frames_before = 0;
+            int playback_lag_frames_after = 0;
             int protocol_version_for_mode_update = -1;
             {
                 std::lock_guard<std::mutex> lock(data_mutex_);
@@ -389,7 +411,11 @@ public:
                         std::cout << "[ZMQEndpointInterface] *** Starting ZMQ processing ***" << std::endl;
                     }
                     // Decode into a new MotionSequence with current playback position
-                    auto result = DecodeIntoMotionSequence(current_frame, streamed_motion_, stream_window_start_, heading_state_buffer);
+                    auto result = DecodeIntoMotionSequence(
+                        playback_frame_snapshot,
+                        streamed_motion_,
+                        stream_window_start_,
+                        heading_state_buffer);
                     
                     // Handle Protocol v4 (token-only) - no motion, just tokens
                     if (result.protocol_version == 4) {
@@ -444,6 +470,10 @@ public:
                         stream_window_start_ = result.window_start;
                         frame_offset_adjustment = result.frame_offset_adjustment;
                         did_catchup = result.did_catchup_reset;
+                        recommended_playback_frame = result.recommended_playback_frame;
+                        did_low_latency_rebase = result.did_low_latency_rebase;
+                        playback_lag_frames_before = result.playback_lag_frames_before;
+                        playback_lag_frames_after = result.playback_lag_frames_after;
                         
                         if constexpr (DEBUG_LOGGING) {
                             int window_end_msg_idx = stream_window_start_ + result.frame_step * (new_motion->timesteps - 1);
@@ -452,7 +482,11 @@ public:
                                       << "window [" << stream_window_start_ << ".." << window_end_msg_idx << "] (message-index)"
                                       << ", frame_step=" << result.frame_step
                                       << ", frame_offset_adjustment=" << frame_offset_adjustment
-                                      << ", did_catchup=" << did_catchup << std::endl;
+                                      << ", did_catchup=" << did_catchup
+                                      << ", reference_lag=" << playback_lag_frames_before
+                                      << "->" << playback_lag_frames_after << " frames"
+                                      << ", low_latency_rebase=" << did_low_latency_rebase
+                                      << std::endl;
                         }
                     }
                     if constexpr (DEBUG_LOGGING) {
@@ -478,6 +512,8 @@ public:
                                   << stream_window_start_ << std::endl;
                     }
                 } else {
+                    std::lock_guard<std::mutex> lock(current_motion_mutex);
+
                     // Normal case: Adjust current_frame to maintain global playback position after window shift
                     // current_frame represents "the next frame to be read" (not yet consumed)
                     int adjusted_frame = current_frame - frame_offset_adjustment;
@@ -498,8 +534,24 @@ public:
                         // Safety: ensure we don't set negative frame index if timesteps is 0
                         adjusted_frame = (streamed_motion_->timesteps > 0) ? (streamed_motion_->timesteps - 1) : 0;
                     }
-                    
-                    std::lock_guard<std::mutex> lock(current_motion_mutex);
+
+                    if (recommended_playback_frame >= 0) {
+                        // The control thread may have advanced by one frame
+                        // since DecodeIntoMotionSequence took its snapshot.
+                        // Never let a low-latency rebase rewind that progress.
+                        adjusted_frame = std::clamp(
+                            std::max(adjusted_frame, recommended_playback_frame),
+                            0,
+                            std::max(0, streamed_motion_->timesteps - 1));
+                        if constexpr (DEBUG_LOGGING) {
+                            std::cout << "[ZMQEndpointInterface] Low-latency rebase: skipped stale "
+                                      << "reference frames, lag " << playback_lag_frames_before
+                                      << " -> " << playback_lag_frames_after
+                                      << " source frames; new playback frame="
+                                      << adjusted_frame << std::endl;
+                        }
+                    }
+
                     current_frame = adjusted_frame;
                     current_motion = streamed_motion_;  // Assign shared_ptr directly for thread safety
                     operator_state.play = true; // Auto-play when entering ZMQ mode
@@ -603,6 +655,10 @@ private:
         int window_start = 0;                     ///< Global frame index of motion[0].
         int frame_offset_adjustment = 0;          ///< Subtract from current_frame for window shift.
         bool did_catchup_reset = false;            ///< True → caller should reset playback to frame 0.
+        int recommended_playback_frame = -1;       ///< >= 0 → use this cursor in the newly merged motion.
+        bool did_low_latency_rebase = false;       ///< True → stale references were skipped without reset.
+        int playback_lag_frames_before = 0;        ///< Lag before optional low-latency rebase.
+        int playback_lag_frames_after = 0;         ///< Lag after optional low-latency rebase.
         int frame_step = 1;                        ///< Detected stride between frame indices.
         int protocol_version = 0;                  ///< Protocol version from the message (1, 2, or 3).
         std::vector<double> token_data;            ///< Token data from the message.
@@ -1713,6 +1769,10 @@ private:
         result.window_start = merge_result.window_start;
         result.frame_offset_adjustment = merge_result.frame_offset_adjustment;
         result.did_catchup_reset = merge_result.did_catchup_reset;
+        result.recommended_playback_frame = merge_result.recommended_playback_frame;
+        result.did_low_latency_rebase = merge_result.did_low_latency_rebase;
+        result.playback_lag_frames_before = merge_result.playback_lag_frames_before;
+        result.playback_lag_frames_after = merge_result.playback_lag_frames_after;
         result.frame_step = merge_result.frame_step;
         result.protocol_version = merge_result.protocol_version;
         

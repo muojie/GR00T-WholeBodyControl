@@ -332,6 +332,7 @@ show_usage() {
     echo "  --output-type TYPE      Set the output type (default: $OUTPUT_TYPE_DEFAULT)"
     echo "  --dds-domain ID         Override the DDS domain selected by the mode"
     echo "  --init-duration SEC     Override the initial pose-ramp duration"
+    echo "  --isaac-stream-lag-frames N  Keep N source frames of streamed look-ahead in Isaac (default: 20)"
     echo "  --initial-motion NAME   Select the initial reference-motion folder"
     echo "  --initial-frame INDEX   Select its initial zero-based frame (default: 0)"
     echo "  --enable-crc-check      Force LowState CRC validation"
@@ -432,6 +433,7 @@ UDP_OUT_TOPIC="$UDP_OUT_TOPIC_DEFAULT"
 DDS_DOMAIN_OVERRIDE=""
 CRC_CHECK_OVERRIDE=""
 INIT_DURATION_OVERRIDE=""
+ISAAC_STREAM_LAG_FRAMES="20"
 INITIAL_MOTION=""
 INITIAL_FRAME="0"
 
@@ -514,6 +516,14 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             INIT_DURATION_OVERRIDE="$2"
+            shift 2
+            ;;
+        --isaac-stream-lag-frames)
+            if [[ -z "$2" ]] || [[ ! "$2" =~ ^[0-9]+$ ]] || (( 10#$2 > 200 )); then
+                echo -e "${RED}Error: --isaac-stream-lag-frames requires an integer in [0, 200]${NC}" >&2
+                exit 1
+            fi
+            ISAAC_STREAM_LAG_FRAMES="$2"
             shift 2
             ;;
         --initial-motion)
@@ -709,7 +719,7 @@ if [[ -n "$INITIAL_MOTION" ]]; then
 fi
 EXTRA_ARGS+=(--initial-frame "$INITIAL_FRAME")
 if [[ "$ENV_TYPE" == "isaac" ]]; then
-    EXTRA_ARGS+=(--isaac-sim)
+    EXTRA_ARGS+=(--isaac-sim --isaac-stream-lag-frames "$ISAAC_STREAM_LAG_FRAMES")
 fi
 if [[ "$CRC_CHECK_MODE" == "disabled" ]]; then
     EXTRA_ARGS+=(--disable-crc-check)
@@ -844,6 +854,9 @@ echo -e "  Network Interface:  ${GREEN}$TARGET${NC}"
 echo -e "  DDS Domain:         ${GREEN}$DDS_DOMAIN${NC}"
 echo -e "  CRC Check:          ${GREEN}$CRC_CHECK_MODE${NC}"
 echo -e "  Init Duration:      ${GREEN}${INIT_DURATION}s${NC}"
+if [[ "$ENV_TYPE" == "isaac" ]]; then
+    echo -e "  Stream Ref Lag:     ${GREEN}${ISAAC_STREAM_LAG_FRAMES} source frames${NC}"
+fi
 echo -e "  Initial Motion:     ${GREEN}${INITIAL_MOTION:-sorted first motion}${NC}"
 echo -e "  Initial Frame:      ${GREEN}${INITIAL_FRAME}${NC}"
 echo -e "  Decoder Model:      ${GREEN}$CHECKPOINT_DECODER${NC}"

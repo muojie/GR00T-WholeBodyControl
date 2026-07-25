@@ -69,6 +69,7 @@
 #include <chrono>
 #include <algorithm>
 #include <numeric>
+#include <limits>
 #include <stdexcept>
 
 // DDS
@@ -257,10 +258,29 @@ class G1Deploy {
     // Flag to disable CRC checking for MuJoCo simulation
     bool disable_crc_check_ = false;
     bool isaac_sim_ = false;
+    bool isaac_state_sync_ = false;
     static constexpr uint8_t ISAAC_BRIDGE_INIT = 0xA0;
     static constexpr uint8_t ISAAC_BRIDGE_WAIT = 0xA1;
     static constexpr uint8_t ISAAC_BRIDGE_CONTROL = 0xA2;
+    static constexpr uint32_t ISAAC_LOWSTATE_SYNC_MAGIC = 0x49534143;
+    static constexpr uint32_t SONIC_LOWCMD_SYNC_MAGIC = 0x534E4331;
+    static constexpr uint32_t INVALID_ISAAC_TICK = std::numeric_limits<uint32_t>::max();
     std::atomic<uint8_t> isaac_bridge_state_{ISAAC_BRIDGE_INIT};
+    std::atomic<bool> isaac_have_state_{false};
+    std::atomic<bool> isaac_reset_epoch_initialized_{false};
+    std::atomic<bool> isaac_reset_pending_{false};
+    std::atomic<bool> isaac_command_ack_valid_{false};
+    std::atomic<uint32_t> isaac_latest_state_tick_{INVALID_ISAAC_TICK};
+    std::atomic<uint32_t> isaac_last_received_tick_{INVALID_ISAAC_TICK};
+    std::atomic<uint32_t> isaac_last_processed_tick_{INVALID_ISAAC_TICK};
+    std::atomic<uint32_t> isaac_last_completed_tick_{INVALID_ISAAC_TICK};
+    std::atomic<uint32_t> isaac_reset_epoch_{0};
+    std::atomic<uint64_t> isaac_unique_state_count_{0};
+    std::atomic<uint64_t> isaac_duplicate_state_count_{0};
+    std::atomic<uint64_t> isaac_skipped_rx_state_count_{0};
+    std::atomic<uint64_t> isaac_processed_state_count_{0};
+    std::atomic<uint64_t> isaac_planner_cycle_{0};
+    std::atomic<int64_t> isaac_last_unique_state_time_ns_{0};
     
     bool reinitialize_heading_ = true;
     bool report_temperature_ = false;
@@ -2186,6 +2206,8 @@ class G1Deploy {
       double initial_max_close_ratio = 1.0,
       double init_duration = 3.0,
       bool isaac_sim = false,
+      bool isaac_state_sync = true,
+      int isaac_stream_lag_frames = 20,
       std::string initial_motion_name = "",
       int initial_motion_frame = 0)
       : time_(0.0),
@@ -2199,6 +2221,7 @@ class G1Deploy {
         mode_machine_(0),
         disable_crc_check_(disable_crc_check),
         isaac_sim_(isaac_sim),
+        isaac_state_sync_(isaac_sim && isaac_state_sync),
         isaac_bridge_state_(ISAAC_BRIDGE_INIT),
         program_state_(ProgramState::INIT),
         last_action {0.0},
@@ -2217,6 +2240,12 @@ class G1Deploy {
       std::cout << "[INFO] Initial pose-ramp duration: " << duration_ << " s" << std::endl;
       if (isaac_sim_) {
         std::cout << "[INFO] Isaac bridge state markers enabled" << std::endl;
+        std::cout << "[INFO] Isaac state-driven control synchronization: "
+                  << (isaac_state_sync_ ? "enabled" : "disabled") << std::endl;
+        if (isaac_state_sync_) {
+          std::cout << "[INFO] Isaac streamed-reference target lag: "
+                    << isaac_stream_lag_frames << " source frames" << std::endl;
+        }
       }
 
       // Initialize Dex3 hands (ChannelFactory already initialized above)
@@ -2561,7 +2590,8 @@ class G1Deploy {
       }
       else if (input_type == "zmq") {
         input_interface_ = std::make_unique<ZMQEndpointInterface>(
-          zmq_host, zmq_port, zmq_topic, zmq_conflate, zmq_verbose
+          zmq_host, zmq_port, zmq_topic, zmq_conflate, zmq_verbose,
+          isaac_state_sync_ ? isaac_stream_lag_frames : -1
         );
         std::cout << "Initialized ZMQ endpoint interface" << std::endl;
         std::cout << "  Host: " << zmq_host << ":" << zmq_port << std::endl;
@@ -2571,7 +2601,8 @@ class G1Deploy {
       }
       else if (input_type == "zmq_manager") {
         input_interface_ = std::make_unique<ZMQManager>(
-          zmq_host, zmq_port, zmq_topic, "command", "planner", zmq_conflate, zmq_verbose
+          zmq_host, zmq_port, zmq_topic, "command", "planner", zmq_conflate, zmq_verbose,
+          isaac_state_sync_ ? isaac_stream_lag_frames : -1
         );
         std::cout << "Initialized ZMQ manager" << std::endl;
         std::cout << "  Host: " << zmq_host << ":" << zmq_port << std::endl;
@@ -2675,12 +2706,14 @@ class G1Deploy {
       input_thread_ptr_ = CreateRecurrentThreadEx("Input", UT_CPU_ID_NONE, input_dt_ * 1e6, &G1Deploy::Input, this);
       command_writer_ptr_ = CreateRecurrentThreadEx("command_writer", UT_CPU_ID_NONE, publish_dt_ * 1e6,
                                                     &G1Deploy::LowCommandWriter, this);
+      const double control_poll_dt = isaac_state_sync_ ? publish_dt_ : control_dt_;
       control_thread_ptr_ =
-          CreateRecurrentThreadEx("control", UT_CPU_ID_NONE, control_dt_ * 1e6, &G1Deploy::Control, this);
+          CreateRecurrentThreadEx("control", UT_CPU_ID_NONE, control_poll_dt * 1e6, &G1Deploy::Control, this);
       
       if (planner_) {
+        const double planner_poll_dt = isaac_state_sync_ ? publish_dt_ : planner_dt_;
         planner_thread_ptr_ =
-          CreateRecurrentThreadEx("planner", UT_CPU_ID_NONE, planner_dt_ * 1e6, &G1Deploy::Planner, this);
+          CreateRecurrentThreadEx("planner", UT_CPU_ID_NONE, planner_poll_dt * 1e6, &G1Deploy::Planner, this);
       }
           
       SetThreadPriority();
@@ -2733,6 +2766,57 @@ class G1Deploy {
 
       low_state_buffer_.SetData(low_state);
 
+      if (isaac_state_sync_) {
+        const auto& reserve = low_state.reserve();
+        const bool has_sync_marker = reserve[3] == ISAAC_LOWSTATE_SYNC_MAGIC;
+        if (has_sync_marker) {
+          const uint32_t incoming_epoch = reserve[0];
+          if (!isaac_reset_epoch_initialized_.exchange(true, std::memory_order_acq_rel)) {
+            isaac_reset_epoch_.store(incoming_epoch, std::memory_order_release);
+          } else {
+            const uint32_t previous_epoch =
+                isaac_reset_epoch_.exchange(incoming_epoch, std::memory_order_acq_rel);
+            if (previous_epoch != incoming_epoch) {
+              isaac_command_ack_valid_.store(false, std::memory_order_release);
+              isaac_reset_pending_.store(true, std::memory_order_release);
+              std::cout << "[IsaacSync] reset epoch " << previous_epoch
+                        << " -> " << incoming_epoch
+                        << "; invalidating pre-reset command/history" << std::endl;
+            }
+          }
+        } else {
+          static std::atomic<uint64_t> missing_marker_count{0};
+          const uint64_t count = missing_marker_count.fetch_add(1, std::memory_order_relaxed) + 1;
+          if (count == 1 || count % 500 == 0) {
+            std::cerr << "[IsaacSync] LowState sync marker missing; tick gating remains active "
+                      << "but reset-epoch synchronization is unavailable" << std::endl;
+          }
+        }
+
+        const uint32_t incoming_tick = low_state.tick();
+        const uint32_t previous_tick =
+            isaac_last_received_tick_.exchange(incoming_tick, std::memory_order_acq_rel);
+        if (previous_tick == incoming_tick) {
+          isaac_duplicate_state_count_.fetch_add(1, std::memory_order_relaxed);
+        } else {
+          if (previous_tick != INVALID_ISAAC_TICK) {
+            const uint32_t forward_delta = incoming_tick - previous_tick;
+            if (forward_delta > 1 && forward_delta < 0x80000000u) {
+              isaac_skipped_rx_state_count_.fetch_add(
+                  static_cast<uint64_t>(forward_delta - 1),
+                  std::memory_order_relaxed);
+            }
+          }
+          isaac_unique_state_count_.fetch_add(1, std::memory_order_relaxed);
+          const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch())
+                                  .count();
+          isaac_last_unique_state_time_ns_.store(now_ns, std::memory_order_release);
+        }
+        isaac_latest_state_tick_.store(incoming_tick, std::memory_order_release);
+        isaac_have_state_.store(true, std::memory_order_release);
+      }
+
       // update mode machine
       if (mode_machine_ != low_state.mode_machine()) {
         if (mode_machine_ == 0) std::cout << "G1 type: " << unsigned(low_state.mode_machine()) << std::endl;
@@ -2769,6 +2853,19 @@ class G1Deploy {
           dds_low_command.motor_cmd().at(i).dq() = mc->dq_target.at(i);
           dds_low_command.motor_cmd().at(i).kp() = mc->kp.at(i);
           dds_low_command.motor_cmd().at(i).kd() = mc->kd.at(i);
+        }
+
+        if (isaac_state_sync_ &&
+            isaac_command_ack_valid_.load(std::memory_order_acquire)) {
+          dds_low_command.reserve()[0] =
+              isaac_last_completed_tick_.load(std::memory_order_acquire);
+          dds_low_command.reserve()[1] =
+              isaac_reset_epoch_.load(std::memory_order_acquire);
+          dds_low_command.reserve()[2] = static_cast<uint32_t>(
+              isaac_processed_state_count_.load(std::memory_order_relaxed));
+          dds_low_command.reserve()[3] = SONIC_LOWCMD_SYNC_MAGIC;
+        } else {
+          dds_low_command.reserve().fill(0);
         }
 
         dds_low_command.crc() = Crc32Core((uint32_t*)&dds_low_command, (sizeof(dds_low_command) >> 2) - 1);
@@ -3713,6 +3810,24 @@ class G1Deploy {
      */
     void Planner() {
       if (operator_state.stop) { return; }
+      if (isaac_state_sync_) {
+        constexpr uint64_t kControlStepsPerPlannerStep = 5;
+        const uint64_t completed_control_steps =
+            isaac_processed_state_count_.load(std::memory_order_acquire);
+        const uint64_t desired_planner_cycle =
+            completed_control_steps / kControlStepsPerPlannerStep;
+        if (desired_planner_cycle == 0) { return; }
+        uint64_t completed_planner_cycle =
+            isaac_planner_cycle_.load(std::memory_order_acquire);
+        if (completed_planner_cycle >= desired_planner_cycle) { return; }
+        if (!isaac_planner_cycle_.compare_exchange_strong(
+                completed_planner_cycle,
+                desired_planner_cycle,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+          return;
+        }
+      }
       auto low_state_data = low_state_buffer_.GetDataWithTime();
       const std::shared_ptr<const LowState_> ls = low_state_data.data;
       
@@ -3950,7 +4065,76 @@ class G1Deploy {
      *    9. CurrentFrameAdvancement — advance playback cursor, blend planner.
      *    10. Periodic timing log every 50 ticks (~1 s).
      */
+    void ResetIsaacControlHistory() {
+      if (state_logger_) {
+        state_logger_->ClearHistory();
+      }
+      last_action.fill(0.0);
+      last_left_hand_action.fill(0.0);
+      last_right_hand_action.fill(0.0);
+      reinitialize_heading_ = true;
+      heading_state_buffer_.Clear();
+      used_low_state_data_ = TimestampedData<LowState_>();
+      used_imu_torso_data_ = TimestampedData<IMUState_>();
+      idle_readapt_stored_ = false;
+      idle_readapt_state_ = IdleReadaptState::IDLE;
+      streaming_data_delay_rolling_stats_.clear();
+      streaming_data_absent_debouncer_ = CounterDebouncer(100, 500, 50, 1);
+      std::cout << "[IsaacSync] cleared policy observation history and last actions "
+                << "at reset epoch "
+                << isaac_reset_epoch_.load(std::memory_order_acquire) << std::endl;
+    }
+
+    /**
+     * Polling wrapper used by Isaac lock-step mode.  The recurrent thread runs
+     * at 500 Hz so a newly published state is noticed promptly, but the full
+     * policy/reference pipeline below executes exactly once for each unique
+     * LowState.tick.  Re-published DDS keepalive packets therefore cannot run
+     * the controller ahead of slow PhysX.
+     */
     void Control() {
+      if (operator_state.stop) { return; }
+      if (!isaac_state_sync_) {
+        ControlStep();
+        return;
+      }
+      if (!isaac_have_state_.load(std::memory_order_acquire)) { return; }
+
+      if (isaac_reset_pending_.exchange(false, std::memory_order_acq_rel)) {
+        isaac_command_ack_valid_.store(false, std::memory_order_release);
+        isaac_last_processed_tick_.store(INVALID_ISAAC_TICK, std::memory_order_release);
+        ResetIsaacControlHistory();
+      }
+
+      const uint32_t state_tick =
+          isaac_latest_state_tick_.load(std::memory_order_acquire);
+      const uint32_t state_epoch =
+          isaac_reset_epoch_.load(std::memory_order_acquire);
+      uint32_t expected = isaac_last_processed_tick_.load(std::memory_order_acquire);
+      if (expected == state_tick) { return; }
+      if (!isaac_last_processed_tick_.compare_exchange_strong(
+              expected,
+              state_tick,
+              std::memory_order_acq_rel,
+              std::memory_order_acquire)) {
+        return;
+      }
+
+      ControlStep();
+      if (operator_state.stop ||
+          isaac_reset_pending_.load(std::memory_order_acquire) ||
+          isaac_reset_epoch_.load(std::memory_order_acquire) != state_epoch) {
+        isaac_command_ack_valid_.store(false, std::memory_order_release);
+        isaac_last_processed_tick_.store(INVALID_ISAAC_TICK, std::memory_order_release);
+        return;
+      }
+
+      isaac_processed_state_count_.fetch_add(1, std::memory_order_relaxed);
+      isaac_last_completed_tick_.store(state_tick, std::memory_order_release);
+      isaac_command_ack_valid_.store(true, std::memory_order_release);
+    }
+
+    void ControlStep() {
       if (operator_state.stop) { return; }
 
       switch (program_state_) {
@@ -4228,6 +4412,30 @@ class G1Deploy {
             
             // Print hand max close ratio (keyboard-controlled via X/C keys)
             std::cout << " | HandCloseRatio: " << dex3_hands_.GetMaxCloseRatio();
+
+            if (isaac_state_sync_) {
+              const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                      std::chrono::steady_clock::now().time_since_epoch())
+                                      .count();
+              const auto last_unique_ns =
+                  isaac_last_unique_state_time_ns_.load(std::memory_order_acquire);
+              const double unique_state_age_ms = last_unique_ns > 0
+                  ? static_cast<double>(now_ns - last_unique_ns) / 1.0e6
+                  : 0.0;
+              std::cout << " | IsaacSync tick="
+                        << isaac_last_completed_tick_.load(std::memory_order_acquire)
+                        << ", epoch="
+                        << isaac_reset_epoch_.load(std::memory_order_acquire)
+                        << ", unique/duplicate="
+                        << isaac_unique_state_count_.load(std::memory_order_relaxed)
+                        << "/"
+                        << isaac_duplicate_state_count_.load(std::memory_order_relaxed)
+                        << ", processed="
+                        << isaac_processed_state_count_.load(std::memory_order_relaxed)
+                        << ", skipped_rx="
+                        << isaac_skipped_rx_state_count_.load(std::memory_order_relaxed)
+                        << ", state_age=" << unique_state_age_ms << "ms";
+            }
             
             std::cout << std::endl;
           }
@@ -4275,6 +4483,9 @@ int main(int argc, char const* argv[]) {
     std::cout << "  --dds-domain <id>: DDS domain ID (default: 0)" << std::endl;
     std::cout << "  --init-duration <seconds>: initial pose-ramp duration (default: 3.0)" << std::endl;
     std::cout << "  --isaac-sim: publish Isaac bridge lifecycle markers in LowCmd" << std::endl;
+    std::cout << "  --disable-isaac-state-sync: keep legacy wall-clock 50 Hz control in Isaac mode (A/B only)" << std::endl;
+    std::cout << "  --isaac-stream-lag-frames <N>: retain N streamed reference frames as policy look-ahead "
+              << "in Isaac state-sync mode (default: 20)" << std::endl;
     std::cout << "  --initial-motion <name>: start from this reference-motion folder (default: sorted first motion)" << std::endl;
     std::cout << "  --initial-frame <index>: initial zero-based reference frame (default: 0)" << std::endl;
     std::cout << "  --obs-config <path>: specify observation configuration YAML file" << std::endl;
@@ -4324,6 +4535,8 @@ int main(int argc, char const* argv[]) {
   int ddsDomain = 0;
   double initDuration = 3.0;
   bool isaacSim = false;
+  bool isaacStateSync = true;
+  int isaacStreamLagFrames = 20;
   std::string initialMotionName = "";
   int initialMotionFrame = 0;
   std::string obsConfigPath = "";
@@ -4398,6 +4611,30 @@ int main(int argc, char const* argv[]) {
     } else if (std::string(argv[i]) == "--isaac-sim") {
       isaacSim = true;
       std::cout << "[INFO] Isaac simulation bridge mode enabled" << std::endl;
+    } else if (std::string(argv[i]) == "--disable-isaac-state-sync") {
+      isaacStateSync = false;
+      std::cout << "[INFO] Isaac state-driven control synchronization disabled" << std::endl;
+    } else if (std::string(argv[i]) == "--isaac-stream-lag-frames") {
+      if (i + 1 < argc) {
+        const std::string lag_arg = argv[++i];
+        try {
+          std::size_t parsed_chars = 0;
+          isaacStreamLagFrames = std::stoi(lag_arg, &parsed_chars);
+          if (parsed_chars != lag_arg.size() || isaacStreamLagFrames < 0 ||
+              isaacStreamLagFrames > StreamedMotionMerger::MAX_GAP_FRAMES) {
+            throw std::invalid_argument("lag must be in [0, 200]");
+          }
+        } catch (const std::exception&) {
+          std::cerr << "Error: --isaac-stream-lag-frames must be an integer in [0, 200], got '"
+                    << lag_arg << "'" << std::endl;
+          exit(1);
+        }
+        std::cout << "[INFO] Isaac streamed-reference target lag: "
+                  << isaacStreamLagFrames << " source frames" << std::endl;
+      } else {
+        std::cerr << "Error: --isaac-stream-lag-frames requires an integer argument" << std::endl;
+        exit(1);
+      }
     } else if (std::string(argv[i]) == "--initial-motion") {
       if (i + 1 < argc && std::string(argv[i + 1]).rfind("--", 0) != 0) {
         initialMotionName = argv[++i];
@@ -4700,6 +4937,8 @@ int main(int argc, char const* argv[]) {
     initial_max_close_ratio,
     initDuration,
     isaacSim,
+    isaacStateSync,
+    isaacStreamLagFrames,
     initialMotionName,
     initialMotionFrame
   );
