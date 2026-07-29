@@ -713,7 +713,15 @@ case "$ENV_TYPE" in
     isaac)
         DDS_DOMAIN_DEFAULT="1"
         CRC_CHECK_DEFAULT="enabled"
-        INIT_DURATION_DEFAULT="3.0"
+        # 0.1s, not 3.0s: in --isaac-sim state-sync mode the INIT ramp advances
+        # one control_dt per FRESH Isaac tick, not per wall-clock tick, so 3.0s
+        # means 150 lockstep rounds - roughly 6 minutes over a lossy WiFi link
+        # before "Init Done" appears.  The ramp itself is meaningless against
+        # Isaac anyway: the sim pins the default pose until the CONTROL marker,
+        # so nothing consumes the ramp output.  0.1s = 5 rounds.  The real
+        # robot keeps 3.0s (see the "real" profile below) - do NOT copy this
+        # value there, on hardware the ramp is a safety feature.
+        INIT_DURATION_DEFAULT="0.1"
         ;;
     real)
         DDS_DOMAIN_DEFAULT="0"
