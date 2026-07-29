@@ -1,3 +1,4 @@
+import ipaddress
 import time
 from typing import Any, Callable
 from threading import Thread, Event
@@ -13,7 +14,20 @@ from cyclonedds.util import duration
 from cyclonedds.internal import dds_c_t, InvalidSample
 
 # for channel config
-from .channel_config import ChannelConfigAutoDetermine, ChannelConfigHasInterface, ChannelConfigLoopback
+from .channel_config import (
+    ChannelConfigAutoDetermine,
+    ChannelConfigHasAddress,
+    ChannelConfigHasInterface,
+    ChannelConfigLoopback,
+)
+
+
+def _is_ipv4_literal(value: str) -> bool:
+    try:
+        ipaddress.IPv4Address(value)
+        return True
+    except ValueError:
+        return False
 
 # for singleton
 from ..utils.singleton import Singleton
@@ -208,6 +222,11 @@ class ChannelFactory(Singleton):
             if networkInterface == "127.0.0.1":
                 networkInterface = "lo"
             config = ChannelConfigLoopback.replace('$__IF_NAME__$', networkInterface)
+        elif _is_ipv4_literal(networkInterface):
+            # An IPv4 literal must be matched through address=; name= rejects
+            # it.  This is the only working form on Windows, where CycloneDDS
+            # matches neither the friendly adapter name nor an IP by name=.
+            config = ChannelConfigHasAddress.replace('$__IF_ADDR__$', networkInterface)
         else:
             config = ChannelConfigHasInterface.replace('$__IF_NAME__$', networkInterface)
 
