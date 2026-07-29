@@ -1,4 +1,5 @@
 import ipaddress
+import os
 import time
 from typing import Any, Callable
 from threading import Thread, Event
@@ -17,6 +18,7 @@ from cyclonedds.internal import dds_c_t, InvalidSample
 from .channel_config import (
     ChannelConfigAutoDetermine,
     ChannelConfigHasAddress,
+    ChannelConfigHasAddressUnicast,
     ChannelConfigHasInterface,
     ChannelConfigLoopback,
 )
@@ -226,7 +228,20 @@ class ChannelFactory(Singleton):
             # An IPv4 literal must be matched through address=; name= rejects
             # it.  This is the only working form on Windows, where CycloneDDS
             # matches neither the friendly adapter name nor an IP by name=.
-            config = ChannelConfigHasAddress.replace('$__IF_ADDR__$', networkInterface)
+            #
+            # UNITREE_DDS_PEERS (comma-separated peer IPs) switches to the
+            # unicast-only template: WiFi APs throttle multicast so badly that
+            # the Isaac lockstep dropped to ~0.4Hz; forcing unicast fixes it.
+            peers = os.environ.get("UNITREE_DDS_PEERS", "").strip()
+            if peers:
+                peer_xml = "".join(
+                    '<Peer address="%s"/>' % p.strip()
+                    for p in peers.split(",") if p.strip()
+                )
+                config = ChannelConfigHasAddressUnicast.replace(
+                    '$__IF_ADDR__$', networkInterface).replace('$__PEERS__$', peer_xml)
+            else:
+                config = ChannelConfigHasAddress.replace('$__IF_ADDR__$', networkInterface)
         else:
             config = ChannelConfigHasInterface.replace('$__IF_NAME__$', networkInterface)
 

@@ -38,6 +38,41 @@ ChannelConfigHasAddress = '''<?xml version="1.0" encoding="UTF-8" ?>
         </Domain>
     </CycloneDDS>'''
 
+# Unicast-data variant of the address= template, selected when the
+# UNITREE_DDS_PEERS environment variable lists the peer IP(s).  Made for WiFi
+# links: APs forward multicast at a throttled base rate and batch it into
+# beacon intervals, which crushed the Isaac lockstep to ~0.4Hz (LowState sent
+# at ~90Hz arrived at ~1.2Hz) while unicast traffic on the same link ran at
+# 464Hz with 2.5ms RTT.
+#
+# AllowMulticast=spdp - NOT false: discovery (SPDP) stays on multicast, which
+# is low-rate and tolerant of AP batching AND lets an unmodified multicast
+# peer (the C++ deploy binary) find us; only user data is forced onto unicast.
+# A full false cut discovery both ways (lowcmd dropped to 0Hz: the peer's
+# multicast SPDP announcements never reached us).  <Peers> is kept as a
+# unicast discovery bootstrap to speed things up.
+ChannelConfigHasAddressUnicast = '''<?xml version="1.0" encoding="UTF-8" ?>
+    <CycloneDDS>
+        <Domain Id="any">
+            <General>
+                <Interfaces>
+                    <NetworkInterface address="$__IF_ADDR__$" priority="default" multicast="default"/>
+                </Interfaces>
+                <AllowMulticast>spdp</AllowMulticast>
+            </General>
+            <Discovery>
+                <ParticipantIndex>auto</ParticipantIndex>
+                <MaxAutoParticipantIndex>32</MaxAutoParticipantIndex>
+                <Peers>
+                    $__PEERS__$
+                </Peers>
+            </Discovery>
+            <Internal>
+                <HeartbeatInterval min="2ms" max="20ms">5ms</HeartbeatInterval>
+            </Internal>
+        </Domain>
+    </CycloneDDS>'''
+
 ChannelConfigLoopback = '''<?xml version="1.0" encoding="UTF-8" ?>
     <CycloneDDS>
         <Domain Id="any">
