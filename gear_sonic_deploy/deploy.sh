@@ -210,12 +210,28 @@ interface_has_ip() {
 }
 
 # Resolve interface parameter to actual network interface name and environment type
-# Arguments: interface - "sim", "isaac", "real", or direct interface name or IP address
+# Arguments: interface - "sim", "isaac", "real", "isaac:<iface>", or direct
+#            interface name or IP address
 # Outputs: Sets TARGET and ENV_TYPE variables
 resolve_interface() {
     local interface="$1"
     local os_type="$(uname)"
-    
+
+    # "isaac:<iface>" - Isaac Lab profile over a real NIC, for the cross-machine
+    # setup where the simulator runs on another host.  Plain "isaac" pins the
+    # loopback, and a bare interface name would be classified as "real", which
+    # silently drops --isaac-sim and moves the DDS domain from 1 to 0.  This
+    # form keeps the Isaac profile while letting DDS off the loopback.
+    if [[ "$interface" == isaac:* ]]; then
+        TARGET="${interface#isaac:}"
+        if [[ -z "$TARGET" ]]; then
+            echo -e "${RED}Error: 'isaac:<interface>' requires an interface name, e.g. isaac:enp4s0${NC}" >&2
+            return 1
+        fi
+        ENV_TYPE="isaac"
+        return 0
+    fi
+
     # Check if interface is an IP address
     if is_ip_address "$interface"; then
         if [[ "$interface" == "127.0.0.1" ]]; then
@@ -319,7 +335,7 @@ resolve_interface() {
 # ============================================================================
 
 show_usage() {
-    echo "Usage: $0 [OPTIONS] [sim|isaac|real|<interface>]"
+    echo "Usage: $0 [OPTIONS] [sim|isaac|isaac:<interface>|real|<interface>]"
     echo ""
     echo "Options:"
     echo "  -h, --help              Show this help message"
