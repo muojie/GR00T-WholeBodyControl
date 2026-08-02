@@ -2237,6 +2237,9 @@ class G1Deploy {
       // Initialize ChannelFactory
       ChannelFactory::Instance()->Init(dds_domain, networkInterface);
       std::cout << "[INFO] DDS domain: " << dds_domain << std::endl;
+      // 现场核对话题前缀（默认必须仍是 rt/lowcmd, rt/lowstate, rt/secondary_imu）。
+      std::cout << "[INFO] DDS topics: " << HG_CMD_TOPIC << ", " << HG_STATE_TOPIC
+                << ", " << HG_IMU_TORSO << std::endl;
       std::cout << "[INFO] Initial pose-ramp duration: " << duration_ << " s" << std::endl;
       if (isaac_sim_) {
         std::cout << "[INFO] Isaac bridge state markers enabled" << std::endl;

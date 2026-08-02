@@ -46,6 +46,7 @@
 #include <unitree/robot/channel/channel_publisher.hpp>
 #include <unitree/robot/channel/channel_subscriber.hpp>
 
+#include "robot_parameters.hpp"
 #include "utils.hpp"
 
 static constexpr int DEX3_MOTOR_MAX = 7;    ///< Number of motors per Dex3 hand.
@@ -71,12 +72,15 @@ public:
             unitree::robot::ChannelFactory::Instance()->Init(0, networkInterface.c_str());
         }
 
+        // Hand namespaces follow the same SONIC_DDS_TOPIC_PREFIX as lowcmd/lowstate
+        // (robot_parameters.hpp) so a second deploy instance moves as one unit.
+        const std::string topicPrefix = sonic_topic_prefix();
         // Left hand namespaces
-        const std::string leftPubNs = "rt/dex3/left";
-        const std::string leftSubNs = "rt/dex3/left/state";
+        const std::string leftPubNs = topicPrefix + "/dex3/left";
+        const std::string leftSubNs = topicPrefix + "/dex3/left/state";
         // Right hand namespaces
-        const std::string rightPubNs = "rt/dex3/right";
-        const std::string rightSubNs = "rt/dex3/right/state";
+        const std::string rightPubNs = topicPrefix + "/dex3/right";
+        const std::string rightSubNs = topicPrefix + "/dex3/right/state";
 
 
         // initialize left hand cmd with default value

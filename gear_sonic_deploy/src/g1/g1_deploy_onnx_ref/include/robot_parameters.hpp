@@ -20,13 +20,28 @@
 #define ROBOT_PARAMETERS_HPP
 
 #include <array>
+#include <cstdlib>
+#include <string>
 
 // ---------------------------------------------------------------------------
 // Unitree SDK DDS topic names
+//
+// SONIC_DDS_TOPIC_PREFIX（环境变量，默认 "rt"）：host 双机器人模式的第二套 deploy
+// 传 "rt/r2" → rt/r2/lowcmd 等，与 Isaac 侧 g129_r2 通道对接。尾部斜杠会被剥掉。
+// ⚠️ 这些常量是 namespace 级 static，在 main() 之前初始化——参数化只能走环境变量，
+// 改成 CLI 参数 + main 里 setenv 会静默失效（静态初始化早已完成）。
 // ---------------------------------------------------------------------------
-static const std::string HG_CMD_TOPIC = "rt/lowcmd";       ///< Low-level motor command topic.
-static const std::string HG_IMU_TORSO = "rt/secondary_imu";///< Secondary (torso) IMU topic.
-static const std::string HG_STATE_TOPIC = "rt/lowstate";    ///< Low-level motor / sensor state topic.
+inline std::string sonic_topic_prefix() {
+    const char* p = std::getenv("SONIC_DDS_TOPIC_PREFIX");
+    std::string s = (p && *p) ? p : "rt";
+    while (!s.empty() && s.back() == '/') s.pop_back();
+    if (s.empty()) s = "rt";
+    return s;
+}
+
+static const std::string HG_CMD_TOPIC = sonic_topic_prefix() + "/lowcmd";       ///< Low-level motor command topic.
+static const std::string HG_IMU_TORSO = sonic_topic_prefix() + "/secondary_imu";///< Secondary (torso) IMU topic.
+static const std::string HG_STATE_TOPIC = sonic_topic_prefix() + "/lowstate";    ///< Low-level motor / sensor state topic.
 
 /// Total number of actuated joints on the G1 (29-DOF configuration).
 const int G1_NUM_MOTOR = 29;
