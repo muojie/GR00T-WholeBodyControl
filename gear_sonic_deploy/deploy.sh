@@ -83,7 +83,12 @@ if [[ -f "$NETWORK_CONFIG_FILE" ]]; then
         value="${value%\'}"
         value="${value#\'}"
         value="$(expand_env_value "$value")"
-        [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && export "$key=$value"
+        # 进程环境优先（与 Isaac 侧 scene_sync.env 的单轨制一致）：文件值只作默认。
+        # 此前无条件 export 会吃掉命令行传的 per-process 身份——
+        # G1_LOCAL_ROBOT_ID=2 ./deploy.sh 被文件里的 =1 覆盖，第二实例静默变第一实例。
+        if [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && -z "${!key+x}" ]]; then
+            export "$key=$value"
+        fi
     done < "$NETWORK_CONFIG_FILE"
     echo -e "${CYAN}Loaded network config: $NETWORK_CONFIG_FILE${NC}"
 fi
