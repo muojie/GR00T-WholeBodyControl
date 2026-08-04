@@ -279,6 +279,40 @@ OFFSETS = [
 ]
 
 
+BODY_JOINT_COUNT = 24
+BODY_POSE_SIZE = 7
+MIN_QUATERNION_NORM = 1e-8
+
+
+def _body_pose_validation_error(body_poses_np: np.ndarray) -> str | None:
+    """Return a diagnostic message when a Pico SMPL frame is unusable."""
+    if body_poses_np.shape != (BODY_JOINT_COUNT, BODY_POSE_SIZE):
+        return (
+            f"expected shape ({BODY_JOINT_COUNT}, {BODY_POSE_SIZE}), "
+            f"got {body_poses_np.shape}"
+        )
+
+    non_finite_rows = np.flatnonzero(~np.isfinite(body_poses_np).all(axis=1))
+    if non_finite_rows.size:
+        return f"non-finite values at joints {non_finite_rows.tolist()}"
+
+    quat_norms = np.linalg.norm(body_poses_np[:, 3:7], axis=1)
+    invalid_quat_rows = np.flatnonzero(quat_norms < MIN_QUATERNION_NORM)
+    if invalid_quat_rows.size:
+        return f"zero/near-zero quaternions at joints {invalid_quat_rows.tolist()}"
+
+    return None
+
+
+def _require_valid_body_poses(body_poses_np: np.ndarray) -> np.ndarray:
+    """Validate and return a Pico SMPL frame before quaternion conversion."""
+    body_poses_np = np.asarray(body_poses_np)
+    error = _body_pose_validation_error(body_poses_np)
+    if error is not None:
+        raise ValueError(f"Invalid Pico body pose frame: {error}")
+    return body_poses_np
+
+
 def _compute_rel_transform(pose, world_frame, scalar_first=True):
     """
     Transform a pose from Unity coordinate frame to robot coordinate frame.
@@ -343,6 +377,8 @@ def _process_3pt_pose(smpl_pose_np):
           ThreePointPose.apply_calibration() to ensure consistency with calibrated
           orientations.
     """
+
+    smpl_pose_np = _require_valid_body_poses(smpl_pose_np)
 
     # Defensive copy: _compute_rel_transform modifies pose[:3] in-place, which would
     # corrupt the caller's array (e.g. PicoReader._latest) and cause wrong results
@@ -701,6 +737,7 @@ def compute_from_body_poses(parent_indices: list, device, body_poses_np: np.ndar
     """
     Compute local joints and body orientation from provided body_poses_np.
     """
+    body_poses_np = _require_valid_body_poses(body_poses_np)
     positions = body_poses_np[:, :3]
     global_quats = body_poses_np[:, [6, 3, 4, 5]]
 
@@ -916,6 +953,8 @@ class PicoReader:
 
     def _run(self):
         last_report = time.time()
+        last_invalid_report = 0.0
+        invalid_frame_count = 0
         while not self._stop.is_set():
             if not xrt.is_body_data_available():
                 time.sleep(0.001)
@@ -935,9 +974,28 @@ class PicoReader:
             t_monotonic = time.monotonic()
             try:
                 body_poses = xrt.get_body_joints_pose()
+                body_poses_np = np.asarray(body_poses)
+                validation_error = _body_pose_validation_error(body_poses_np)
+                if validation_error is not None:
+                    invalid_frame_count += 1
+                    now = time.time()
+                    if now - last_invalid_report >= 5.0:
+                        print(
+                            "[PicoReader] WARNING: Dropping invalid body frame "
+                            f"(count={invalid_frame_count}): {validation_error}"
+                        )
+                        last_invalid_report = now
+                    continue
+
+                if invalid_frame_count:
+                    print(
+                        "[PicoReader] Body tracking recovered after "
+                        f"{invalid_frame_count} invalid frame(s)"
+                    )
+                    invalid_frame_count = 0
 
                 sample = {
-                    "body_poses_np": np.array(body_poses),
+                    "body_poses_np": body_poses_np,
                     "timestamp_realtime": t_realtime,
                     "timestamp_monotonic": t_monotonic,
                     "timestamp_ns": stamp_ns,
