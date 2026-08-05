@@ -184,6 +184,80 @@ class XrClient:
         with self._udp_lock:
             return self._latest_tracking
 
+    def get_latest_receive_monotonic_time(self) -> float | None:
+        """Return when the latest valid UDP tracking packet was received.
+
+        The SDK transport does not expose a host receive timestamp.  UDP does,
+        and callers that enforce input freshness should prefer this value over
+        an optional device timestamp embedded in the JSON payload.
+        """
+        if self.transport == "sdk":
+            return None
+
+        with self._udp_lock:
+            received_at = self._latest_monotonic_time
+        return received_at if received_at > 0.0 else None
+
+    def get_scene_reset_input_snapshot(self) -> dict[str, Any] | None:
+        """Atomically return the complete UDP input required by the reset gate.
+
+        Missing buttons or axes invalidate the whole snapshot.  In particular,
+        absent joystick fields must not be interpreted as centered sticks.
+        """
+        if self.transport == "sdk":
+            return None
+
+        with self._udp_lock:
+            tracking = self._latest_tracking
+            received_at = self._latest_monotonic_time
+            if tracking is None or received_at <= 0.0:
+                return None
+
+            controller = tracking.get("Controller")
+            if not isinstance(controller, dict):
+                return None
+            left = controller.get("left")
+            right = controller.get("right")
+            if not isinstance(left, dict) or not isinstance(right, dict):
+                return None
+
+            required_left = ("primaryButton", "secondaryButton", "axisX", "axisY")
+            required_right = ("primaryButton", "secondaryButton", "axisX", "axisY")
+            if not all(key in left for key in required_left) or not all(
+                key in right for key in required_right
+            ):
+                return None
+
+            try:
+                def parse_button(value: Any) -> bool:
+                    if isinstance(value, bool):
+                        return value
+                    if isinstance(value, (int, float)) and value in (0, 1):
+                        return bool(value)
+                    raise ValueError("invalid controller button value")
+
+                axes = (
+                    float(left["axisX"]),
+                    float(left["axisY"]),
+                    float(right["axisX"]),
+                    float(right["axisY"]),
+                )
+                a_pressed = parse_button(right["primaryButton"])
+                b_pressed = parse_button(right["secondaryButton"])
+                x_pressed = parse_button(left["primaryButton"])
+                y_pressed = parse_button(left["secondaryButton"])
+            except (TypeError, ValueError):
+                return None
+
+            return {
+                "a_pressed": a_pressed,
+                "b_pressed": b_pressed,
+                "x_pressed": x_pressed,
+                "y_pressed": y_pressed,
+                "axes": axes,
+                "received_monotonic": received_at,
+            }
+
     def get_pose_by_name(self, name: str) -> np.ndarray:
         """Returns pose [x, y, z, qx, qy, qz, qw] by name."""
         if self.transport == "sdk":
@@ -392,9 +466,11 @@ class XrClient:
         if self.transport == "sdk":
             return self._xrt.get_time_stamp_ns()
 
-        tracking = self._get_latest_tracking()
+        with self._udp_lock:
+            tracking = self._latest_tracking
+            received_at = self._latest_monotonic_time
         if tracking is None:
-            return time.time_ns()
+            return 0
 
         body = tracking.get("Body")
         if isinstance(body, dict) and "timeStampNs" in body:
@@ -403,7 +479,14 @@ class XrClient:
         if "timeStampNs" in tracking:
             return int(tracking["timeStampNs"])
 
-        return time.time_ns()
+        packet_timestamp_ms = tracking.get("_packet_timestamp_ms")
+        if packet_timestamp_ms is not None:
+            return int(packet_timestamp_ms) * 1_000_000
+
+        # Never synthesize a fresh timestamp on every read: after UDP stops,
+        # doing so makes a stale pose/button frame look live forever.  The host
+        # receive time changes only when a valid packet actually arrives.
+        return int(received_at * 1_000_000_000) if received_at > 0.0 else 0
 
     def get_hand_tracking_state(self, hand: str) -> np.ndarray | None:
         """Returns the hand tracking state for the specified hand, or None if unavailable."""

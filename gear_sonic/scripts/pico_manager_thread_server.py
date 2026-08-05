@@ -24,6 +24,7 @@
 
 from collections import defaultdict, deque
 from enum import Enum, IntEnum
+import math
 import os
 import subprocess
 import threading
@@ -35,6 +36,10 @@ from scipy.spatial.transform import Rotation as R, Rotation as sRot
 import torch
 import zmq
 
+from gear_sonic.utils.teleop.controls.scene_reset import (
+    ExclusiveXLongPress,
+    IsaacSceneResetPublisher,
+)
 from gear_sonic.utils.teleop.zmq.zmq_poller import ZMQPoller
 from gear_sonic.trl.utils.rotation_conversion import decompose_rotation_aa
 from gear_sonic.trl.utils.torch_transform import (
@@ -119,6 +124,11 @@ class XRoboToolkitBackend:
         if self.uses_sdk_service():
             return self._sdk.get_time_stamp_ns()
         return self._udp_client.get_timestamp_ns()
+
+    def get_scene_reset_input_snapshot(self):
+        if self.uses_sdk_service() or self._udp_client is None:
+            return None
+        return self._udp_client.get_scene_reset_input_snapshot()
 
     def get_body_joints_pose(self):
         if self.uses_sdk_service():
@@ -809,6 +819,27 @@ def get_controller_axes():
         return 0.0, 0.0, 0.0, 0.0
 
 
+def get_controller_axes_for_reset():
+    """Fetch all four axes without a zero fallback for the reset safety gate."""
+    if xrt is None:
+        return ()
+    try:
+        left_axis = xrt.get_left_axis()
+        right_axis = xrt.get_right_axis()
+        if len(left_axis) < 2 or len(right_axis) < 2:
+            return ()
+        return (
+            float(left_axis[0]),
+            float(left_axis[1]),
+            float(right_axis[0]),
+            float(right_axis[1]),
+        )
+    except Exception:
+        # An unavailable axis must cancel reset arming. Treating a read error as
+        # centered sticks would turn missing safety input into permission.
+        return ()
+
+
 def get_menu_buttons():
     """Fetch both menu buttons (left, right). Falls back to False if not available."""
     if xrt is None:
@@ -877,6 +908,21 @@ def get_abxy_buttons():
             _abxy_warn_last = now
             print(f"[Buttons] WARNING: A/B/X/Y read failed, treating as not pressed: {e}")
         return False, False, False, False
+
+
+def get_abxy_buttons_for_reset():
+    """Fetch all face buttons without an all-false fallback for the reset gate."""
+    if xrt is None:
+        return None
+    try:
+        return (
+            bool(xrt.get_A_button()),
+            bool(xrt.get_B_button()),
+            bool(xrt.get_X_button()),
+            bool(xrt.get_Y_button()),
+        )
+    except Exception:
+        return None
 
 
 def compute_hand_joints_from_inputs(
@@ -1881,7 +1927,7 @@ class PlannerStreamer:
             )
             self.three_point.reset_with_measured_q(np.zeros(29, dtype=np.float64))
 
-    def run_once(self, stream_mode: StreamMode):
+    def run_once(self, stream_mode: StreamMode, suppress_x_combos: bool = False):
         """Execute one iteration of the planner control loop."""
         try:
             # Avoid sending old commands if XRT timestamp hasn't advanced, in case of headset disconnect
@@ -1893,7 +1939,7 @@ class PlannerStreamer:
             # A+B => next mode; X+Y => previous mode (rising edges)
             a_pressed, b_pressed, x_pressed, y_pressed = get_abxy_buttons()
             ab_now = bool(a_pressed) and bool(b_pressed)
-            xy_now = bool(x_pressed) and bool(y_pressed)
+            xy_now = bool(x_pressed) and bool(y_pressed) and not suppress_x_combos
             if ab_now and not self.prev_ab:
                 self.mode = LocomotionMode(min(LocomotionMode.INJURED_WALK, self.mode + 1))
                 print(f"[PlannerLoop] Mode -> {self.mode.value}: {self.mode.name}")
@@ -2022,12 +2068,18 @@ def run_pico_manager(
     enable_waist_tracking: bool = False,
     enable_smpl_vis: bool = False,
     auto_pose: bool = True,
+    enable_isaac_scene_reset: bool = False,
+    scene_reset_hold_seconds: float = 2.0,
+    scene_reset_input_max_age: float = 0.5,
+    scene_reset_dds_domain: int | None = None,
+    scene_reset_dds_interface: str | None = None,
 ):
     """
     Manager: creates shared PUB socket and runs pose/planner streamers based on current mode.
     Controller input:
       A+X: Toggle between planner and pose mode
       A+B+X+Y: Toggle policy start/stop
+      X alone: when explicitly enabled, hold with neutral sticks to reset Isaac
     auto_pose: when True (default), skip the A+B+X+Y / A+X sequence — as soon as the
       first body-tracking sample arrives, calibrate on it and enter POSE mode directly.
       A+B+X+Y still works as emergency stop from any mode.
@@ -2047,6 +2099,31 @@ def run_pico_manager(
     socket.bind(f"tcp://*:{port}")
     time.sleep(0.1)
     print(f"[Manager] ZMQ socket bound to port {port}")
+
+    scene_reset_publisher = None
+    scene_reset_gate = None
+    if enable_isaac_scene_reset:
+        try:
+            scene_reset_publisher = IsaacSceneResetPublisher(
+                domain=scene_reset_dds_domain,
+                interface=scene_reset_dds_interface,
+            )
+            scene_reset_gate = ExclusiveXLongPress(
+                hold_seconds=scene_reset_hold_seconds,
+                input_max_age=scene_reset_input_max_age,
+                joystick_deadzone=JOYSTICK_DEADZONE,
+            )
+            print(
+                "[SceneReset] enabled: hold left X alone for "
+                f"{scene_reset_hold_seconds:.1f}s with both sticks centered "
+                f"(input age <= {scene_reset_input_max_age:.2f}s)"
+            )
+        except Exception as exc:
+            if scene_reset_publisher is not None:
+                scene_reset_publisher.close()
+            scene_reset_publisher = None
+            scene_reset_gate = None
+            print(f"[SceneReset] ERROR: initialization failed; reset disabled: {exc}")
 
     # Print available locomotion modes
     try:
@@ -2137,8 +2214,60 @@ def run_pico_manager(
 
             left_axis_click, _ = get_axis_clicks()
 
+            # Isaac scene reset is deliberately X-only and available only when
+            # the manager was started with --enable_isaac_scene_reset.  Fresh
+            # transport input prevents a disconnected GameLink's last X=1
+            # packet from eventually satisfying the hold timer.
+            scene_reset_x_latched = False
+            if scene_reset_gate is not None and scene_reset_publisher is not None:
+                reset_now = time.monotonic()
+                if xrt.uses_sdk_service():
+                    reset_buttons = get_abxy_buttons_for_reset()
+                    reset_axes = get_controller_axes_for_reset()
+                    latest_sample = reader.get_latest()
+                    latest_sample_time = (
+                        latest_sample.get("timestamp_monotonic")
+                        if latest_sample is not None
+                        else None
+                    )
+                else:
+                    # One locked UDP snapshot prevents mixing X from one packet
+                    # with buttons/axes/freshness from another.  Missing fields
+                    # fail closed instead of defaulting the sticks to center.
+                    reset_snapshot = xrt.get_scene_reset_input_snapshot()
+                    if reset_snapshot is None:
+                        reset_buttons = None
+                        reset_axes = ()
+                        latest_sample_time = None
+                    else:
+                        reset_buttons = (
+                            reset_snapshot["a_pressed"],
+                            reset_snapshot["b_pressed"],
+                            reset_snapshot["x_pressed"],
+                            reset_snapshot["y_pressed"],
+                        )
+                        reset_axes = reset_snapshot["axes"]
+                        latest_sample_time = reset_snapshot["received_monotonic"]
+
+                if reset_buttons is None:
+                    reset_a = reset_b = reset_y = False
+                    reset_x = None
+                else:
+                    reset_a, reset_b, reset_x, reset_y = reset_buttons
+                if scene_reset_gate.update(
+                    now=reset_now,
+                    x_pressed=reset_x,
+                    other_face_pressed=reset_a or reset_b or reset_y,
+                    axes=reset_axes,
+                    sample_monotonic=latest_sample_time,
+                ):
+                    scene_reset_publisher.publish_full_scene_reset()
+                scene_reset_x_latched = scene_reset_gate.latched
+
             # Rising edge: A+X pressed together -> toggle POSE/PLANNER mode
-            ax_pressed = (a_pressed) and (x_pressed)
+            # Once a reset has consumed this X press, X must be released before
+            # it can participate in A+X or X+Y mode changes.
+            ax_pressed = (a_pressed) and (x_pressed) and not scene_reset_x_latched
 
             # Rising edge: B+Y pressed together -> toggle POSE/PLANNER_FROZEN_UPPER_BODY mode
             by_pressed = (b_pressed) and (y_pressed)
@@ -2286,7 +2415,10 @@ def run_pico_manager(
                 or new_mode == StreamMode.PLANNER_FROZEN_UPPER_BODY
                 or new_mode == StreamMode.PLANNER_VR_3PT
             ):
-                planner_streamer.run_once(new_mode)
+                planner_streamer.run_once(
+                    new_mode,
+                    suppress_x_combos=scene_reset_x_latched,
+                )
 
             # Make sure to send command messages after loop iteration to ensure data arrives before mode switch
             if new_mode != current_mode:
@@ -2340,6 +2472,8 @@ def run_pico_manager(
         # Cleanup resources
         reader.stop()
         three_point.close()
+        if scene_reset_publisher is not None:
+            scene_reset_publisher.close()
         socket.close()
         context.term()
         print("[Manager] Shutdown complete")
@@ -2434,7 +2568,46 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable auto-entering POSE mode on first data; require A+B+X+Y then A+X buttons",
     )
+    parser.add_argument(
+        "--enable_isaac_scene_reset",
+        action="store_true",
+        help="Enable a guarded left-X long press that publishes an Isaac full-scene DDS reset",
+    )
+    parser.add_argument(
+        "--scene_reset_hold_seconds",
+        type=float,
+        default=2.0,
+        help="Seconds left X must be held alone with centered sticks (default: 2.0)",
+    )
+    parser.add_argument(
+        "--scene_reset_input_max_age",
+        type=float,
+        default=0.5,
+        help="Maximum age of Pico input while arming scene reset (default: 0.5)",
+    )
+    parser.add_argument(
+        "--scene_reset_dds_domain",
+        type=int,
+        default=None,
+        help="DDS domain for scene reset; defaults to UNITREE_DDS_DOMAIN or 1",
+    )
+    parser.add_argument(
+        "--scene_reset_dds_interface",
+        type=str,
+        default=None,
+        help="DDS interface for scene reset; defaults to UNITREE_DDS_INTERFACE or lo",
+    )
     args = parser.parse_args()
+    if (
+        not math.isfinite(args.scene_reset_hold_seconds)
+        or args.scene_reset_hold_seconds <= 0.0
+    ):
+        parser.error("--scene_reset_hold_seconds must be finite and positive")
+    if (
+        not math.isfinite(args.scene_reset_input_max_age)
+        or args.scene_reset_input_max_age <= 0.0
+    ):
+        parser.error("--scene_reset_input_max_age must be finite and positive")
 
     # Standalone VR3Pt test modes (exit after finishing)
     if args.vr3pt_test:
@@ -2475,6 +2648,11 @@ if __name__ == "__main__":
             enable_waist_tracking=args.waist_tracking,
             enable_smpl_vis=args.vis_smpl,
             auto_pose=not args.no_auto_pose,
+            enable_isaac_scene_reset=args.enable_isaac_scene_reset,
+            scene_reset_hold_seconds=args.scene_reset_hold_seconds,
+            scene_reset_input_max_age=args.scene_reset_input_max_age,
+            scene_reset_dds_domain=args.scene_reset_dds_domain,
+            scene_reset_dds_interface=args.scene_reset_dds_interface,
         )
     else:
         # Run legacy single-thread pose streaming
